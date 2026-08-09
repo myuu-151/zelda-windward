@@ -513,7 +513,13 @@ int main(int argc, char** argv)
                 app.cam.yaw += dy * k;
                 app.cam.pitch += (0.18f - app.cam.pitch) * k;  // low, dramatic
             }
-            const Vec3 lock_target = lerp(head, kTargetPos + Vec3{0, 0.5f, 0}, 0.15f);
+            // bias toward the cube by a CAPPED offset so backing away from it
+            // doesn't slide Link toward the lens (fake zoom)
+            Vec3 to_cube = (kTargetPos + Vec3{0, 0.5f, 0}) - head;
+            const float cube_dist = std::sqrt(dot(to_cube, to_cube));
+            const float bias = std::min(0.6f, cube_dist * 0.15f);
+            const Vec3 lock_target =
+                cube_dist > 1e-4f ? head + to_cube * (bias / cube_dist) : head;
             app.cam.target = lerp(head, lock_target, app.lock_blend);
         }
 

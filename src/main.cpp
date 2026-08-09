@@ -173,6 +173,9 @@ struct App {
 
     Player player;
     float lock_blend = 0.0f;   // eased 0..1 lock-on camera engagement
+    float free_yaw = 0.6f;     // camera angle to restore after lock-on
+    float free_pitch = 0.35f;
+    bool was_locked = false;
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
@@ -486,6 +489,19 @@ int main(int argc, char** argv)
             const Vec3 head = app.player.pos + Vec3{0, 0.85f, 0};
             const float k = std::min(1.0f, 3.5f * static_cast<float>(frame_dt));
             app.lock_blend += ((app.player.locked ? 1.0f : 0.0f) - app.lock_blend) * k;
+            if (app.player.locked && !app.was_locked) {
+                app.free_yaw = app.cam.yaw;  // remember the pre-lock angle
+                app.free_pitch = app.cam.pitch;
+            }
+            app.was_locked = app.player.locked;
+            if (!app.player.locked && app.lock_blend > 0.01f && !app.dragging) {
+                // ease back to where the camera was before locking on
+                float dy = app.free_yaw - app.cam.yaw;
+                while (dy > 3.14159265f) dy -= 6.2831853f;
+                while (dy < -3.14159265f) dy += 6.2831853f;
+                app.cam.yaw += dy * k;
+                app.cam.pitch += (app.free_pitch - app.cam.pitch) * k;
+            }
             if (app.player.locked) {
                 Vec3 away = app.player.pos - kTargetPos;
                 away.y = 0;

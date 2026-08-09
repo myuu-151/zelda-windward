@@ -23,6 +23,7 @@ namespace {
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kFixedDt = 1.0 / 60.0;
+constexpr Vec3 kTargetPos{0.0f, 0.35f, 4.0f};  // the lock-on cube
 
 const char* kSkinVS = R"GLSL(
 #version 330 core
@@ -69,6 +70,22 @@ void main() {
     float light = ndl > 0.35 ? 1.0 : 0.72;
     fragColor = vec4(albedo.rgb * light, albedo.a);
 }
+)GLSL";
+
+const char* kCubeVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in float aShade;
+uniform mat4 uViewProj;
+out float vShade;
+void main() { vShade = aShade; gl_Position = uViewProj * vec4(aPos, 1.0); }
+)GLSL";
+
+const char* kCubeFS = R"GLSL(
+#version 330 core
+in float vShade;
+out vec4 fragColor;
+void main() { fragColor = vec4(vec3(0.75, 0.45, 0.25) * vShade, 1.0); }
 )GLSL";
 
 const char* kGridVS = R"GLSL(
@@ -283,6 +300,54 @@ int main(int argc, char** argv)
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
     glBindVertexArray(0);
 
+    // target cube (per-face shade for readability)
+    const GLuint cube_prog = link_program(kCubeVS, kCubeFS);
+    const GLint c_viewproj = glGetUniformLocation(cube_prog, "uViewProj");
+    std::vector<float> cube;
+    {
+        const float h = 0.35f;
+        const Vec3 c = kTargetPos;
+        const float faces[6][4] = {  // axis, sign, shade
+            {0, 1, 0, 0.85f}, {0, -1, 0, 0.55f}, {1, 1, 0, 1.0f},
+            {1, -1, 0, 0.4f}, {2, 1, 0, 0.7f}, {2, -1, 0, 0.7f}};
+        for (const auto& f : faces) {
+            const int axis = static_cast<int>(f[0]);
+            const float sgn = f[1];
+            const float shade = f[3];
+            const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+            float base[3] = {c.x, c.y, c.z};
+            base[axis] += sgn * h;
+            const float du[2] = {-h, h};
+            float quad[4][3];
+            int corner = 0;
+            for (const float su : du)
+                for (const float sv : du) {
+                    float p[3] = {base[0], base[1], base[2]};
+                    p[u] += su;
+                    p[v] += sv;
+                    for (int k = 0; k < 3; ++k) quad[corner][k] = p[k];
+                    ++corner;
+                }
+            const int tri[6] = {0, 1, 2, 2, 1, 3};
+            for (const int idx : tri) {
+                cube.insert(cube.end(), quad[idx], quad[idx] + 3);
+                cube.push_back(shade);
+            }
+        }
+    }
+    GLuint cube_vao = 0, cube_vbo = 0;
+    glGenVertexArrays(1, &cube_vao);
+    glBindVertexArray(cube_vao);
+    glGenBuffers(1, &cube_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, cube_vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(cube.size() * sizeof(float)),
+                 cube.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void*>(12));
+    glBindVertexArray(0);
+
     Uint64 prev_ns = SDL_GetTicksNS();
     double accumulator = 0.0;
     Uint64 fps_frames = 0;
@@ -396,6 +461,8 @@ int main(int argc, char** argv)
                 in.attack_pressed = app.key_attack;
                 in.roll_pressed = app.key_roll;
                 in.guard_held = guard;
+                in.has_target = true;
+                in.target_pos = kTargetPos;
                 app.key_attack = app.key_roll = false;
                 app.player.update(in, static_cast<float>(kFixedDt));
             }
@@ -413,8 +480,23 @@ int main(int argc, char** argv)
             }
         } else {
             app.player.anim.apply(app.link);
-            // camera follows the character
-            app.cam.target = app.player.pos + Vec3{0, 0.85f, 0};
+            // camera: free-follow, or ease into the lock-on framing
+            const Vec3 head = app.player.pos + Vec3{0, 0.85f, 0};
+            if (app.player.locked) {
+                Vec3 away = app.player.pos - kTargetPos;
+                away.y = 0;
+                const float want_yaw = std::atan2(away.x, away.z);
+                float dy = want_yaw - app.cam.yaw;
+                while (dy > 3.14159265f) dy -= 6.2831853f;
+                while (dy < -3.14159265f) dy += 6.2831853f;
+                const float k = std::min(1.0f, 5.0f * static_cast<float>(frame_dt));
+                app.cam.yaw += dy * k;
+                app.cam.pitch += (0.32f - app.cam.pitch) * k;
+                // frame both the player and the cube
+                app.cam.target = lerp(head, kTargetPos + Vec3{0, 0.5f, 0}, 0.3f);
+            } else {
+                app.cam.target = head;
+            }
         }
 
         // render
@@ -434,6 +516,11 @@ int main(int argc, char** argv)
         glUniformMatrix4fv(g_viewproj, 1, GL_FALSE, viewproj.m);
         glBindVertexArray(grid_vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        glUseProgram(cube_prog);
+        glUniformMatrix4fv(c_viewproj, 1, GL_FALSE, viewproj.m);
+        glBindVertexArray(cube_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
 
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);

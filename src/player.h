@@ -33,7 +33,7 @@ struct AnimPlayer {
     float clip_end() const;
 };
 
-enum class PlayerState { Locomotion, Roll, Attack1, Attack2 };
+enum class PlayerState { Locomotion, Roll, Attack1, Attack2, Hop };
 
 struct Player {
     Vec3 pos{};
@@ -52,14 +52,25 @@ struct Player {
         const AnimClip* slash = nullptr;
         const AnimClip* slash2 = nullptr;
         const AnimClip* guard = nullptr;
+        const AnimClip* hop_l = nullptr;
+        const AnimClip* hop_r = nullptr;
+        const AnimClip* hop_b = nullptr;
+        const AnimClip* run_back = nullptr;
+        const AnimClip* strafe_l = nullptr;
+        const AnimClip* strafe_r = nullptr;
     } clips;
 
     struct Input {
         float move_x = 0, move_z = 0;  // camera-relative, magnitude <= 1
         bool attack_pressed = false;   // edge
         bool roll_pressed = false;     // edge
-        bool guard_held = false;
+        bool guard_held = false;       // also engages lock-on when a target exists
+        bool has_target = false;
+        Vec3 target_pos{};
     };
+
+    bool locked = false;  // lock-on active this frame (guard + target)
+    Vec3 hop_dir{};
 
     std::vector<uint8_t> upper_mask;  // Root-bone subtree (torso/arms/head)
 

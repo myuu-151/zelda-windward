@@ -131,6 +131,12 @@ void Player::init(const Model& m)
     clips.slash = m.find_clip("Slash");
     clips.slash2 = m.find_clip("Slash2");
     clips.guard = m.find_clip("Guard");
+    clips.hop_l = m.find_clip("SideHopL");
+    clips.hop_r = m.find_clip("SideHopR");
+    clips.hop_b = m.find_clip("BackHop");
+    clips.run_back = m.find_clip("RunBack");
+    clips.strafe_l = m.find_clip("StrafeL");
+    clips.strafe_r = m.find_clip("StrafeR");
     upper_mask = m.subtree_mask("Root");
     anim.play(clips.idle, true);
 }
@@ -139,9 +145,49 @@ void Player::update(const Input& in, float dt)
 {
     const float move_len = std::sqrt(in.move_x * in.move_x + in.move_z * in.move_z);
     const bool moving = move_len > 0.15f;
+    locked = in.guard_held && in.has_target;
 
     switch (state) {
         case PlayerState::Locomotion: {
+            if (locked) {
+                // --- Z-target mode: always face the target, hop to strafe ---
+                Vec3 to_t = in.target_pos - pos;
+                to_t.y = 0;
+                to_t = normalize(to_t);
+                const float target_yaw = std::atan2(to_t.x, to_t.z);
+                yaw += angle_wrap(target_yaw - yaw) * std::min(1.0f, 14.0f * dt);
+                anim.set_overlay(clips.guard, &upper_mask);
+
+                // strafe: move along the stick in any direction while
+                // continuing to face the target
+                const float target_speed =
+                    moving ? kRunSpeed * 0.7f * std::min(move_len, 1.0f) : 0.0f;
+                speed += (target_speed - speed) * std::min(1.0f, kAccel * dt);
+                if (moving && speed > 0.01f) {
+                    pos.x += (in.move_x / move_len) * speed * dt;
+                    pos.z += (in.move_z / move_len) * speed * dt;
+                }
+                // directional cycle: forward run, backpedal, or side-steps,
+                // picked by the dominant axis relative to the facing
+                const AnimClip* cycle = clips.idle;
+                if (speed > 0.3f && moving) {
+                    const Vec3 left{to_t.z, 0, -to_t.x};
+                    const float f = (in.move_x * to_t.x + in.move_z * to_t.z) / move_len;
+                    const float l = (in.move_x * left.x + in.move_z * left.z) / move_len;
+                    if (std::fabs(f) >= std::fabs(l))
+                        cycle = f >= 0 ? clips.run
+                                       : (clips.run_back ? clips.run_back : clips.run);
+                    else
+                        cycle = l >= 0 ? (clips.strafe_l ? clips.strafe_l : clips.run)
+                                       : (clips.strafe_r ? clips.strafe_r : clips.run);
+                }
+                anim.play(cycle, true, 0.10f);
+                anim.rate = (cycle != clips.idle)
+                                ? std::max(0.6f, speed / kRunSpeed)
+                                : 1.0f;
+                anim.update(dt);
+                return;
+            }
             if (in.roll_pressed && moving) {  // rolling requires movement input
                 state = PlayerState::Roll;
                 roll_dir = moving ? Vec3{in.move_x / move_len, 0, in.move_z / move_len}
@@ -219,9 +265,27 @@ void Player::update(const Input& in, float dt)
             if (anim.finished()) state = PlayerState::Locomotion;
             break;
         }
+        case PlayerState::Hop: {
+            constexpr float kHopSpeed = 3.4f;
+            pos.x += hop_dir.x * kHopSpeed * dt;
+            pos.z += hop_dir.z * kHopSpeed * dt;
+            if (locked) {  // keep facing the target through the hop
+                Vec3 to_t = in.target_pos - pos;
+                to_t.y = 0;
+                to_t = normalize(to_t);
+                yaw += angle_wrap(std::atan2(to_t.x, to_t.z) - yaw) *
+                       std::min(1.0f, 14.0f * dt);
+            }
+            if (anim.finished()) {
+                state = PlayerState::Locomotion;
+                anim.play(clips.idle, true, 0.08f);
+            }
+            break;
+        }
     }
-    if (state != PlayerState::Locomotion)
-        anim.set_overlay(nullptr, &upper_mask);  // no guard during rolls/attacks
+    if (state == PlayerState::Roll || state == PlayerState::Attack1 ||
+        state == PlayerState::Attack2)
+        anim.set_overlay(nullptr, &upper_mask);  // shield drops during those
     anim.update(dt);
 }
 

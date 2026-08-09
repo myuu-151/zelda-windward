@@ -172,6 +172,7 @@ struct App {
     bool dragging = false;
 
     Player player;
+    float lock_blend = 0.0f;   // eased 0..1 lock-on camera engagement
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
@@ -480,23 +481,24 @@ int main(int argc, char** argv)
             }
         } else {
             app.player.anim.apply(app.link);
-            // camera: free-follow, or ease into the lock-on framing
+            // camera: free mode tracks Link exactly (no lag); the lock-on
+            // framing fades in/out via lock_blend so toggling never snaps
             const Vec3 head = app.player.pos + Vec3{0, 0.85f, 0};
+            const float k = std::min(1.0f, 3.5f * static_cast<float>(frame_dt));
+            app.lock_blend += ((app.player.locked ? 1.0f : 0.0f) - app.lock_blend) * k;
             if (app.player.locked) {
                 Vec3 away = app.player.pos - kTargetPos;
                 away.y = 0;
-                const float want_yaw = std::atan2(away.x, away.z);
+                // behind Link, nudged off-axis so he sits off-center (cinematic)
+                const float want_yaw = std::atan2(away.x, away.z) + 0.22f;
                 float dy = want_yaw - app.cam.yaw;
                 while (dy > 3.14159265f) dy -= 6.2831853f;
                 while (dy < -3.14159265f) dy += 6.2831853f;
-                const float k = std::min(1.0f, 5.0f * static_cast<float>(frame_dt));
                 app.cam.yaw += dy * k;
-                app.cam.pitch += (0.32f - app.cam.pitch) * k;
-                // frame both the player and the cube
-                app.cam.target = lerp(head, kTargetPos + Vec3{0, 0.5f, 0}, 0.3f);
-            } else {
-                app.cam.target = head;
+                app.cam.pitch += (0.18f - app.cam.pitch) * k;  // low, dramatic
             }
+            const Vec3 lock_target = lerp(head, kTargetPos + Vec3{0, 0.5f, 0}, 0.15f);
+            app.cam.target = lerp(head, lock_target, app.lock_blend);
         }
 
         // render

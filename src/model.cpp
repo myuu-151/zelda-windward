@@ -73,7 +73,28 @@ bool Model::load(const char* glb_path)
         cgltf_free(data);
         return false;
     }
+    return load_parsed(data);
+}
 
+bool Model::load_memory(const void* bytes, size_t size)
+{
+    cgltf_options opts{};
+    cgltf_data* data = nullptr;
+    if (cgltf_parse(&opts, bytes, size, &data) != cgltf_result_success) {
+        SDL_Log("cgltf parse (memory) failed");
+        return false;
+    }
+    // GLB keeps its buffers in the blob itself, so no base path is needed
+    if (cgltf_load_buffers(&opts, data, nullptr) != cgltf_result_success) {
+        SDL_Log("cgltf buffer load (memory) failed");
+        cgltf_free(data);
+        return false;
+    }
+    return load_parsed(data);
+}
+
+bool Model::load_parsed(cgltf_data* data)
+{
     // ---- nodes (rest pose) ----
     nodes.resize(data->nodes_count);
     for (size_t i = 0; i < data->nodes_count; ++i) {

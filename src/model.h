@@ -74,6 +74,8 @@ struct Model {
     std::vector<Mat4> palette;
 
     bool load(const char* glb_path);     // logs and returns false on failure
+    bool load_memory(const void* bytes, size_t size);  // embedded glb blob
+    bool load_parsed(struct cgltf_data* data);  // shared tail; frees `data`
 
     // sample `clip` at time t (seconds, caller wraps/clamps)
     void sample(const AnimClip& clip, float t, Pose& out) const;

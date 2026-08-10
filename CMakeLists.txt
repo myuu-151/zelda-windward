@@ -31,3 +31,29 @@ if(MSVC)
     # console subsystem in Debug for logs, windows subsystem otherwise
     set_target_properties(zelda PROPERTIES WIN32_EXECUTABLE $<CONFIG:Release>)
 endif()
+
+# ---- zelda_packed: fully self-contained exe (model embedded, no assets dir) ----
+set(EMBED_SRC ${CMAKE_CURRENT_BINARY_DIR}/embedded_link.c)
+add_custom_command(
+    OUTPUT ${EMBED_SRC}
+    COMMAND ${CMAKE_COMMAND}
+            -DIN=${CMAKE_CURRENT_SOURCE_DIR}/assets/link.glb
+            -DOUT=${EMBED_SRC}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/link.glb
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+    COMMENT "Embedding assets/link.glb")
+add_executable(zelda_packed
+    src/main.cpp
+    src/gl_loader.cpp
+    src/model.cpp
+    src/player.cpp
+    ${EMBED_SRC}
+)
+target_include_directories(zelda_packed PRIVATE third_party/cgltf third_party/stb)
+target_compile_definitions(zelda_packed PRIVATE _CRT_SECURE_NO_WARNINGS EMBED_LINK_GLB)
+target_link_libraries(zelda_packed PRIVATE SDL3::SDL3-static opengl32)
+if(MSVC)
+    target_compile_options(zelda_packed PRIVATE /W4)
+    set_target_properties(zelda_packed PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()

@@ -590,12 +590,12 @@ int main(int argc, char** argv)
                     }
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                    if (ev.button.button == SDL_BUTTON_LEFT) app.dragging = true;
-                    if (ev.button.button == SDL_BUTTON_RIGHT && !app.viewer_mode)
+                    if (ev.button.button == SDL_BUTTON_RIGHT) app.dragging = true;
+                    if (ev.button.button == SDL_BUTTON_LEFT && !app.viewer_mode)
                         app.key_attack = true;
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_UP:
-                    if (ev.button.button == SDL_BUTTON_LEFT) app.dragging = false;
+                    if (ev.button.button == SDL_BUTTON_RIGHT) app.dragging = false;
                     break;
                 case SDL_EVENT_MOUSE_MOTION:
                     if (app.dragging) {

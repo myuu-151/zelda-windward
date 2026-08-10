@@ -55,7 +55,10 @@ void AnimPlayer::update(float dt)
     time += dt * rate;
     const float end = clip_end();
     if (loop) {
-        if (end > 0 && time >= end) time = std::fmod(time, end);
+        if (end > 0 && (time >= end || time < 0)) {
+            time = std::fmod(time, end);
+            if (time < 0) time += end;  // reverse playback wraps too
+        }
     } else if (time > end) {
         time = end;
     }

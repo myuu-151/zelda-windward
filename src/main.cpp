@@ -149,7 +149,7 @@ GLuint link_program(const char* vs_src, const char* fs_src)
 struct OrbitCamera {
     float yaw = 0.6f;       // radians around the character
     float pitch = 0.35f;
-    float distance = 3.4f;
+    float distance = 5.0f;
     Vec3 target{0.0f, 0.85f, 0.0f};
 
     Vec3 eye() const
@@ -280,6 +280,65 @@ int main(int argc, char** argv)
     // planted ahead of the chest, then expressed relative to the forearm) ---
     Model::Attachment shield_sheath{};
     Model::Attachment shield_arm{};
+    // guard placement tunables (viewer mode, or in game while guarding:
+    // I/K height, J/L sideways, U/O depth, [/] roll, ,/. pitch; persisted to
+    // guard_tune.txt next to the exe so the winners can be baked in here)
+    float guard_x = -0.10f, guard_y = 0.80f, guard_z = 0.44f, guard_roll = -0.48f;
+    float guard_pitch = 0.06f, guard_yaw = 0.0f;
+    const std::string guard_tune_path = std::string(SDL_GetBasePath()) + "guard_tune.txt";
+    if (FILE* tf = std::fopen(guard_tune_path.c_str(), "r")) {
+        float v[6] = {0, 0, 0, 0, 0, 0};
+        const int n = std::fscanf(tf, "%f %f %f %f %f %f",
+                                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+        if (n >= 5) {  // yaw column added later; old 5-value files still load
+            guard_x = v[0]; guard_y = v[1]; guard_z = v[2];
+            guard_roll = v[3]; guard_pitch = v[4];
+            if (n == 6) guard_yaw = v[5];
+            SDL_Log("guard_tune.txt loaded: x=%.3f y=%.3f z=%.3f roll=%.3f pitch=%.3f yaw=%.3f",
+                    guard_x, guard_y, guard_z, guard_roll, guard_pitch, guard_yaw);
+        }
+        std::fclose(tf);
+    }
+    auto save_guard_tune = [&]() {
+        if (FILE* tf = std::fopen(guard_tune_path.c_str(), "w")) {
+            std::fprintf(tf, "%.4f %.4f %.4f %.4f %.4f %.4f\n", guard_x, guard_y,
+                         guard_z, guard_roll, guard_pitch, guard_yaw);
+            std::fclose(tf);
+        }
+    };
+    save_guard_tune();  // file exists from the first run on; nothing gets lost
+
+    // relaxed in-hand placement (idle/run once the shield has been raised):
+    // its own socket + tune file, adjusted on any non-Guard clip in the viewer
+    float hand_x = -0.39f, hand_y = 0.39f, hand_z = 0.12f;
+    float hand_roll = -1.80f, hand_pitch = -0.12f, hand_yaw = -1.50f;
+    const std::string hand_tune_path = std::string(SDL_GetBasePath()) + "hand_tune.txt";
+    if (FILE* tf = std::fopen(hand_tune_path.c_str(), "r")) {
+        float v[6] = {0, 0, 0, 0, 0, 0};
+        const int n = std::fscanf(tf, "%f %f %f %f %f %f",
+                                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+        if (n >= 5) {
+            hand_x = v[0]; hand_y = v[1]; hand_z = v[2];
+            hand_roll = v[3]; hand_pitch = v[4];
+            if (n == 6) hand_yaw = v[5];
+        }
+        std::fclose(tf);
+    }
+    auto save_hand_tune = [&]() {
+        if (FILE* tf = std::fopen(hand_tune_path.c_str(), "w")) {
+            std::fprintf(tf, "%.4f %.4f %.4f %.4f %.4f %.4f\n", hand_x, hand_y, hand_z,
+                         hand_roll, hand_pitch, hand_yaw);
+            std::fclose(tf);
+        }
+    };
+    save_hand_tune();
+    Mat4 guard_sheath_world{};
+    Mat4 guard_forearm_inv{};
+    Mat4 hand_sheath_world{};
+    Mat4 hand_forearm_inv{};
+    Model::Attachment shield_hand{};
+    bool guard_socket_valid = false;
+    bool shield_in_hand = false;  // set the first time the guard comes up
     if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
         shield_sheath = *sh;
         const int forearm = app.link.find_node("RarmB_jnt_bone_id");
@@ -297,23 +356,55 @@ int main(int argc, char** argv)
                 }
             }
             app.link.palette_from(app.link.scratch_a);  // fills world_pose
-            const Mat4 sheath_world =
+            guard_sheath_world =
                 app.link.world_pose[shield_sheath.anchor_node] * shield_sheath.offset;
-            // face it forward (Y-flip) and cancel the sheath's slant so it
-            // stands straight on the arm
-            const float roll = -0.58f;  // counter-slant
-            const Quat qz{0, 0, std::sin(roll * 0.5f), std::cos(roll * 0.5f)};
-            Mat4 desired = mat4_from_trs({0, 0, 0}, qz, {1, 1, 1}) *
-                           mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * sheath_world;
-            desired.m[12] = -0.10f;  // guard placement: at the fist, chest height
-            desired.m[13] = 0.78f;
-            desired.m[14] = 0.36f;
+            guard_forearm_inv = mat4_inverse(app.link.world_pose[forearm]);
             shield_arm.name = shield_sheath.name;
             shield_arm.slot = shield_sheath.slot;
             shield_arm.anchor_node = forearm;
-            shield_arm.offset = mat4_inverse(app.link.world_pose[forearm]) * desired;
+            guard_socket_valid = true;
+
+            // relaxed socket: same construction against the plain idle pose
+            app.link.sample(*app.link.find_clip("Idle"), 0.5f, app.link.scratch_a);
+            app.link.palette_from(app.link.scratch_a);
+            hand_sheath_world =
+                app.link.world_pose[shield_sheath.anchor_node] * shield_sheath.offset;
+            hand_forearm_inv = mat4_inverse(app.link.world_pose[forearm]);
+            shield_hand = shield_arm;
         }
     }
+    // face it forward (Y-flip), cancel the sheath's slant so it stands
+    // straight on the arm, then plant it at the tuned spot
+    auto rebuild_guard_socket = [&]() {
+        if (!guard_socket_valid) return;
+        const Quat qz{0, 0, std::sin(guard_roll * 0.5f), std::cos(guard_roll * 0.5f)};
+        const Quat qx{std::sin(guard_pitch * 0.5f), 0, 0, std::cos(guard_pitch * 0.5f)};
+        const Quat qy{0, std::sin(guard_yaw * 0.5f), 0, std::cos(guard_yaw * 0.5f)};
+        Mat4 desired = mat4_from_trs({0, 0, 0}, qy, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, qx, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, qz, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * guard_sheath_world;
+        desired.m[12] = guard_x;
+        desired.m[13] = guard_y;
+        desired.m[14] = guard_z;
+        shield_arm.offset = guard_forearm_inv * desired;
+    };
+    rebuild_guard_socket();
+    auto rebuild_hand_socket = [&]() {
+        if (!guard_socket_valid) return;
+        const Quat qz{0, 0, std::sin(hand_roll * 0.5f), std::cos(hand_roll * 0.5f)};
+        const Quat qx{std::sin(hand_pitch * 0.5f), 0, 0, std::cos(hand_pitch * 0.5f)};
+        const Quat qy{0, std::sin(hand_yaw * 0.5f), 0, std::cos(hand_yaw * 0.5f)};
+        Mat4 desired = mat4_from_trs({0, 0, 0}, qy, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, qx, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, qz, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * hand_sheath_world;
+        desired.m[12] = hand_x;
+        desired.m[13] = hand_y;
+        desired.m[14] = hand_z;
+        shield_hand.offset = hand_forearm_inv * desired;
+    };
+    rebuild_hand_socket();
     if (shot_path) {
         if (const AnimClip* c = app.link.find_clip(shot_clip))
             app.clip_index = static_cast<int>(c - app.link.clips.data());
@@ -417,7 +508,11 @@ int main(int argc, char** argv)
                         set_title(app, 0);
                     }
                     if (!ev.key.repeat && !app.viewer_mode) {
-                        if (ev.key.key == SDLK_J) app.key_attack = true;
+                        const bool* ks = SDL_GetKeyboardState(nullptr);
+                        const bool guarding_now =
+                            ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+                        // while guarding, J belongs to the tuning keys below
+                        if (ev.key.key == SDLK_J && !guarding_now) app.key_attack = true;
                         if (ev.key.key == SDLK_SPACE) app.key_roll = true;
                     }
                     if (app.viewer_mode && !app.link.clips.empty()) {
@@ -430,6 +525,55 @@ int main(int argc, char** argv)
                             app.clip_index = (app.clip_index + n - 1) % n;
                             app.clip_time = 0.0;
                             set_title(app, 0);
+                        }
+                    }
+                    {
+                        // shield placement tuning (repeat-friendly): Guard clip
+                        // in the viewer / guard held in game tunes the guard
+                        // socket; other viewer clips tune the relaxed in-hand
+                        // socket
+                        const bool* ks = SDL_GetKeyboardState(nullptr);
+                        const bool guard_held =
+                            ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+                        if (!app.viewer_mode && !guard_held) break;
+                        const bool tune_guard =
+                            app.viewer_mode
+                                ? (!app.link.clips.empty() &&
+                                   app.link.clips[app.clip_index].name == "Guard")
+                                : true;
+                        float& tx = tune_guard ? guard_x : hand_x;
+                        float& ty = tune_guard ? guard_y : hand_y;
+                        float& tz = tune_guard ? guard_z : hand_z;
+                        float& troll = tune_guard ? guard_roll : hand_roll;
+                        float& tpitch = tune_guard ? guard_pitch : hand_pitch;
+                        float& tyaw = tune_guard ? guard_yaw : hand_yaw;
+                        const float st = 0.01f;
+                        bool tuned = true;
+                        switch (ev.key.key) {
+                            case SDLK_I: ty += st; break;
+                            case SDLK_K: ty -= st; break;
+                            case SDLK_J: tx += st; break;
+                            case SDLK_L: tx -= st; break;
+                            case SDLK_U: tz -= st; break;
+                            case SDLK_O: tz += st; break;
+                            case SDLK_LEFTBRACKET: troll -= 2.0f * st; break;
+                            case SDLK_RIGHTBRACKET: troll += 2.0f * st; break;
+                            case SDLK_COMMA: tpitch -= 2.0f * st; break;
+                            case SDLK_PERIOD: tpitch += 2.0f * st; break;
+                            case SDLK_N: tyaw -= 2.0f * st; break;
+                            case SDLK_M: tyaw += 2.0f * st; break;
+                            default: tuned = false; break;
+                        }
+                        if (tuned) {
+                            if (tune_guard) { rebuild_guard_socket(); save_guard_tune(); }
+                            else           { rebuild_hand_socket(); save_hand_tune(); }
+                            char buf[192];
+                            SDL_snprintf(buf, sizeof(buf),
+                                         "%s shield: x=%.3f y=%.3f z=%.3f roll=%.3f pitch=%.3f yaw=%.3f",
+                                         tune_guard ? "guard" : "hand", tx, ty, tz,
+                                         troll, tpitch, tyaw);
+                            SDL_SetWindowTitle(app.window, buf);
+                            SDL_Log("%s", buf);
                         }
                     }
                     break;
@@ -517,14 +661,25 @@ int main(int argc, char** argv)
             accumulator -= kFixedDt;
         }
 
-        // shield rides the forearm while guarding, the back otherwise
+        // shield rides the forearm while guarding; once it's been raised it
+        // stays in hand (relaxed socket) through idle/run instead of returning
+        // to the back. viewer: Guard clip = guard socket, other clips = hand
         if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
-            const bool arm_socket =
+            if (!app.viewer_mode && app.player.anim.overlay != nullptr)
+                shield_in_hand = true;
+            const bool guard_socket =
                 app.viewer_mode
                     ? (!app.link.clips.empty() &&
                        app.link.clips[app.clip_index].name == "Guard")
                     : (app.player.anim.overlay != nullptr);
-            *sh = (arm_socket && shield_arm.slot >= 0) ? shield_arm : shield_sheath;
+            const bool hand_socket =
+                !guard_socket && (app.viewer_mode || shield_in_hand);
+            if (guard_socket && shield_arm.slot >= 0)
+                *sh = shield_arm;
+            else if (hand_socket && shield_hand.slot >= 0)
+                *sh = shield_hand;
+            else
+                *sh = shield_sheath;
         }
 
         // animate

@@ -369,8 +369,8 @@ int main(int argc, char** argv)
 
     // vertical-arc camera tunables (game mode: F5/F6 rotation cap -/+,
     // F7/F8 zoom-out max -/+), persisted like the shield tuning
-    float cam_rot_cap = 0.05f;   // extra pitch eased in over the whole zoom-out
-    float cam_zoom_max = 2.6f;   // pull-out distance at full arc
+    float cam_rot_cap = -0.01f;  // top-of-sweep angle offset from the default
+    float cam_zoom_max = 3.4f;   // pull-out distance at full arc
     const std::string cam_tune_path = std::string(SDL_GetBasePath()) + "cam_tune.txt";
     if (FILE* tf = std::fopen(cam_tune_path.c_str(), "r")) {
         float v[2];
@@ -877,7 +877,7 @@ int main(int argc, char** argv)
                 // grows, with only a whisper of upward rotation
                 const float tilt = (ks[SDL_SCANCODE_DOWN] ? 1.0f : 0.0f) -
                                    (ks[SDL_SCANCODE_UP] ? 1.0f : 0.0f);
-                if (tilt != 0.0f && !app.player.locked) {
+                if (tilt != 0.0f) {  // vertical arc works locked or free
                     // one clean sweep: a single arc value slides ground-level
                     // angle (-1) .. default (0) .. pulled-out overview (+1),
                     // and pitch + pull are both derived from it, eased in step
@@ -890,19 +890,24 @@ int main(int argc, char** argv)
                     // the low ground-level shot -- never a dead zone. spans
                     // sized so the arc ends land at the same absolute
                     // distances as before the default was pushed out
-                    // zoom runs the full range; the rotation is capped at the
-                    // old sweep's halfway value but eases into it across the
-                    // WHOLE zoom-out (fast early, tapering) so it keeps
-                    // applying to the end instead of stopping abruptly.
-                    // both knobs are live-tunable (F5-F8)
-                    const float want_pull =
-                        app.cam_arc > 0.0f ? app.cam_arc * cam_zoom_max
-                                           : app.cam_arc * 2.1f;
-                    const float a = app.cam_arc;
-                    const float rise = 1.0f - (1.0f - a) * (1.0f - a);
+                    // the WHOLE sweep is one smooth curve: the eye rides a
+                    // quadratic bezier through three poses -- low close-up
+                    // (-1), default (0), far pulled-out (+1) -- in the
+                    // vertical plane. no segments, no mode changes; rotation
+                    // and zoom blend across the entire trip. knobs: F5-F8
+                    // rotation travels the ENTIRE sweep: strictly linear from
+                    // the low bottom angle to the top angle, one direction
+                    // only. distance runs close -> default -> far through a
+                    // smooth curve. pitch can never double back.
+                    const float u = (app.cam_arc + 1.0f) * 0.5f;
+                    const float d0 = app.cam.distance;
+                    const float dists[3] = {d0 - 2.1f, d0, d0 + cam_zoom_max};
+                    const float dctrl = 2.0f * dists[1] - 0.5f * (dists[0] + dists[2]);
+                    const float want_pull = (1 - u) * (1 - u) * dists[0] +
+                                            2.0f * u * (1 - u) * dctrl +
+                                            u * u * dists[2] - d0;
                     const float want_pitch =
-                        a < 0.0f ? def + a * (def - 0.08f)
-                                 : def + rise * cam_rot_cap;
+                        0.08f + u * (def + cam_rot_cap - 0.08f);
                     const float e = std::min(1.0f, 12.0f * dt_f);
                     app.cam.pull += (want_pull - app.cam.pull) * e;
                     app.cam.pitch += (want_pitch - app.cam.pitch) * e;
@@ -919,7 +924,7 @@ int main(int argc, char** argv)
                 while (dy < -3.14159265f) dy += 6.2831853f;
                 const float kf = std::min(1.0f, 8.0f * static_cast<float>(frame_dt));
                 app.cam.yaw += dy * kf;
-                app.cam.pitch += (0.18f - app.cam.pitch) * kf;  // low, dramatic
+                // pitch stays owned by the vertical arc (works while locked)
             }
             // bias toward the cube by a CAPPED offset so backing away from it
             // doesn't slide Link toward the lens (fake zoom)

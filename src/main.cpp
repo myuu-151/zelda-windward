@@ -628,23 +628,23 @@ int main(int argc, char** argv)
         wind_seed = wind_seed * 1664525u + 1013904223u;
         return static_cast<float>(wind_seed >> 8) * (1.0f / 16777216.0f);
     };
-    auto wind_respawn = [&](WindStreak& w, const Vec3& center, bool stagger) {
+    auto wind_respawn = [&](WindStreak& w, bool stagger) {
+        // world-anchored: streaks live in a fixed region of the map, not
+        // around the player
         const float ang = wrand() * 6.2831853f;
-        const float rad = 2.5f + wrand() * 7.0f;
-        w.origin = {center.x + std::cos(ang) * rad, 0.9f + wrand() * 2.2f,
-                    center.z + std::sin(ang) * rad};
-        // one consistent world wind direction, tiny per-streak jitter
-        const float head = 0.9f + (wrand() - 0.5f) * 0.16f;
-        w.fwd = {std::sin(head), 0, std::cos(head)};
+        const float rad = wrand() * 30.0f;
+        w.origin = {std::cos(ang) * rad, 0.9f + wrand() * 2.6f, std::sin(ang) * rad};
+        // fixed world wind: everything blows toward -X ("left")
+        w.fwd = {-1.0f, 0.0f, 0.0f};
         w.side = normalize(cross(w.fwd, Vec3{0, 1, 0}));
-        w.len = 6.5f + wrand() * 4.0f;
+        w.len = 26.0f + wrand() * 14.0f;
         w.amp = 0.16f + wrand() * 0.14f;
         w.loops = 1.0f;
         w.phase = wrand() * 6.2831853f;
-        w.dur = 3.0f + wrand() * 1.6f;
+        w.dur = w.len / (3.2f + wrand() * 0.8f);  // steady travel speed
         w.t = -(stagger ? wrand() * 3.0f : 0.4f + wrand() * 1.8f);  // spawn delay
     };
-    for (auto& w : winds) wind_respawn(w, {0, 0, 0}, true);
+    for (auto& w : winds) wind_respawn(w, true);
     auto wind_point = [](const WindStreak& w, float u) {
         const float phi = w.phase + w.loops * 6.2831853f * u;
         const float r = w.amp * std::sin(3.1415926f * u);
@@ -1082,7 +1082,7 @@ int main(int argc, char** argv)
             for (auto& w : winds) {
                 w.t += static_cast<float>(frame_dt);
                 const float span = w.dur;
-                if (w.t > span) wind_respawn(w, app.player.pos, false);
+                if (w.t > span) wind_respawn(w, false);
                 if (w.t < 0.0f) continue;
                 const float h = (w.t / span) * (1.0f + kTail);
                 const float u1 = std::min(h, 1.0f);

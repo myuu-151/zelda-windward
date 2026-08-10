@@ -2,3 +2,5 @@ build/
 out/
 .vs/
 *.user
+screenshot.bmp
+*_tune.txt

@@ -176,6 +176,103 @@ bool Model::load(const char* glb_path)
                 sub.gl_texture, sub.alpha_blend ? 1 : 0, sub.index_count);
         submeshes.push_back(sub);
     }
+    // ---- attachments: meshes on plain nodes (bone-parented props like the
+    // shield). Bake the node's offset from its anchor joint into the verts
+    // and weight them 100% to that joint -- they ride the skinning for free.
+    {
+        std::vector<int> joint_slot(data->nodes_count, -1);
+        for (size_t j = 0; j < skin_joints.size(); ++j)
+            joint_slot[skin_joints[j]] = static_cast<int>(j);
+        for (size_t i = 0; i < data->nodes_count; ++i) {
+            const cgltf_node& n = data->nodes[i];
+            if (!n.mesh || n.skin) continue;
+            // accumulate transform up to the nearest skin-joint ancestor
+            float lm[16];
+            cgltf_node_transform_local(&n, lm);
+            Mat4 rel;
+            std::memcpy(rel.m, lm, sizeof(lm));
+            int slot = -1;
+            for (const cgltf_node* a = n.parent; a; a = a->parent) {
+                const int ai = node_index(data, a);
+                if (joint_slot[ai] >= 0) {
+                    slot = joint_slot[ai];
+                    break;
+                }
+                cgltf_node_transform_local(a, lm);
+                Mat4 pm;
+                std::memcpy(pm.m, lm, sizeof(lm));
+                rel = pm * rel;
+            }
+            if (slot < 0) continue;  // not hanging off the skeleton
+
+            // the skinning palette is world * inverseBind, which expects
+            // BIND-SPACE vertices: fold the joint's rest (bind) transform in
+            {
+                Mat4 joint_rest;  // identity
+                std::vector<int> chain;
+                for (int a = skin_joints[slot]; a >= 0; a = nodes[a].parent)
+                    chain.push_back(a);
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                    const ModelNode& cn = nodes[*it];
+                    joint_rest = joint_rest * mat4_from_trs(cn.t, cn.r, cn.s);
+                }
+                rel = joint_rest * rel;
+            }
+
+            for (size_t p = 0; p < n.mesh->primitives_count; ++p) {
+                const cgltf_primitive& prim = n.mesh->primitives[p];
+                const cgltf_accessor* a_pos = nullptr;
+                const cgltf_accessor* a_nrm = nullptr;
+                const cgltf_accessor* a_uv = nullptr;
+                for (size_t a = 0; a < prim.attributes_count; ++a) {
+                    const cgltf_attribute& at = prim.attributes[a];
+                    if (at.type == cgltf_attribute_type_position) a_pos = at.data;
+                    else if (at.type == cgltf_attribute_type_normal) a_nrm = at.data;
+                    else if (at.type == cgltf_attribute_type_texcoord && at.index == 0)
+                        a_uv = at.data;
+                }
+                if (!a_pos || !prim.indices) continue;
+                const uint32_t base_vertex = static_cast<uint32_t>(vertices.size());
+                for (size_t v = 0; v < a_pos->count; ++v) {
+                    SkinVertex sv{};
+                    float pv[3] = {0, 0, 0};
+                    cgltf_accessor_read_float(a_pos, v, pv, 3);
+                    for (int r = 0; r < 3; ++r)
+                        sv.pos[r] = rel.m[0 * 4 + r] * pv[0] + rel.m[1 * 4 + r] * pv[1] +
+                                    rel.m[2 * 4 + r] * pv[2] + rel.m[3 * 4 + r];
+                    if (a_nrm) {
+                        float nv[3] = {0, 0, 1};
+                        cgltf_accessor_read_float(a_nrm, v, nv, 3);
+                        for (int r = 0; r < 3; ++r)
+                            sv.normal[r] = rel.m[0 * 4 + r] * nv[0] +
+                                           rel.m[1 * 4 + r] * nv[1] +
+                                           rel.m[2 * 4 + r] * nv[2];
+                    }
+                    if (a_uv) cgltf_accessor_read_float(a_uv, v, sv.uv, 2);
+                    sv.joints[0] = static_cast<uint8_t>(slot);
+                    sv.weights[0] = 1.0f;
+                    vertices.push_back(sv);
+                }
+                Submesh sub;
+                sub.first_index = static_cast<uint32_t>(indices.size());
+                sub.index_count = static_cast<uint32_t>(prim.indices->count);
+                for (size_t k = 0; k < prim.indices->count; ++k)
+                    indices.push_back(base_vertex + static_cast<uint32_t>(
+                                          cgltf_accessor_read_index(prim.indices, k)));
+                if (prim.material && prim.material->has_pbr_metallic_roughness) {
+                    sub.gl_texture = upload_texture(
+                        prim.material->pbr_metallic_roughness.base_color_texture.texture,
+                        &sub.alpha_blend);
+                }
+                if (prim.material && prim.material->alpha_mode != cgltf_alpha_mode_opaque)
+                    sub.alpha_blend = true;
+                submeshes.push_back(sub);
+                SDL_Log("attachment %s: %zu verts on joint %d",
+                        n.name ? n.name : "?", static_cast<size_t>(a_pos->count), slot);
+            }
+        }
+    }
+
     SDL_Log("model: %zu verts, %zu indices, %zu submeshes, %zu joints, %zu nodes",
             vertices.size(), indices.size(), submeshes.size(), skin_joints.size(),
             nodes.size());

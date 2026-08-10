@@ -227,12 +227,14 @@ int main(int argc, char** argv)
     const char* shot_clip = "Idle";
     float shot_time = 0.5f;
     float shot_distance = 0.0f;
+    float shot_yaw = 1000.0f;  // sentinel = keep default
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--screenshot" && i + 1 < argc) {
             shot_path = argv[i + 1];
             if (i + 2 < argc) shot_clip = argv[i + 2];
             if (i + 3 < argc) shot_time = static_cast<float>(std::atof(argv[i + 3]));
             if (i + 4 < argc) shot_distance = static_cast<float>(std::atof(argv[i + 4]));
+            if (i + 5 < argc) shot_yaw = static_cast<float>(std::atof(argv[i + 5]));
         }
     }
 
@@ -276,6 +278,7 @@ int main(int argc, char** argv)
             app.clip_index = static_cast<int>(c - app.link.clips.data());
         app.clip_time = shot_time;
         if (shot_distance > 0) app.cam.distance = shot_distance;
+        if (shot_yaw < 100.0f) app.cam.yaw = shot_yaw;
         app.viewer_mode = true;  // screenshots use the plain clip viewer
     }
     bool want_shot = false;

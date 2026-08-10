@@ -301,7 +301,7 @@ int main(int argc, char** argv)
                 app.link.world_pose[shield_sheath.anchor_node] * shield_sheath.offset;
             // face it forward (Y-flip) and cancel the sheath's slant so it
             // stands straight on the arm
-            const float roll = -0.61f;  // counter-slant (other way)
+            const float roll = -0.58f;  // counter-slant
             const Quat qz{0, 0, std::sin(roll * 0.5f), std::cos(roll * 0.5f)};
             Mat4 desired = mat4_from_trs({0, 0, 0}, qz, {1, 1, 1}) *
                            mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * sheath_world;

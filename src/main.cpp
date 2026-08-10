@@ -24,6 +24,7 @@ constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kFixedDt = 1.0 / 60.0;
 constexpr Vec3 kTargetPos{0.0f, 0.35f, 4.0f};  // the lock-on cube
+constexpr float kTargetHalf = 0.35f;     // the cube's half-extent (bounding size)
 constexpr float kLockMaxOffset = 0.22f;  // lock-on camera's max off-axis angle
 
 const char* kSkinVS = R"GLSL(
@@ -87,6 +88,27 @@ const char* kCubeFS = R"GLSL(
 in float vShade;
 out vec4 fragColor;
 void main() { fragColor = vec4(vec3(0.75, 0.45, 0.25) * vShade, 1.0); }
+)GLSL";
+
+const char* kReticleVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uViewProj;
+uniform vec3 uCenter;
+uniform float uSpin;
+uniform float uScale;
+void main() {
+    float c = cos(uSpin), s = sin(uSpin);
+    vec3 p = vec3(aPos.x * c - aPos.z * s, aPos.y, aPos.x * s + aPos.z * c) * uScale;
+    gl_Position = uViewProj * vec4(p + uCenter, 1.0);
+}
+)GLSL";
+
+const char* kReticleFS = R"GLSL(
+#version 330 core
+uniform float uAlpha;
+out vec4 fragColor;
+void main() { fragColor = vec4(1.0, 0.85, 0.25, uAlpha); }
 )GLSL";
 
 const char* kGridVS = R"GLSL(
@@ -447,7 +469,7 @@ int main(int argc, char** argv)
     const GLint c_viewproj = glGetUniformLocation(cube_prog, "uViewProj");
     std::vector<float> cube;
     {
-        const float h = 0.35f;
+        const float h = kTargetHalf;
         const Vec3 c = kTargetPos;
         const float faces[6][4] = {  // axis, sign, shade
             {0, 1, 0, 0.85f}, {0, -1, 0, 0.55f}, {1, 1, 0, 1.0f},
@@ -489,6 +511,51 @@ int main(int argc, char** argv)
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void*>(12));
     glBindVertexArray(0);
+
+    // lock-on floor reticle: flat ring + four inward ticks, spun in-shader
+    const GLuint reticle_prog = link_program(kReticleVS, kReticleFS);
+    const GLint r_viewproj = glGetUniformLocation(reticle_prog, "uViewProj");
+    const GLint r_center = glGetUniformLocation(reticle_prog, "uCenter");
+    const GLint r_spin = glGetUniformLocation(reticle_prog, "uSpin");
+    const GLint r_alpha = glGetUniformLocation(reticle_prog, "uAlpha");
+    const GLint r_scale = glGetUniformLocation(reticle_prog, "uScale");
+    std::vector<float> reticle;
+    {
+        // unit-radius geometry; sized per-target at draw time from its bounds
+        const int segs = 48;
+        const float r0 = 1.0f, r1 = 1.18f;
+        for (int i = 0; i < segs; ++i) {
+            const float a0 = 6.2831853f * i / segs;
+            const float a1 = 6.2831853f * (i + 1) / segs;
+            const float p[4][3] = {{r0 * std::cos(a0), 0, r0 * std::sin(a0)},
+                                   {r1 * std::cos(a0), 0, r1 * std::sin(a0)},
+                                   {r0 * std::cos(a1), 0, r0 * std::sin(a1)},
+                                   {r1 * std::cos(a1), 0, r1 * std::sin(a1)}};
+            const int tri[6] = {0, 1, 2, 2, 1, 3};
+            for (const int idx : tri) reticle.insert(reticle.end(), p[idx], p[idx] + 3);
+        }
+        for (int t = 0; t < 4; ++t) {  // inward-pointing ticks
+            const float a = 1.5707963f * t;
+            const float ca = std::cos(a), sa = std::sin(a);
+            const float tip = r0 - 0.29f, base = r0 - 0.04f, half = 0.11f;
+            const float p[3][3] = {
+                {tip * ca, 0, tip * sa},
+                {base * ca - half * sa, 0, base * sa + half * ca},
+                {base * ca + half * sa, 0, base * sa - half * ca}};
+            for (const auto& v : p) reticle.insert(reticle.end(), v, v + 3);
+        }
+    }
+    GLuint reticle_vao = 0, reticle_vbo = 0;
+    glGenVertexArrays(1, &reticle_vao);
+    glBindVertexArray(reticle_vao);
+    glGenBuffers(1, &reticle_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, reticle_vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(reticle.size() * sizeof(float)),
+                 reticle.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
+    glBindVertexArray(0);
+    const GLsizei reticle_verts = static_cast<GLsizei>(reticle.size() / 3);
 
     Uint64 prev_ns = SDL_GetTicksNS();
     double accumulator = 0.0;
@@ -742,7 +809,7 @@ int main(int argc, char** argv)
                                     (ks[SDL_SCANCODE_RIGHT] ? 1.0f : 0.0f);
                 if (orbit != 0.0f) {
                     if (app.player.locked)
-                        app.lock_offset = orbit > 0.0f ? kLockMaxOffset : -kLockMaxOffset;
+                        app.lock_offset = orbit > 0.0f ? -kLockMaxOffset : kLockMaxOffset;
                     else
                         app.cam.yaw += orbit * 2.2f * static_cast<float>(frame_dt);
                 }
@@ -792,6 +859,25 @@ int main(int argc, char** argv)
         glUniformMatrix4fv(c_viewproj, 1, GL_FALSE, viewproj.m);
         glBindVertexArray(cube_vao);
         glDrawArrays(GL_TRIANGLES, 0, 36);
+
+        // floor reticle under the target, fading with lock engagement
+        if (!app.viewer_mode && app.lock_blend > 0.01f) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            glUseProgram(reticle_prog);
+            glUniformMatrix4fv(r_viewproj, 1, GL_FALSE, viewproj.m);
+            const float center[3] = {kTargetPos.x, 0.02f, kTargetPos.z};
+            glUniform3fv(r_center, 1, center);
+            // ring hugs the target: ground-diagonal bounding radius + margin
+            glUniform1f(r_scale, kTargetHalf * 1.41421f * 1.12f);
+            glUniform1f(r_spin, static_cast<float>(app.sim_time) * 1.2f);
+            glUniform1f(r_alpha, 0.85f * app.lock_blend);
+            glBindVertexArray(reticle_vao);
+            glDrawArrays(GL_TRIANGLES, 0, reticle_verts);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
 
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);

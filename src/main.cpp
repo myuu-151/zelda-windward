@@ -370,7 +370,7 @@ int main(int argc, char** argv)
 
     // vertical-arc camera tunables (game mode: F5/F6 rotation cap -/+,
     // F7/F8 zoom-out max -/+), persisted like the shield tuning
-    float cam_rot_cap = -0.15f;  // top-of-sweep angle offset from the default
+    float cam_rot_cap = -0.14f;  // top-of-sweep angle offset from the default
     float cam_zoom_max = 3.4f;   // pull-out distance at full arc
     const std::string cam_tune_path = std::string(SDL_GetBasePath()) + "cam_tune.txt";
     if (FILE* tf = std::fopen(cam_tune_path.c_str(), "r")) {

@@ -24,6 +24,7 @@ constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kFixedDt = 1.0 / 60.0;
 constexpr Vec3 kTargetPos{0.0f, 0.35f, 4.0f};  // the lock-on cube
+constexpr float kLockMaxOffset = 0.22f;  // lock-on camera's max off-axis angle
 
 const char* kSkinVS = R"GLSL(
 #version 330 core
@@ -177,6 +178,8 @@ struct App {
     float free_pitch = 0.35f;
     bool was_locked = false;
     bool lock_cam_manual = false;  // user orbited during lock: stop auto-framing
+    float lock_offset = 0.22f;  // off-axis angle while locked, orbit-driven,
+                                // clamped to +-kLockMaxOffset (runs out of travel)
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
@@ -513,7 +516,15 @@ int main(int argc, char** argv)
                             ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
                         // while guarding, J belongs to the tuning keys below
                         if (ev.key.key == SDLK_J && !guarding_now) app.key_attack = true;
-                        if (ev.key.key == SDLK_SPACE) app.key_roll = true;
+                        if (ev.key.key == SDLK_SPACE) {
+                            // standing still: re-house the shield on the back
+                            // (rolling needs movement input anyway)
+                            if (app.player.state == PlayerState::Locomotion &&
+                                app.player.speed < 0.05f)
+                                shield_in_hand = false;
+                            else
+                                app.key_roll = true;
+                        }
                     }
                     if (app.viewer_mode && !app.link.clips.empty()) {
                         const int n = static_cast<int>(app.link.clips.size());
@@ -702,6 +713,15 @@ int main(int argc, char** argv)
                 app.free_yaw = app.cam.yaw;  // remember the pre-lock angle
                 app.free_pitch = app.cam.pitch;
                 app.lock_cam_manual = false;
+                // nudge toward whichever side the camera already hangs on, so
+                // locking on swings the shorter way and frames that flank
+                Vec3 away0 = app.player.pos - kTargetPos;
+                away0.y = 0;
+                float side_dy = app.cam.yaw - std::atan2(away0.x, away0.z);
+                while (side_dy > 3.14159265f) side_dy -= 6.2831853f;
+                while (side_dy < -3.14159265f) side_dy += 6.2831853f;
+                // start on whichever side the camera already hangs
+                app.lock_offset = side_dy >= 0.0f ? kLockMaxOffset : -kLockMaxOffset;
             }
             app.was_locked = app.player.locked;
             if (app.player.locked && app.dragging) app.lock_cam_manual = true;
@@ -713,16 +733,32 @@ int main(int argc, char** argv)
                 app.cam.yaw += dy * k;
                 app.cam.pitch += (app.free_pitch - app.cam.pitch) * k;
             }
+            // arrow keys: free camera orbits; while locked they're a hard
+            // switch between the left and right framing side -- never resting
+            // in between (the camera's own ease supplies the swing)
+            {
+                const bool* ks = SDL_GetKeyboardState(nullptr);
+                const float orbit = (ks[SDL_SCANCODE_LEFT] ? 1.0f : 0.0f) -
+                                    (ks[SDL_SCANCODE_RIGHT] ? 1.0f : 0.0f);
+                if (orbit != 0.0f) {
+                    if (app.player.locked)
+                        app.lock_offset = orbit > 0.0f ? kLockMaxOffset : -kLockMaxOffset;
+                    else
+                        app.cam.yaw += orbit * 2.2f * static_cast<float>(frame_dt);
+                }
+            }
             if (app.player.locked && !app.lock_cam_manual) {
                 Vec3 away = app.player.pos - kTargetPos;
                 away.y = 0;
+                const float base_yaw = std::atan2(away.x, away.z);
                 // behind Link, nudged off-axis so he sits off-center (cinematic)
-                const float want_yaw = std::atan2(away.x, away.z) + 0.22f;
+                const float want_yaw = base_yaw + app.lock_offset;
                 float dy = want_yaw - app.cam.yaw;
                 while (dy > 3.14159265f) dy -= 6.2831853f;
                 while (dy < -3.14159265f) dy += 6.2831853f;
-                app.cam.yaw += dy * k;
-                app.cam.pitch += (0.18f - app.cam.pitch) * k;  // low, dramatic
+                const float kf = std::min(1.0f, 8.0f * static_cast<float>(frame_dt));
+                app.cam.yaw += dy * kf;
+                app.cam.pitch += (0.18f - app.cam.pitch) * kf;  // low, dramatic
             }
             // bias toward the cube by a CAPPED offset so backing away from it
             // doesn't slide Link toward the lens (fake zoom)

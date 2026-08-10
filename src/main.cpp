@@ -209,6 +209,7 @@ struct App {
     bool was_locked = false;
     bool lock_cam_manual = false;  // user orbited during lock: stop auto-framing
     float cam_arc = 0.0f;   // -1..1 vertical sweep: ground angle .. pulled-out
+    float orbit_vel = 0.0f;  // arrow-orbit yaw velocity (eases out on release)
     float lock_offset = 0.22f;  // off-axis angle while locked, orbit-driven,
                                 // clamped to +-kLockMaxOffset (runs out of travel)
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
@@ -369,7 +370,7 @@ int main(int argc, char** argv)
 
     // vertical-arc camera tunables (game mode: F5/F6 rotation cap -/+,
     // F7/F8 zoom-out max -/+), persisted like the shield tuning
-    float cam_rot_cap = -0.01f;  // top-of-sweep angle offset from the default
+    float cam_rot_cap = -0.15f;  // top-of-sweep angle offset from the default
     float cam_zoom_max = 3.4f;   // pull-out distance at full arc
     const std::string cam_tune_path = std::string(SDL_GetBasePath()) + "cam_tune.txt";
     if (FILE* tf = std::fopen(cam_tune_path.c_str(), "r")) {
@@ -867,11 +868,17 @@ int main(int argc, char** argv)
                 const bool* ks = SDL_GetKeyboardState(nullptr);
                 const float orbit = (ks[SDL_SCANCODE_LEFT] ? 1.0f : 0.0f) -
                                     (ks[SDL_SCANCODE_RIGHT] ? 1.0f : 0.0f);
-                if (orbit != 0.0f) {
-                    if (app.player.locked)
-                        app.lock_offset = orbit > 0.0f ? -kLockMaxOffset : kLockMaxOffset;
-                    else
-                        app.cam.yaw += orbit * 2.2f * static_cast<float>(frame_dt);
+                if (orbit != 0.0f && app.player.locked)
+                    app.lock_offset = orbit > 0.0f ? -kLockMaxOffset : kLockMaxOffset;
+                if (!app.player.locked) {
+                    // eased orbit: ramps up while held, coasts to a stop on
+                    // release instead of cutting dead
+                    const float dt_o = static_cast<float>(frame_dt);
+                    const float k_o = std::min(1.0f, (orbit != 0.0f ? 16.0f : 9.0f) * dt_o);
+                    app.orbit_vel += (orbit * 2.2f - app.orbit_vel) * k_o;
+                    app.cam.yaw += app.orbit_vel * dt_o;
+                } else {
+                    app.orbit_vel = 0.0f;
                 }
                 // up/down (free camera): pull-back is the star -- distance
                 // grows, with only a whisper of upward rotation

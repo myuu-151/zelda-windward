@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "clef_glyph.h"
 #include "gl_loader.h"
 #include "math3d.h"
 #include "model.h"
@@ -133,6 +134,83 @@ in float vA;
 out vec4 fragColor;
 void main() { fragColor = vec4(0.94, 0.98, 1.0, vA); }
 )GLSL";
+
+// --- 2D HUD: flat colour triangles in a virtual 1280x720 space, y down ---
+const char* kHudVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec4 aCol;
+uniform vec3 uScreen;   // vec3: the loader only exposes glUniform3fv
+out vec4 vCol;
+void main() {
+    vCol = aCol;
+    vec2 p = aPos / uScreen.xy * 2.0 - 1.0;
+    gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kHudFS = R"GLSL(
+#version 330 core
+in vec4 vCol;
+out vec4 fragColor;
+void main() { fragColor = vCol; }
+)GLSL";
+
+const char* kHudTexVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+uniform vec3 uScreen;
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    vec2 p = aPos / uScreen.xy * 2.0 - 1.0;
+    gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kHudTexFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() { fragColor = vec4(uColor.rgb, uColor.a * texture(uTex, vUV).a); }
+)GLSL";
+
+// 5x7 glyphs, one byte per column, bit 0 = top row. Only the characters the
+// ocarina prompt needs.
+struct Glyph { char c; unsigned char col[5]; };
+const Glyph kFont[] = {
+    {' ', {0x00, 0x00, 0x00, 0x00, 0x00}},
+    {',', {0x00, 0x50, 0x30, 0x00, 0x00}},
+    {'.', {0x00, 0x60, 0x60, 0x00, 0x00}},
+    {'!', {0x00, 0x00, 0x5F, 0x00, 0x00}},
+    {'#', {0x14, 0x7F, 0x14, 0x7F, 0x14}},   // sharp
+    {'b', {0x7F, 0x48, 0x44, 0x44, 0x38}},   // flat
+    {'B', {0x7F, 0x49, 0x49, 0x49, 0x36}},
+    {'C', {0x3E, 0x41, 0x41, 0x41, 0x22}},
+    {'E', {0x7F, 0x49, 0x49, 0x49, 0x41}},
+    {'F', {0x7F, 0x09, 0x09, 0x09, 0x01}},
+    {'H', {0x7F, 0x08, 0x08, 0x08, 0x7F}},
+    {'M', {0x7F, 0x02, 0x0C, 0x02, 0x7F}},
+    {'O', {0x3E, 0x41, 0x41, 0x41, 0x3E}},
+    {'T', {0x01, 0x01, 0x7F, 0x01, 0x01}},
+    {'V', {0x1F, 0x20, 0x40, 0x20, 0x1F}},
+    {'W', {0x3F, 0x40, 0x38, 0x40, 0x3F}},
+    {'A', {0x7E, 0x11, 0x11, 0x11, 0x7E}},
+    {'D', {0x7F, 0x41, 0x41, 0x22, 0x1C}},
+    {'G', {0x3E, 0x41, 0x49, 0x49, 0x7A}},
+    {'I', {0x00, 0x41, 0x7F, 0x41, 0x00}},
+    {'L', {0x7F, 0x40, 0x40, 0x40, 0x40}},
+    {'N', {0x7F, 0x04, 0x08, 0x10, 0x7F}},
+    {'P', {0x7F, 0x09, 0x09, 0x09, 0x06}},
+    {'R', {0x7F, 0x09, 0x19, 0x29, 0x46}},
+    {'S', {0x46, 0x49, 0x49, 0x49, 0x31}},
+    {'U', {0x3F, 0x40, 0x40, 0x40, 0x3F}},
+    {'X', {0x63, 0x14, 0x08, 0x14, 0x63}},
+    {'Y', {0x07, 0x08, 0x70, 0x08, 0x07}},
+};
 
 const char* kStarVS = R"GLSL(
 #version 330 core
@@ -330,7 +408,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
@@ -747,6 +825,116 @@ int main(int argc, char** argv)
     glBindVertexArray(0);
     std::vector<float> star_verts;
 
+    // --- ocarina HUD ---
+    const GLuint hud_prog = link_program(kHudVS, kHudFS);
+    const GLint h_screen = glGetUniformLocation(hud_prog, "uScreen");
+    GLuint hud_vao = 0, hud_vbo = 0;
+    glGenVertexArrays(1, &hud_vao);
+    glBindVertexArray(hud_vao);
+    glGenBuffers(1, &hud_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 24, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 24, reinterpret_cast<void*>(8));
+    glBindVertexArray(0);
+    std::vector<float> hud_verts;
+    float hud_fade = 0.0f;
+
+    // the clef glyph, expanded to RGBA so we only need core GL 1.1 formats
+    const GLuint clef_prog = link_program(kHudTexVS, kHudTexFS);
+    const GLint ct_screen = glGetUniformLocation(clef_prog, "uScreen");
+    const GLint ct_color = glGetUniformLocation(clef_prog, "uColor");
+    const GLint ct_tex = glGetUniformLocation(clef_prog, "uTex");
+    GLuint clef_tex = 0;
+    {
+        std::vector<unsigned char> rgba(static_cast<size_t>(kClefW) * kClefH * 4);
+        for (size_t i = 0; i < static_cast<size_t>(kClefW) * kClefH; ++i) {
+            rgba[i * 4 + 0] = 255;
+            rgba[i * 4 + 1] = 255;
+            rgba[i * 4 + 2] = 255;
+            rgba[i * 4 + 3] = kClefAlpha[i];
+        }
+        glGenTextures(1, &clef_tex);
+        glBindTexture(GL_TEXTURE_2D, clef_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kClefW, kClefH, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    GLuint clef_vao = 0, clef_vbo = 0;
+    glGenVertexArrays(1, &clef_vao);
+    glBindVertexArray(clef_vao);
+    glGenBuffers(1, &clef_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, clef_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void*>(8));
+    glBindVertexArray(0);
+
+    // --- flute audio: one middle-C sample, pitched per semitone ---
+    // a small pool of streams so overlapping notes ring together
+    constexpr int kVoices = 6;
+    SDL_AudioStream* voices[kVoices] = {};
+    Uint8* flute_wav = nullptr;
+    Uint32 flute_wav_len = 0;
+    int voice_next = 0;
+    {
+        SDL_AudioSpec wav_spec{};
+        std::string wpath = std::string(SDL_GetBasePath()) +
+                            "..\\..\\assets\\panflute_c.wav";
+        if (!SDL_LoadWAV(wpath.c_str(), &wav_spec, &flute_wav, &flute_wav_len))
+            SDL_LoadWAV("assets/panflute_c.wav", &wav_spec, &flute_wav,
+                        &flute_wav_len);
+        if (flute_wav) {
+            const SDL_AudioDeviceID dev =
+                SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+            if (dev) {
+                for (SDL_AudioStream*& v : voices) {
+                    v = SDL_CreateAudioStream(&wav_spec, nullptr);
+                    if (!v) continue;
+                    SDL_BindAudioStream(dev, v);
+                }
+                SDL_Log("flute audio: %u bytes, %d ch @ %d Hz", flute_wav_len,
+                        wav_spec.channels, wav_spec.freq);
+            } else {
+                SDL_Log("no audio device: %s", SDL_GetError());
+            }
+        } else {
+            SDL_Log("could not load assets/panflute_c.wav: %s", SDL_GetError());
+        }
+    }
+    // semitones above middle C for keys 1..8 (C D E F G A B C')
+    const int kScale[8] = {0, 2, 4, 5, 7, 9, 11, 12};
+    auto play_note = [&](int semitones) {
+        if (!flute_wav || !voices[0]) return;
+        SDL_AudioStream* v = voices[voice_next];
+        voice_next = (voice_next + 1) % kVoices;
+        SDL_ClearAudioStream(v);
+        SDL_SetAudioStreamFrequencyRatio(
+            v, std::pow(2.0f, static_cast<float>(semitones) / 12.0f));
+        SDL_PutAudioStreamData(v, flute_wav, static_cast<int>(flute_wav_len));
+        // share the headroom: a lone note rings at full level, and voices only
+        // duck while several overlap. 1/sqrt(n) because different pitches sum
+        // incoherently -- 1/n would throw away far too much level
+        int active = 0;
+        for (SDL_AudioStream* s : voices)
+            if (s && SDL_GetAudioStreamAvailable(s) > 0) ++active;
+        if (active < 1) active = 1;
+        const float g = 0.9f / std::sqrt(static_cast<float>(active));
+        for (SDL_AudioStream* s : voices)
+            if (s && SDL_GetAudioStreamAvailable(s) > 0) SDL_SetAudioStreamGain(s, g);
+    };
+
+    // notes played on the flute this session, packed as step*4 + (accidental+1)
+    std::vector<int> flute_notes;
+    bool was_fluting = false;
+    char hud_message[64] = "";  // song names land here once one is recognised
+
     // last frame's view-projection: lets the sim test whether the lock-on
     // target is actually on screen before allowing a lock
     Mat4 last_viewproj{};
@@ -798,6 +986,23 @@ int main(int argc, char** argv)
                         // while guarding, J belongs to the tuning keys below
                         if (ev.key.key == SDLK_J && !guarding_now) app.key_attack = true;
                         if (ev.key.key == SDLK_I && !guarding_now) app.key_flute = true;
+                        // 1..8 walk the octave; hold up/down for the sharp or
+                        // flat, so the whole chromatic 12 is reachable
+                        if (app.player.state == PlayerState::Flute) {
+                            const SDL_Keycode nk[8] = {SDLK_1, SDLK_2, SDLK_3,
+                                                       SDLK_4, SDLK_5, SDLK_6,
+                                                       SDLK_7, SDLK_8};
+                            for (int n = 0; n < 8; ++n) {
+                                if (ev.key.key != nk[n]) continue;
+                                const bool* ks2 = SDL_GetKeyboardState(nullptr);
+                                int acc = 0;
+                                if (ks2[SDL_SCANCODE_UP]) acc = 1;
+                                else if (ks2[SDL_SCANCODE_DOWN]) acc = -1;
+                                if (flute_notes.size() >= 8) flute_notes.clear();
+                                flute_notes.push_back(n * 4 + (acc + 1));
+                                play_note(kScale[n] + acc);
+                            }
+                        }
                         if (ev.key.key == SDLK_SPACE) {
                             // standing still: re-house the shield on the back
                             // (rolling needs movement input anyway)
@@ -1404,6 +1609,209 @@ int main(int argc, char** argv)
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDisable(GL_BLEND);
+        }
+
+        // --- ocarina sheet-music HUD, fading in while the flute is out ---
+        {
+            const bool want_hud = !app.viewer_mode &&
+                                  app.player.state == PlayerState::Flute;
+            if (want_hud != was_fluting) {   // fresh staff each time it opens
+                was_fluting = want_hud;
+                if (want_hud) {
+                    flute_notes.clear();
+                    hud_message[0] = '\0';
+                }
+            }
+            hud_fade += ((want_hud ? 1.0f : 0.0f) - hud_fade) *
+                        std::min(1.0f, 7.0f * static_cast<float>(frame_dt));
+            if (hud_fade > 0.004f) {
+                constexpr float VW = 1280.0f, VH = 720.0f;
+                const float F = hud_fade;
+                hud_verts.clear();
+                auto vtx = [&](float x, float y, const float* c) {
+                    hud_verts.insert(hud_verts.end(),
+                                     {x, y, c[0], c[1], c[2], c[3] * F});
+                };
+                auto tri = [&](float x0, float y0, float x1, float y1, float x2,
+                               float y2, const float* c) {
+                    vtx(x0, y0, c); vtx(x1, y1, c); vtx(x2, y2, c);
+                };
+                auto rect = [&](float x, float y, float w, float h, const float* c) {
+                    tri(x, y, x + w, y, x, y + h, c);
+                    tri(x + w, y, x + w, y + h, x, y + h, c);
+                };
+                auto disc = [&](float cx, float cy, float r, const float* c) {
+                    constexpr int N = 20;
+                    for (int i = 0; i < N; ++i) {
+                        const float a0 = 6.2831853f * i / N;
+                        const float a1 = 6.2831853f * (i + 1) / N;
+                        tri(cx, cy, cx + r * std::cos(a0), cy + r * std::sin(a0),
+                            cx + r * std::cos(a1), cy + r * std::sin(a1), c);
+                    }
+                };
+                auto arc = [&](float cx, float cy, float r, float a0, float a1,
+                               const float* c) {
+                    constexpr int N = 6;
+                    for (int i = 0; i < N; ++i) {
+                        const float b0 = a0 + (a1 - a0) * i / N;
+                        const float b1 = a0 + (a1 - a0) * (i + 1) / N;
+                        tri(cx, cy, cx + r * std::cos(b0), cy + r * std::sin(b0),
+                            cx + r * std::cos(b1), cy + r * std::sin(b1), c);
+                    }
+                };
+                // quarter arcs only -- overlapping shapes would double-blend
+                // and leave dark blobs at the corners
+                auto round_rect = [&](float x, float y, float w, float h, float r,
+                                      const float* c) {
+                    constexpr float H = 3.14159265f;
+                    rect(x + r, y, w - 2 * r, h, c);
+                    rect(x, y + r, r, h - 2 * r, c);
+                    rect(x + w - r, y + r, r, h - 2 * r, c);
+                    arc(x + r, y + r, r, H, 1.5f * H, c);
+                    arc(x + w - r, y + r, r, 1.5f * H, 2.0f * H, c);
+                    arc(x + r, y + h - r, r, 0.5f * H, H, c);
+                    arc(x + w - r, y + h - r, r, 0.0f, 0.5f * H, c);
+                };
+                auto seg = [&](float x0, float y0, float x1, float y1, float th,
+                               const float* c) {
+                    float dx = x1 - x0, dy = y1 - y0;
+                    const float len = std::sqrt(dx * dx + dy * dy);
+                    if (len < 1e-5f) return;
+                    dx /= len; dy /= len;
+                    const float nx = -dy * th * 0.5f, ny = dx * th * 0.5f;
+                    tri(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x0 - nx, y0 - ny, c);
+                    tri(x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
+                };
+                auto glyph = [&](char ch, float x, float y, float px,
+                                 const float* c) {
+                    if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
+                    for (const Glyph& g : kFont) {
+                        if (g.c != ch) continue;
+                        for (int cx = 0; cx < 5; ++cx)
+                            for (int ry = 0; ry < 7; ++ry)
+                                if (g.col[cx] & (1 << ry))
+                                    rect(x + cx * px, y + ry * px, px, px, c);
+                        return;
+                    }
+                };
+                auto text = [&](const char* s, float x, float y, float px,
+                                const float* c) {
+                    for (const char* p = s; *p; ++p) {
+                        glyph(*p, x, y, px, c);
+                        x += 6 * px;
+                    }
+                    return x;
+                };
+                auto text_w = [](const char* s, float px) {
+                    return static_cast<float>(std::strlen(s)) * 6.0f * px;
+                };
+
+                auto ellipse = [&](float cx, float cy, float rx, float ry,
+                                   float tilt, const float* c) {
+                    constexpr int N = 18;
+                    const float ct = std::cos(tilt), st = std::sin(tilt);
+                    for (int i = 0; i < N; ++i) {
+                        const float a0 = 6.2831853f * i / N;
+                        const float a1 = 6.2831853f * (i + 1) / N;
+                        const float x0 = rx * std::cos(a0), y0 = ry * std::sin(a0);
+                        const float x1 = rx * std::cos(a1), y1 = ry * std::sin(a1);
+                        tri(cx, cy, cx + x0 * ct - y0 * st, cy + x0 * st + y0 * ct,
+                            cx + x1 * ct - y1 * st, cy + x1 * st + y1 * ct, c);
+                    }
+                };
+
+                const float panel_c[4] = {0.05f, 0.04f, 0.06f, 0.88f};
+                const float edge_c[4] = {0.55f, 0.42f, 0.20f, 0.75f};
+                const float staff_c[4] = {0.98f, 0.42f, 0.13f, 1.0f};
+                const float cream[4] = {0.97f, 0.94f, 0.88f, 1.0f};
+                const float white[4] = {0.96f, 0.96f, 0.94f, 1.0f};
+
+                const bool has_msg = hud_message[0] != '\0';
+                const float PH = has_msg ? 156.0f : 126.0f;
+                const float PX = 340.0f, PY = 690.0f - PH, PW = 600.0f;
+                round_rect(PX - 2, PY - 2, PW + 4, PH + 4, 16, edge_c);
+                round_rect(PX, PY, PW, PH, 15, panel_c);
+
+                if (has_msg) {
+                    const float px = 2.0f;
+                    const float x = PX + (PW - text_w(hud_message, px)) * 0.5f;
+                    text(hud_message, x, PY + 16, px, white);
+                }
+
+                // staff: five orange lines, like the ocarina UI
+                const float SX = PX + 24, SW = PW - 48;
+                const float SGAP = 17.0f;
+                const float S0 = PY + (has_msg ? 52.0f : 26.0f);
+                for (int i = 0; i < 5; ++i)
+                    rect(SX, S0 + i * SGAP, SW, 2.4f, staff_c);
+                const float bottom_line = S0 + 4 * SGAP;
+
+                // the notes he has played, as real notation: the natural sits on
+                // its line or space, with the accidental drawn beside it
+                for (size_t i = 0; i < flute_notes.size(); ++i) {
+                    const int step = flute_notes[i] / 4;        // 0=C .. 7=C'
+                    const int acc = flute_notes[i] % 4 - 1;     // -1 flat, +1 sharp
+                    const float nx = SX + 96 + i * 52.0f;
+                    const float ny = bottom_line - step * (SGAP * 0.5f);
+                    const float rx = SGAP * 0.60f, ry = SGAP * 0.42f;
+                    ellipse(nx, ny, rx + 1.2f, ry + 1.2f, -0.32f, staff_c);
+                    ellipse(nx, ny, rx, ry, -0.32f, cream);
+                    // stem: up on the right for low notes, down on the left high up
+                    if (step < 4)
+                        rect(nx + rx - 2.4f, ny - 3.1f * SGAP, 2.6f, 3.1f * SGAP, cream);
+                    else
+                        rect(nx - rx, ny, 2.6f, 3.1f * SGAP, cream);
+                    if (acc != 0)
+                        glyph(acc > 0 ? '#' : 'b', nx - rx - 13.0f, ny - 7.0f, 2.0f,
+                              cream);
+                }
+
+                glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glUseProgram(hud_prog);
+                const float screen_uni[3] = {VW, VH, 0.0f};
+                glUniform3fv(h_screen, 1, screen_uni);
+                glBindVertexArray(hud_vao);
+                glBindBuffer(GL_ARRAY_BUFFER, hud_vbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                             static_cast<GLsizeiptr>(hud_verts.size() * sizeof(float)),
+                             hud_verts.data(), GL_STREAM_DRAW);
+                glDrawArrays(GL_TRIANGLES, 0,
+                             static_cast<GLsizei>(hud_verts.size() / 6));
+                glBindVertexArray(0);
+
+                // the real clef glyph, as a tinted alpha quad
+                {
+                    const float ch = 7.4f * SGAP;
+                    const float cw = ch * kClefW / static_cast<float>(kClefH);
+                    const float cx0 = SX + 8.0f;
+                    // the spiral of the glyph sits ~63% down: line it up with G
+                    const float cy0 = (S0 + 3 * SGAP) - 0.63f * ch;
+                    const float quad[6][4] = {
+                        {cx0, cy0, 0, 0},
+                        {cx0 + cw, cy0, 1, 0},
+                        {cx0, cy0 + ch, 0, 1},
+                        {cx0 + cw, cy0, 1, 0},
+                        {cx0 + cw, cy0 + ch, 1, 1},
+                        {cx0, cy0 + ch, 0, 1},
+                    };
+                    const float clef_col[4] = {0.98f, 0.74f, 0.24f, F};
+                    glUseProgram(clef_prog);
+                    glUniform3fv(ct_screen, 1, screen_uni);
+                    glUniform4fv(ct_color, 1, clef_col);
+                    glUniform1i(ct_tex, 0);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, clef_tex);
+                    glBindVertexArray(clef_vao);
+                    glBindBuffer(GL_ARRAY_BUFFER, clef_vbo);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STREAM_DRAW);
+                    glDrawArrays(GL_TRIANGLES, 0, 6);
+                    glBindVertexArray(0);
+                }
+                glDisable(GL_BLEND);
+                glEnable(GL_DEPTH_TEST);
+            }
         }
 
         if (want_shot || shot_path) {

@@ -176,6 +176,7 @@ struct App {
     float free_yaw = 0.6f;     // camera angle to restore after lock-on
     float free_pitch = 0.35f;
     bool was_locked = false;
+    bool lock_cam_manual = false;  // user orbited during lock: stop auto-framing
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
@@ -530,8 +531,10 @@ int main(int argc, char** argv)
             if (app.player.locked && !app.was_locked) {
                 app.free_yaw = app.cam.yaw;  // remember the pre-lock angle
                 app.free_pitch = app.cam.pitch;
+                app.lock_cam_manual = false;
             }
             app.was_locked = app.player.locked;
+            if (app.player.locked && app.dragging) app.lock_cam_manual = true;
             if (!app.player.locked && app.lock_blend > 0.01f && !app.dragging) {
                 // ease back to where the camera was before locking on
                 float dy = app.free_yaw - app.cam.yaw;
@@ -540,7 +543,7 @@ int main(int argc, char** argv)
                 app.cam.yaw += dy * k;
                 app.cam.pitch += (app.free_pitch - app.cam.pitch) * k;
             }
-            if (app.player.locked) {
+            if (app.player.locked && !app.lock_cam_manual) {
                 Vec3 away = app.player.pos - kTargetPos;
                 away.y = 0;
                 // behind Link, nudged off-axis so he sits off-center (cinematic)

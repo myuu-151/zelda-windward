@@ -1,4 +1,4 @@
-// Zelda fangame client -- SDL3 + OpenGL 3.3 core.
+﻿// Zelda fangame client -- SDL3 + OpenGL 3.3 core.
 // Milestone 1: skinned Link from assets/link.glb, all clips playable.
 //   left/right : switch animation clip
 //   drag       : orbit camera   wheel : zoom
@@ -285,14 +285,29 @@ int main(int argc, char** argv)
         const int forearm = app.link.find_node("RarmB_jnt_bone_id");
         if (const AnimClip* guard_clip = app.link.find_clip("Guard");
             guard_clip && forearm >= 0) {
-            app.link.sample(*guard_clip, guard_clip->start + 0.2f, app.link.scratch_a);
+            // replicate the RUNTIME pose: idle base with the guard overlay's
+            // rotations on the upper body (what the player actually shows)
+            app.link.sample(*app.link.find_clip("Idle"), 0.5f, app.link.scratch_a);
+            app.link.sample(*guard_clip, guard_clip->start + 0.2f, app.link.scratch_b);
+            const std::vector<uint8_t> upper = app.link.subtree_mask("Root");
+            for (size_t i = 0; i < app.link.scratch_a.size(); ++i) {
+                if (i < upper.size() && upper[i]) {
+                    app.link.scratch_a[i].r = app.link.scratch_b[i].r;
+                    app.link.scratch_a[i].s = app.link.scratch_b[i].s;
+                }
+            }
             app.link.palette_from(app.link.scratch_a);  // fills world_pose
             const Mat4 sheath_world =
                 app.link.world_pose[shield_sheath.anchor_node] * shield_sheath.offset;
-            Mat4 desired = mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * sheath_world;
-            desired.m[12] = -0.05f;  // guard placement: ahead of the chest
-            desired.m[13] = 0.70f;
-            desired.m[14] = 0.30f;
+            // face it forward (Y-flip) and cancel the sheath's slant so it
+            // stands straight on the arm
+            const float roll = -0.61f;  // counter-slant (other way)
+            const Quat qz{0, 0, std::sin(roll * 0.5f), std::cos(roll * 0.5f)};
+            Mat4 desired = mat4_from_trs({0, 0, 0}, qz, {1, 1, 1}) *
+                           mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * sheath_world;
+            desired.m[12] = -0.10f;  // guard placement: at the fist, chest height
+            desired.m[13] = 0.78f;
+            desired.m[14] = 0.36f;
             shield_arm.name = shield_sheath.name;
             shield_arm.slot = shield_sheath.slot;
             shield_arm.anchor_node = forearm;

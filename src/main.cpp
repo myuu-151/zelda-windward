@@ -175,10 +175,19 @@ struct OrbitCamera {
     float distance = 5.0f;
     Vec3 target{0.0f, 0.85f, 0.0f};
 
+    // up-arrow "overview": almost pure pull-back, only a whisper of rotation
+    float pull = 0.0f;
+    static constexpr float kDefaultPitch = 0.35f;
+
     Vec3 eye() const
     {
-        const float cp = std::cos(pitch);
-        return target + Vec3{cp * std::sin(yaw), std::sin(pitch), cp * std::cos(yaw)} * distance;
+        // the whisper of rotation rides the pull itself, so zoom-out and
+        // tilt are one continuous motion (and reverse together)
+        // pulling out is a pure dolly (no rotation); only the low close-in
+        // end of the arc couples a bit of downward tilt
+        const float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f);
+        const float cp = std::cos(p);
+        return target + Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)} * (distance + pull);
     }
 };
 
@@ -200,6 +209,7 @@ struct App {
     float free_pitch = 0.35f;
     bool was_locked = false;
     bool lock_cam_manual = false;  // user orbited during lock: stop auto-framing
+    float cam_arc = 0.0f;   // -1..1 vertical sweep: ground angle .. pulled-out
     float lock_offset = 0.22f;  // off-axis angle while locked, orbit-driven,
                                 // clamped to +-kLockMaxOffset (runs out of travel)
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
@@ -796,7 +806,8 @@ int main(int argc, char** argv)
                 // any camera input after unlocking hands control back at once
                 // instead of fighting the ease-back until the blend decays
                 const bool* ks = SDL_GetKeyboardState(nullptr);
-                if (app.dragging || ks[SDL_SCANCODE_LEFT] || ks[SDL_SCANCODE_RIGHT]) {
+                if (app.dragging || ks[SDL_SCANCODE_LEFT] || ks[SDL_SCANCODE_RIGHT] ||
+                    ks[SDL_SCANCODE_UP] || ks[SDL_SCANCODE_DOWN]) {
                     // stop steering, but bleed the framing out over ~0.1s so
                     // the look-at point doesn't snap
                     app.lock_blend *=
@@ -823,6 +834,29 @@ int main(int argc, char** argv)
                     else
                         app.cam.yaw += orbit * 2.2f * static_cast<float>(frame_dt);
                 }
+                // up/down (free camera): pull-back is the star -- distance
+                // grows, with only a whisper of upward rotation
+                const float tilt = (ks[SDL_SCANCODE_DOWN] ? 1.0f : 0.0f) -
+                                   (ks[SDL_SCANCODE_UP] ? 1.0f : 0.0f);
+                if (tilt != 0.0f && !app.player.locked) {
+                    // one clean sweep: a single arc value slides ground-level
+                    // angle (-1) .. default (0) .. pulled-out overview (+1),
+                    // and pitch + pull are both derived from it, eased in step
+                    const float dt_f = static_cast<float>(frame_dt);
+                    app.cam_arc += tilt * 2.6f * dt_f;
+                    if (app.cam_arc > 1.0f) app.cam_arc = 1.0f;
+                    if (app.cam_arc < -1.0f) app.cam_arc = -1.0f;
+                    const float def = OrbitCamera::kDefaultPitch;
+                    // zoom rides the whole arc: out toward the top, IN toward
+                    // the low ground-level shot -- never a dead zone
+                    const float want_pull =
+                        app.cam_arc > 0.0f ? app.cam_arc * 3.2f : app.cam_arc * 1.5f;
+                    const float want_pitch =
+                        app.cam_arc < 0.0f ? def + app.cam_arc * (def - 0.08f) : def;
+                    const float e = std::min(1.0f, 12.0f * dt_f);
+                    app.cam.pull += (want_pull - app.cam.pull) * e;
+                    app.cam.pitch += (want_pitch - app.cam.pitch) * e;
+                }
             }
             if (app.player.locked && !app.lock_cam_manual) {
                 Vec3 away = app.player.pos - kTargetPos;
@@ -844,7 +878,11 @@ int main(int argc, char** argv)
             const float bias = std::min(0.6f, cube_dist * 0.15f);
             const Vec3 lock_target =
                 cube_dist > 1e-4f ? head + to_cube * (bias / cube_dist) : head;
-            app.cam.target = lerp(head, lock_target, app.lock_blend);
+            // pulling out lifts the aim slightly toward the horizon so the
+            // view reads as backing away, not staring down at the floor
+            Vec3 free_target = head;
+            free_target.y += app.cam.pull * 0.10f;
+            app.cam.target = lerp(free_target, lock_target, app.lock_blend);
         }
 
         // render

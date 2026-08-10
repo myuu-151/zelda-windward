@@ -134,6 +134,38 @@ out vec4 fragColor;
 void main() { fragColor = vec4(0.94, 0.98, 1.0, vA); }
 )GLSL";
 
+const char* kStarVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec2 aUV;
+layout(location=2) in float aAlpha;
+uniform mat4 uViewProj;
+out vec2 vUV;
+out float vA;
+void main() {
+    vUV = aUV;
+    vA = aAlpha;
+    gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+)GLSL";
+
+// four-pointed sparkle: an astroid falloff, no texture needed
+const char* kStarFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+in float vA;
+out vec4 fragColor;
+void main() {
+    vec2 p = vUV * 2.0 - 1.0;
+    float d = pow(abs(p.x), 0.5) + pow(abs(p.y), 0.5);
+    // note: smoothstep needs edge0 < edge1 -- reversed edges are undefined
+    // and come back as 0 on some drivers, which makes the whole star vanish
+    float a = 1.0 - smoothstep(0.25, 1.0, d);
+    float core = 1.0 - smoothstep(0.0, 0.55, length(p));
+    fragColor = vec4(1.0, 0.96, 0.70, (a * 0.85 + core * 0.6) * vA);
+}
+)GLSL";
+
 const char* kGridVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -692,6 +724,29 @@ int main(int argc, char** argv)
     std::vector<float> wind_verts;
     std::vector<int> wind_ranges;  // pairs: first vert, vert count
 
+    // star sparkles sprinkling out of the flute while he plays
+    struct Star {
+        Vec3 pos{}, vel{};
+        float life = 0, max_life = 1, size = 0.03f, spin = 0, spin_rate = 0;
+    };
+    std::vector<Star> stars;
+    float star_timer = 0.0f;
+    const GLuint star_prog = link_program(kStarVS, kStarFS);
+    const GLint s_viewproj = glGetUniformLocation(star_prog, "uViewProj");
+    GLuint star_vao = 0, star_vbo = 0;
+    glGenVertexArrays(1, &star_vao);
+    glBindVertexArray(star_vao);
+    glGenBuffers(1, &star_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, star_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 24, reinterpret_cast<void*>(12));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 24, reinterpret_cast<void*>(20));
+    glBindVertexArray(0);
+    std::vector<float> star_verts;
+
     // last frame's view-projection: lets the sim test whether the lock-on
     // target is actually on screen before allowing a lock
     Mat4 last_viewproj{};
@@ -1227,6 +1282,72 @@ int main(int argc, char** argv)
             }
         }
 
+        // --- star sparkles falling out of the flute ---
+        {
+            const float dt_s = static_cast<float>(frame_dt);
+            if (blowing && flute_valid) {
+                // emit at the flute itself: its palette slot already holds
+                // world(hand) * placement for this frame
+                const Mat4& pal = app.link.palette[flute_socket.slot];
+                const Vec3 local{pal.m[12], pal.m[13], pal.m[14]};
+                const Mat4 mm = app.viewer_mode ? Mat4{} : app.player.model_matrix();
+                const Vec3 emit{
+                    mm.m[0] * local.x + mm.m[4] * local.y + mm.m[8] * local.z + mm.m[12],
+                    mm.m[1] * local.x + mm.m[5] * local.y + mm.m[9] * local.z + mm.m[13],
+                    mm.m[2] * local.x + mm.m[6] * local.y + mm.m[10] * local.z + mm.m[14]};
+                star_timer -= dt_s;
+                while (star_timer <= 0.0f) {
+                    star_timer += 0.075f;
+                    Star s;
+                    s.pos = emit + Vec3{(wrand() - 0.5f) * 0.20f, (wrand() - 0.5f) * 0.06f,
+                                        (wrand() - 0.5f) * 0.10f};
+                    s.vel = Vec3{(wrand() - 0.5f) * 0.22f, 0.05f + wrand() * 0.10f,
+                                 -(0.05f + wrand() * 0.10f)};
+                    s.max_life = 0.9f + wrand() * 0.7f;
+                    s.life = s.max_life;
+                    s.size = 0.022f + wrand() * 0.022f;
+                    s.spin = wrand() * 6.2831853f;
+                    s.spin_rate = (wrand() - 0.5f) * 3.0f;
+                    stars.push_back(s);
+                }
+            }
+            star_verts.clear();
+            const Vec3 s_eye = app.cam.eye();
+            Vec3 s_fwd = normalize(app.cam.target - s_eye);
+            Vec3 s_right = normalize(cross(s_fwd, Vec3{0, 1, 0}));
+            Vec3 s_up = cross(s_right, s_fwd);
+            for (size_t i = 0; i < stars.size();) {
+                Star& s = stars[i];
+                s.life -= dt_s;
+                if (s.life <= 0.0f) {
+                    s = stars.back();
+                    stars.pop_back();
+                    continue;
+                }
+                s.vel.y -= 0.55f * dt_s;      // gentle fall
+                s.vel = s.vel * (1.0f - 0.9f * dt_s);
+                s.pos = s.pos + s.vel * dt_s;
+                s.spin += s.spin_rate * dt_s;
+                const float t = s.life / s.max_life;
+                const float alpha = t > 0.75f ? (1.0f - t) * 4.0f : t / 0.75f;
+                const float sz = s.size * (0.6f + 0.4f * t);
+                const float c = std::cos(s.spin), sn = std::sin(s.spin);
+                const Vec3 ax = (s_right * c + s_up * sn) * sz;
+                const Vec3 ay = (s_right * -sn + s_up * c) * sz;
+                const Vec3 corner[4] = {s.pos - ax - ay, s.pos + ax - ay,
+                                        s.pos - ax + ay, s.pos + ax + ay};
+                const float uv[4][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+                const int tri[6] = {0, 1, 2, 2, 1, 3};
+                for (const int k : tri) {
+                    star_verts.insert(star_verts.end(),
+                                      {corner[k].x, corner[k].y, corner[k].z,
+                                       uv[k][0], uv[k][1], alpha});
+                }
+                ++i;
+            }
+            // (drawn after the character, so his body can't paint over them)
+        }
+
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);
         const Mat4 model_mtx =
@@ -1265,6 +1386,25 @@ int main(int argc, char** argv)
             }
         }
         glBindVertexArray(0);
+
+        // sparkles last: additive, over the character
+        if (!star_verts.empty()) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive: they twinkle
+            glDepthMask(GL_FALSE);
+            glUseProgram(star_prog);
+            glUniformMatrix4fv(s_viewproj, 1, GL_FALSE, viewproj.m);
+            glBindVertexArray(star_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, star_vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(star_verts.size() * sizeof(float)),
+                         star_verts.data(), GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(star_verts.size() / 6));
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_BLEND);
+        }
 
         if (want_shot || shot_path) {
             save_screenshot(shot_path ? shot_path : "screenshot.bmp", fb_w, fb_h);

@@ -792,13 +792,23 @@ int main(int argc, char** argv)
             }
             app.was_locked = app.player.locked;
             if (app.player.locked && app.dragging) app.lock_cam_manual = true;
-            if (!app.player.locked && app.lock_blend > 0.01f && !app.dragging) {
-                // ease back to where the camera was before locking on
-                float dy = app.free_yaw - app.cam.yaw;
-                while (dy > 3.14159265f) dy -= 6.2831853f;
-                while (dy < -3.14159265f) dy += 6.2831853f;
-                app.cam.yaw += dy * k;
-                app.cam.pitch += (app.free_pitch - app.cam.pitch) * k;
+            if (!app.player.locked && app.lock_blend > 0.01f) {
+                // any camera input after unlocking hands control back at once
+                // instead of fighting the ease-back until the blend decays
+                const bool* ks = SDL_GetKeyboardState(nullptr);
+                if (app.dragging || ks[SDL_SCANCODE_LEFT] || ks[SDL_SCANCODE_RIGHT]) {
+                    // stop steering, but bleed the framing out over ~0.1s so
+                    // the look-at point doesn't snap
+                    app.lock_blend *=
+                        std::max(0.0f, 1.0f - 10.0f * static_cast<float>(frame_dt));
+                } else {
+                    // ease back to where the camera was before locking on
+                    float dy = app.free_yaw - app.cam.yaw;
+                    while (dy > 3.14159265f) dy -= 6.2831853f;
+                    while (dy < -3.14159265f) dy += 6.2831853f;
+                    app.cam.yaw += dy * k;
+                    app.cam.pitch += (app.free_pitch - app.cam.pitch) * k;
+                }
             }
             // arrow keys: free camera orbits; while locked they're a hard
             // switch between the left and right framing side -- never resting

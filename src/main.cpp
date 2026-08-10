@@ -118,6 +118,22 @@ out vec4 fragColor;
 void main() { fragColor = vec4(1.0, 0.85, 0.25, uAlpha); }
 )GLSL";
 
+const char* kWindVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in float aAlpha;
+uniform mat4 uViewProj;
+out float vA;
+void main() { vA = aAlpha; gl_Position = uViewProj * vec4(aPos, 1.0); }
+)GLSL";
+
+const char* kWindFS = R"GLSL(
+#version 330 core
+in float vA;
+out vec4 fragColor;
+void main() { fragColor = vec4(0.94, 0.98, 1.0, vA); }
+)GLSL";
+
 const char* kGridVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -600,6 +616,56 @@ int main(int argc, char** argv)
     glBindVertexArray(0);
     const GLsizei reticle_verts = static_cast<GLsizei>(reticle.size() / 3);
 
+    // WW-style sky wind streaks: thin white corkscrew trails that draw in,
+    // loop once or twice, and erase out, respawning around the player
+    struct WindStreak {
+        Vec3 origin{}, fwd{}, side{};
+        float len = 4, amp = 0.4f, loops = 1, phase = 0, dur = 3, t = -1;
+    };
+    std::vector<WindStreak> winds(6);
+    uint32_t wind_seed = 0x9d2c5680u ^ static_cast<uint32_t>(SDL_GetTicksNS());
+    auto wrand = [&]() {
+        wind_seed = wind_seed * 1664525u + 1013904223u;
+        return static_cast<float>(wind_seed >> 8) * (1.0f / 16777216.0f);
+    };
+    auto wind_respawn = [&](WindStreak& w, const Vec3& center, bool stagger) {
+        const float ang = wrand() * 6.2831853f;
+        const float rad = 2.5f + wrand() * 7.0f;
+        w.origin = {center.x + std::cos(ang) * rad, 0.9f + wrand() * 2.2f,
+                    center.z + std::sin(ang) * rad};
+        // one consistent world wind direction, tiny per-streak jitter
+        const float head = 0.9f + (wrand() - 0.5f) * 0.16f;
+        w.fwd = {std::sin(head), 0, std::cos(head)};
+        w.side = normalize(cross(w.fwd, Vec3{0, 1, 0}));
+        w.len = 6.5f + wrand() * 4.0f;
+        w.amp = 0.16f + wrand() * 0.14f;
+        w.loops = 1.0f;
+        w.phase = wrand() * 6.2831853f;
+        w.dur = 3.0f + wrand() * 1.6f;
+        w.t = -(stagger ? wrand() * 3.0f : 0.4f + wrand() * 1.8f);  // spawn delay
+    };
+    for (auto& w : winds) wind_respawn(w, {0, 0, 0}, true);
+    auto wind_point = [](const WindStreak& w, float u) {
+        const float phi = w.phase + w.loops * 6.2831853f * u;
+        const float r = w.amp * std::sin(3.1415926f * u);
+        return w.origin + w.fwd * (w.len * u) + w.side * (std::cos(phi) * r) +
+               Vec3{0, std::sin(phi) * r, 0};
+    };
+    const GLuint wind_prog = link_program(kWindVS, kWindFS);
+    const GLint w_viewproj = glGetUniformLocation(wind_prog, "uViewProj");
+    GLuint wind_vao = 0, wind_vbo = 0;
+    glGenVertexArrays(1, &wind_vao);
+    glBindVertexArray(wind_vao);
+    glGenBuffers(1, &wind_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, wind_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void*>(12));
+    glBindVertexArray(0);
+    std::vector<float> wind_verts;
+    std::vector<int> wind_ranges;  // pairs: first vert, vert count
+
     Uint64 prev_ns = SDL_GetTicksNS();
     double accumulator = 0.0;
     Uint64 fps_frames = 0;
@@ -1002,6 +1068,62 @@ int main(int argc, char** argv)
             glDrawArrays(GL_TRIANGLES, 0, reticle_verts);
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
+        }
+
+        // sky wind streaks (game mode): a moving window along each corkscrew
+        // path, ribbon-billboarded toward the camera
+        if (!app.viewer_mode) {
+            wind_verts.clear();
+            wind_ranges.clear();
+            const Vec3 wc_eye = app.cam.eye();
+            const Vec3 vdir = normalize(app.cam.target - wc_eye);
+            constexpr float kTail = 0.28f;
+            constexpr int kSegs = 22;
+            for (auto& w : winds) {
+                w.t += static_cast<float>(frame_dt);
+                const float span = w.dur;
+                if (w.t > span) wind_respawn(w, app.player.pos, false);
+                if (w.t < 0.0f) continue;
+                const float h = (w.t / span) * (1.0f + kTail);
+                const float u1 = std::min(h, 1.0f);
+                const float u0 = std::max(h - kTail, 0.0f);
+                if (u1 - u0 < 0.02f) continue;
+                const int first = static_cast<int>(wind_verts.size() / 4);
+                for (int i = 0; i < kSegs; ++i) {
+                    const float f = static_cast<float>(i) / (kSegs - 1);
+                    const float u = u0 + (u1 - u0) * f;
+                    const Vec3 p = wind_point(w, u);
+                    const Vec3 tan = wind_point(w, u + 0.01f) - p;
+                    Vec3 sidev = cross(tan, vdir);
+                    const float sl = std::sqrt(dot(sidev, sidev));
+                    if (sl > 1e-5f) sidev = sidev * (1.0f / sl);
+                    const float taper = std::sin(3.1415926f * f);
+                    const float half_w = 0.035f * (0.35f + 0.65f * taper);
+                    const float alpha = 0.55f * taper;
+                    for (const float s : {1.0f, -1.0f}) {
+                        const Vec3 v = p + sidev * (half_w * s);
+                        wind_verts.insert(wind_verts.end(), {v.x, v.y, v.z, alpha});
+                    }
+                }
+                wind_ranges.push_back(first);
+                wind_ranges.push_back(kSegs * 2);
+            }
+            if (!wind_ranges.empty()) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+                glUseProgram(wind_prog);
+                glUniformMatrix4fv(w_viewproj, 1, GL_FALSE, viewproj.m);
+                glBindVertexArray(wind_vao);
+                glBindBuffer(GL_ARRAY_BUFFER, wind_vbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                             static_cast<GLsizeiptr>(wind_verts.size() * sizeof(float)),
+                             wind_verts.data(), GL_STREAM_DRAW);
+                for (size_t i = 0; i + 1 < wind_ranges.size(); i += 2)
+                    glDrawArrays(GL_TRIANGLE_STRIP, wind_ranges[i], wind_ranges[i + 1]);
+                glDepthMask(GL_TRUE);
+                glDisable(GL_BLEND);
+            }
         }
 
         glUseProgram(skin_prog);

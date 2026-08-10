@@ -172,7 +172,7 @@ GLuint link_program(const char* vs_src, const char* fs_src)
 struct OrbitCamera {
     float yaw = 0.6f;       // radians around the character
     float pitch = 0.35f;
-    float distance = 5.0f;
+    float distance = 5.6f;
     Vec3 target{0.0f, 0.85f, 0.0f};
 
     // up-arrow "overview": almost pure pull-back, only a whisper of rotation
@@ -183,8 +183,7 @@ struct OrbitCamera {
     {
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
-        // pulling out is a pure dolly (no rotation); only the low close-in
-        // end of the arc couples a bit of downward tilt
+        // pulling out is a pure dolly; the low end couples downward tilt
         const float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f);
         const float cp = std::cos(p);
         return target + Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)} * (distance + pull);
@@ -367,6 +366,27 @@ int main(int argc, char** argv)
         }
     };
     save_hand_tune();
+
+    // vertical-arc camera tunables (game mode: F5/F6 rotation cap -/+,
+    // F7/F8 zoom-out max -/+), persisted like the shield tuning
+    float cam_rot_cap = 0.01f;   // extra pitch over the whole zoom-out (tiny)
+    float cam_zoom_max = 2.6f;   // pull-out distance at full arc
+    const std::string cam_tune_path = std::string(SDL_GetBasePath()) + "cam_tune.txt";
+    if (FILE* tf = std::fopen(cam_tune_path.c_str(), "r")) {
+        float v[2];
+        if (std::fscanf(tf, "%f %f", &v[0], &v[1]) == 2) {
+            cam_rot_cap = v[0];
+            cam_zoom_max = v[1];
+        }
+        std::fclose(tf);
+    }
+    auto save_cam_tune = [&]() {
+        if (FILE* tf = std::fopen(cam_tune_path.c_str(), "w")) {
+            std::fprintf(tf, "%.4f %.4f\n", cam_rot_cap, cam_zoom_max);
+            std::fclose(tf);
+        }
+    };
+    save_cam_tune();
     Mat4 guard_sheath_world{};
     Mat4 guard_forearm_inv{};
     Mat4 hand_sheath_world{};
@@ -583,6 +603,25 @@ int main(int argc, char** argv)
                 case SDL_EVENT_KEY_DOWN:
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
                     if (ev.key.key == SDLK_F2) want_shot = true;
+                    if (ev.key.key == SDLK_F5 || ev.key.key == SDLK_F6 ||
+                        ev.key.key == SDLK_F7 || ev.key.key == SDLK_F8) {
+                        // live camera-arc tuning
+                        if (ev.key.key == SDLK_F5) cam_rot_cap -= 0.01f;
+                        if (ev.key.key == SDLK_F6) cam_rot_cap += 0.01f;
+                        if (ev.key.key == SDLK_F7) cam_zoom_max -= 0.2f;
+                        if (ev.key.key == SDLK_F8) cam_zoom_max += 0.2f;
+                        if (cam_rot_cap < -0.3f) cam_rot_cap = -0.3f;
+                        if (cam_rot_cap > 0.3f) cam_rot_cap = 0.3f;
+                        if (cam_zoom_max < 0.4f) cam_zoom_max = 0.4f;
+                        if (cam_zoom_max > 6.0f) cam_zoom_max = 6.0f;
+                        char buf[128];
+                        SDL_snprintf(buf, sizeof(buf),
+                                     "camera arc: rot cap=%.2f zoom max=%.1f",
+                                     cam_rot_cap, cam_zoom_max);
+                        SDL_SetWindowTitle(app.window, buf);
+                        SDL_Log("%s", buf);
+                        save_cam_tune();
+                    }
                     if (ev.key.key == SDLK_F1 && !ev.key.repeat) {
                         app.viewer_mode = !app.viewer_mode;
                         set_title(app, 0);
@@ -848,11 +887,22 @@ int main(int argc, char** argv)
                     if (app.cam_arc < -1.0f) app.cam_arc = -1.0f;
                     const float def = OrbitCamera::kDefaultPitch;
                     // zoom rides the whole arc: out toward the top, IN toward
-                    // the low ground-level shot -- never a dead zone
+                    // the low ground-level shot -- never a dead zone. spans
+                    // sized so the arc ends land at the same absolute
+                    // distances as before the default was pushed out
+                    // zoom runs the full range; the rotation is capped at the
+                    // old sweep's halfway value but eases into it across the
+                    // WHOLE zoom-out (fast early, tapering) so it keeps
+                    // applying to the end instead of stopping abruptly.
+                    // both knobs are live-tunable (F5-F8)
                     const float want_pull =
-                        app.cam_arc > 0.0f ? app.cam_arc * 3.2f : app.cam_arc * 1.5f;
+                        app.cam_arc > 0.0f ? app.cam_arc * cam_zoom_max
+                                           : app.cam_arc * 2.1f;
+                    const float a = app.cam_arc;
+                    const float rise = 1.0f - (1.0f - a) * (1.0f - a);
                     const float want_pitch =
-                        app.cam_arc < 0.0f ? def + app.cam_arc * (def - 0.08f) : def;
+                        a < 0.0f ? def + a * (def - 0.08f)
+                                 : def + rise * cam_rot_cap;
                     const float e = std::min(1.0f, 12.0f * dt_f);
                     app.cam.pull += (want_pull - app.cam.pull) * e;
                     app.cam.pitch += (want_pitch - app.cam.pitch) * e;

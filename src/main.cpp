@@ -273,6 +273,31 @@ int main(int argc, char** argv)
     }
     if (const AnimClip* idle = app.link.find_clip("Idle"))
         app.clip_index = static_cast<int>(idle - app.link.clips.data());
+
+    // --- shield sockets: sheath (as authored) and forearm (computed from the
+    // guard stance: keep the sheathed orientation but spin it to face front,
+    // planted ahead of the chest, then expressed relative to the forearm) ---
+    Model::Attachment shield_sheath{};
+    Model::Attachment shield_arm{};
+    if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
+        shield_sheath = *sh;
+        const int forearm = app.link.find_node("RarmB_jnt_bone_id");
+        if (const AnimClip* guard_clip = app.link.find_clip("Guard");
+            guard_clip && forearm >= 0) {
+            app.link.sample(*guard_clip, guard_clip->start + 0.2f, app.link.scratch_a);
+            app.link.palette_from(app.link.scratch_a);  // fills world_pose
+            const Mat4 sheath_world =
+                app.link.world_pose[shield_sheath.anchor_node] * shield_sheath.offset;
+            Mat4 desired = mat4_from_trs({0, 0, 0}, {0, 1, 0, 0}, {1, 1, 1}) * sheath_world;
+            desired.m[12] = -0.05f;  // guard placement: ahead of the chest
+            desired.m[13] = 0.70f;
+            desired.m[14] = 0.30f;
+            shield_arm.name = shield_sheath.name;
+            shield_arm.slot = shield_sheath.slot;
+            shield_arm.anchor_node = forearm;
+            shield_arm.offset = mat4_inverse(app.link.world_pose[forearm]) * desired;
+        }
+    }
     if (shot_path) {
         if (const AnimClip* c = app.link.find_clip(shot_clip))
             app.clip_index = static_cast<int>(c - app.link.clips.data());
@@ -474,6 +499,16 @@ int main(int argc, char** argv)
                 app.player.update(in, static_cast<float>(kFixedDt));
             }
             accumulator -= kFixedDt;
+        }
+
+        // shield rides the forearm while guarding, the back otherwise
+        if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
+            const bool arm_socket =
+                app.viewer_mode
+                    ? (!app.link.clips.empty() &&
+                       app.link.clips[app.clip_index].name == "Guard")
+                    : (app.player.anim.overlay != nullptr);
+            *sh = (arm_socket && shield_arm.slot >= 0) ? shield_arm : shield_sheath;
         }
 
         // animate

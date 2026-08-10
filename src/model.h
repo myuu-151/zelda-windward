@@ -83,6 +83,20 @@ struct Model {
 
     const AnimClip* find_clip(const std::string& name) const;
 
+    // bone-attached prop (shield/sword): verts stay in the prop's local
+    // space, weighted to its own palette slot; the game re-sockets it by
+    // changing anchor_node/offset (palette[slot] = world(anchor) * offset)
+    struct Attachment {
+        std::string name;
+        int slot = -1;         // palette slot (after the skin joints)
+        int anchor_node = -1;  // node driving it
+        Mat4 offset;           // local placement relative to the anchor
+    };
+    std::vector<Attachment> attachments;
+
+    int find_node(const char* name) const;
+    Attachment* find_attachment(const char* name);
+
     // 1 for `root_name` and every node under it (parents-first walk)
     std::vector<uint8_t> subtree_mask(const char* root_name) const;
 

@@ -205,19 +205,15 @@ bool Model::load(const char* glb_path)
             }
             if (slot < 0) continue;  // not hanging off the skeleton
 
-            // the skinning palette is world * inverseBind, which expects
-            // BIND-SPACE vertices: fold the joint's rest (bind) transform in
-            {
-                Mat4 joint_rest;  // identity
-                std::vector<int> chain;
-                for (int a = skin_joints[slot]; a >= 0; a = nodes[a].parent)
-                    chain.push_back(a);
-                for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-                    const ModelNode& cn = nodes[*it];
-                    joint_rest = joint_rest * mat4_from_trs(cn.t, cn.r, cn.s);
-                }
-                rel = joint_rest * rel;
-            }
+            // dedicated palette slot: palette[slot] = world(anchor) * offset,
+            // so the game can re-socket the prop (sheath <-> hand) at runtime
+            Attachment att;
+            att.name = n.name ? n.name : "prop";
+            att.slot = static_cast<int>(skin_joints.size() + attachments.size());
+            att.anchor_node = skin_joints[slot];
+            att.offset = rel;
+            const int prop_slot = att.slot;
+            attachments.push_back(att);
 
             for (size_t p = 0; p < n.mesh->primitives_count; ++p) {
                 const cgltf_primitive& prim = n.mesh->primitives[p];
@@ -235,21 +231,10 @@ bool Model::load(const char* glb_path)
                 const uint32_t base_vertex = static_cast<uint32_t>(vertices.size());
                 for (size_t v = 0; v < a_pos->count; ++v) {
                     SkinVertex sv{};
-                    float pv[3] = {0, 0, 0};
-                    cgltf_accessor_read_float(a_pos, v, pv, 3);
-                    for (int r = 0; r < 3; ++r)
-                        sv.pos[r] = rel.m[0 * 4 + r] * pv[0] + rel.m[1 * 4 + r] * pv[1] +
-                                    rel.m[2 * 4 + r] * pv[2] + rel.m[3 * 4 + r];
-                    if (a_nrm) {
-                        float nv[3] = {0, 0, 1};
-                        cgltf_accessor_read_float(a_nrm, v, nv, 3);
-                        for (int r = 0; r < 3; ++r)
-                            sv.normal[r] = rel.m[0 * 4 + r] * nv[0] +
-                                           rel.m[1 * 4 + r] * nv[1] +
-                                           rel.m[2 * 4 + r] * nv[2];
-                    }
+                    cgltf_accessor_read_float(a_pos, v, sv.pos, 3);
+                    if (a_nrm) cgltf_accessor_read_float(a_nrm, v, sv.normal, 3);
                     if (a_uv) cgltf_accessor_read_float(a_uv, v, sv.uv, 2);
-                    sv.joints[0] = static_cast<uint8_t>(slot);
+                    sv.joints[0] = static_cast<uint8_t>(prop_slot);
                     sv.weights[0] = 1.0f;
                     vertices.push_back(sv);
                 }
@@ -267,8 +252,9 @@ bool Model::load(const char* glb_path)
                 if (prim.material && prim.material->alpha_mode != cgltf_alpha_mode_opaque)
                     sub.alpha_blend = true;
                 submeshes.push_back(sub);
-                SDL_Log("attachment %s: %zu verts on joint %d",
-                        n.name ? n.name : "?", static_cast<size_t>(a_pos->count), slot);
+                SDL_Log("attachment %s: %zu verts, palette slot %d, anchor node %d",
+                        n.name ? n.name : "?", static_cast<size_t>(a_pos->count),
+                        prop_slot, att.anchor_node);
             }
         }
     }
@@ -351,7 +337,7 @@ bool Model::load(const char* glb_path)
 
     local_pose.resize(nodes.size());
     world_pose.resize(nodes.size());
-    palette.resize(skin_joints.size());
+    palette.resize(skin_joints.size() + attachments.size());
 
     // parents-first traversal order (exporter order is usually fine, but
     // don't bet the skeleton on it)
@@ -427,6 +413,23 @@ void Model::palette_from(const Pose& pose)
     }
     for (size_t j = 0; j < skin_joints.size(); ++j)
         palette[j] = world_pose[skin_joints[j]] * inverse_bind[j];
+    for (const Attachment& att : attachments)
+        if (att.anchor_node >= 0)
+            palette[att.slot] = world_pose[att.anchor_node] * att.offset;
+}
+
+int Model::find_node(const char* name) const
+{
+    for (size_t i = 0; i < nodes.size(); ++i)
+        if (nodes[i].name == name) return static_cast<int>(i);
+    return -1;
+}
+
+Model::Attachment* Model::find_attachment(const char* name)
+{
+    for (Attachment& a : attachments)
+        if (a.name == name) return &a;
+    return nullptr;
 }
 
 void Model::evaluate(const AnimClip& clip, float t)

@@ -33,7 +33,7 @@ struct AnimPlayer {
     float clip_end() const;
 };
 
-enum class PlayerState { Locomotion, Roll, Attack1, Attack2, Hop };
+enum class PlayerState { Locomotion, Roll, Attack1, Attack2, Hop, Flute };
 
 struct Player {
     Vec3 pos{};
@@ -60,6 +60,7 @@ struct Player {
         const AnimClip* strafe_r = nullptr;
         const AnimClip* run_sword = nullptr;   // run with the blade in hand
         const AnimClip* slash_draw = nullptr;  // unsheathe into the first slash
+        const AnimClip* flute = nullptr;       // playing the pan flute
     } clips;
 
     bool weapons_drawn = false;  // sword/shield out: use the armed cycles
@@ -70,8 +71,10 @@ struct Player {
         bool attack_pressed = false;   // edge
         bool roll_pressed = false;     // edge
         bool guard_held = false;       // also engages lock-on when a target exists
+        bool flute_pressed = false;    // edge: toggles the flute
         bool has_target = false;
         Vec3 target_pos{};
+        float cam_yaw = 0;             // he turns to face the lens while playing
     };
 
     bool locked = false;  // lock-on active this frame (guard + target)

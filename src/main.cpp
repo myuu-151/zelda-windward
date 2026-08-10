@@ -238,6 +238,7 @@ struct App {
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
+    bool key_flute = false;
 };
 
 bool save_screenshot(const char* path, int fb_w, int fb_h)
@@ -497,6 +498,13 @@ int main(int argc, char** argv)
     Model::Attachment sword_sheath{};
     Model::Attachment sword_hand{};
     bool sword_socket_valid = false;
+    // the flute rides his hand, but only exists while he's playing it
+    Model::Attachment flute_socket{};
+    bool flute_valid = false;
+    if (Model::Attachment* fl = app.link.find_attachment("Flute")) {
+        flute_socket = *fl;
+        flute_valid = true;
+    }
     if (Model::Attachment* sw = app.link.find_attachment("Sword")) {
         sword_sheath = *sw;
         sword_hand = *sw;
@@ -734,6 +742,7 @@ int main(int argc, char** argv)
                             ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
                         // while guarding, J belongs to the tuning keys below
                         if (ev.key.key == SDLK_J && !guarding_now) app.key_attack = true;
+                        if (ev.key.key == SDLK_I && !guarding_now) app.key_flute = true;
                         if (ev.key.key == SDLK_SPACE) {
                             // standing still: re-house the shield on the back
                             // (rolling needs movement input anyway)
@@ -884,7 +893,9 @@ int main(int argc, char** argv)
                 in.move_z = fwd.z * in_y + right.z * in_x;
                 in.attack_pressed = app.key_attack;
                 in.roll_pressed = app.key_roll;
+                in.flute_pressed = app.key_flute;
                 in.guard_held = guard;
+                in.cam_yaw = app.cam.yaw;  // he turns to face the lens
                 // you can only lock on to what's on screen: project the target
                 // through last frame's camera. a wider margin while already
                 // locked keeps it from flickering off at the screen edge
@@ -902,7 +913,7 @@ int main(int argc, char** argv)
                 in.has_target = target_visible;
                 in.target_pos = kTargetPos;
                 app.player.weapons_drawn = shield_in_hand;
-                app.key_attack = app.key_roll = false;
+                app.key_attack = app.key_roll = app.key_flute = false;
                 app.player.update(in, static_cast<float>(kFixedDt));
                 if (app.player.wants_draw) {  // the attack unsheathed everything
                     app.player.wants_draw = false;
@@ -911,6 +922,12 @@ int main(int argc, char** argv)
             }
             accumulator -= kFixedDt;
         }
+
+        // blowing the flute swaps in the eye.5 (closed-eye) face texture
+        const bool blowing =
+            app.viewer_mode
+                ? (!app.link.clips.empty() && app.link.clips[app.clip_index].name == "Flute")
+                : (app.player.anim.clip && app.player.anim.clip->name == "Flute");
 
         // during the first part of SlashDraw the gear is still on his back --
         // it comes out as the hand reaches the hilt
@@ -932,8 +949,8 @@ int main(int argc, char** argv)
                     ? (!app.link.clips.empty() &&
                        app.link.clips[app.clip_index].name == "Guard")
                     : (app.player.anim.overlay != nullptr);
-            const bool hand_socket =
-                !guard_socket && !mid_draw && (app.viewer_mode || shield_in_hand);
+            const bool hand_socket = !guard_socket && !mid_draw && !blowing &&
+                                     (app.viewer_mode || shield_in_hand);
             if (guard_socket && shield_arm.slot >= 0)
                 *sh = shield_arm;
             else if (hand_socket && shield_hand.slot >= 0)
@@ -941,15 +958,22 @@ int main(int argc, char** argv)
             else
                 *sh = shield_sheath;
         }
+        if (flute_valid) {
+            if (Model::Attachment* fl = app.link.find_attachment("Flute")) {
+                *fl = flute_socket;
+                if (!blowing)
+                    for (float& v : fl->offset.m) v = 0.0f;  // collapsed = hidden
+            }
+        }
         // sword: drawn once weapons are out (same state as the shield); the
         // viewer draws it for the attack clips so both sockets are visible
         if (sword_socket_valid) {
             if (Model::Attachment* sw = app.link.find_attachment("Sword")) {
-                bool drawn = shield_in_hand && !mid_draw;
+                bool drawn = shield_in_hand && !mid_draw && !blowing;
                 if (app.viewer_mode) {
-                    const std::string& cn = app.link.clips.empty()
-                                                ? std::string()
-                                                : app.link.clips[app.clip_index].name;
+                    const std::string cn = app.link.clips.empty()
+                                               ? std::string()
+                                               : app.link.clips[app.clip_index].name;
                     drawn = cn == "Slash" || cn == "Slash2" || cn == "SlashDraw";
                 }
                 *sw = drawn ? sword_hand : sword_sheath;
@@ -1030,14 +1054,23 @@ int main(int argc, char** argv)
                 // grows, with only a whisper of upward rotation
                 const float tilt = (ks[SDL_SCANCODE_DOWN] ? 1.0f : 0.0f) -
                                    (ks[SDL_SCANCODE_UP] ? 1.0f : 0.0f);
-                if (tilt != 0.0f) {  // vertical arc works locked or free
+                const bool fluting = app.player.state == PlayerState::Flute;
+                if (fluting) {
+                    // ocarina framing: ease down into the low, close shot
+                    // (the same pose the up arrow reaches)
+                    app.cam_arc += (-1.0f - app.cam_arc) *
+                                   std::min(1.0f, 3.0f * static_cast<float>(frame_dt));
+                }
+                if (tilt != 0.0f || fluting) {  // vertical arc works locked or free
                     // one clean sweep: a single arc value slides ground-level
                     // angle (-1) .. default (0) .. pulled-out overview (+1),
                     // and pitch + pull are both derived from it, eased in step
                     const float dt_f = static_cast<float>(frame_dt);
-                    app.cam_arc += tilt * 2.6f * dt_f;
-                    if (app.cam_arc > 1.0f) app.cam_arc = 1.0f;
-                    if (app.cam_arc < -1.0f) app.cam_arc = -1.0f;
+                    if (!fluting) {
+                        app.cam_arc += tilt * 2.6f * dt_f;
+                        if (app.cam_arc > 1.0f) app.cam_arc = 1.0f;
+                        if (app.cam_arc < -1.0f) app.cam_arc = -1.0f;
+                    }
                     const float def = OrbitCamera::kDefaultPitch;
                     // zoom rides the whole arc: out toward the top, IN toward
                     // the low ground-level shot -- never a dead zone. spans
@@ -1218,6 +1251,9 @@ int main(int argc, char** argv)
             }
             for (const Submesh& sub : app.link.submeshes) {
                 if (sub.alpha_blend != alpha_pass) continue;
+                // one eye set or the other: eye.5 (blowing) while on the flute
+                if (sub.material == "eye_mat" && blowing) continue;
+                if (sub.material == "eye5_mat" && !blowing) continue;
                 glBindTexture(GL_TEXTURE_2D, sub.gl_texture);
                 glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.index_count),
                                GL_UNSIGNED_INT,

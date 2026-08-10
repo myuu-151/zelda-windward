@@ -142,6 +142,7 @@ void Player::init(const Model& m)
     clips.strafe_r = m.find_clip("StrafeR");
     clips.run_sword = m.find_clip("RunSword");
     clips.slash_draw = m.find_clip("SlashDraw");
+    clips.flute = m.find_clip("Flute");
     upper_mask = m.subtree_mask("Root");
     anim.play(clips.idle, true);
 }
@@ -192,6 +193,14 @@ void Player::update(const Input& in, float dt)
                                 : 1.0f;
                 anim.update(dt);
                 return;
+            }
+            if (in.flute_pressed && clips.flute) {  // out comes the pan flute
+                state = PlayerState::Flute;
+                speed = 0;
+                anim.set_overlay(nullptr, &upper_mask);
+                anim.rate = 1.0f;
+                anim.play(clips.flute, true, 0.25f);
+                break;
             }
             if (in.roll_pressed && moving) {  // rolling requires movement input
                 state = PlayerState::Roll;
@@ -277,6 +286,16 @@ void Player::update(const Input& in, float dt)
         }
         case PlayerState::Attack2: {
             if (anim.finished()) state = PlayerState::Locomotion;
+            break;
+        }
+        case PlayerState::Flute: {
+            speed = 0;
+            // ease around to face the lens, like the ocarina shot
+            yaw += angle_wrap(in.cam_yaw - yaw) * std::min(1.0f, 8.0f * dt);
+            if (in.flute_pressed || in.roll_pressed || in.attack_pressed) {
+                state = PlayerState::Locomotion;
+                anim.play(clips.idle, true, 0.20f);
+            }
             break;
         }
         case PlayerState::Hop: {

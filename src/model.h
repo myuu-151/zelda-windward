@@ -22,6 +22,7 @@ struct Submesh {
     uint32_t index_count = 0;
     uint32_t gl_texture = 0;   // 0 = untextured
     bool alpha_blend = false;  // face decals (eyes/mouth/brows)
+    std::string material;      // lets the game swap face parts (eye <-> eye5)
 };
 
 struct ModelNode {

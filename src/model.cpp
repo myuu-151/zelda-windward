@@ -193,6 +193,7 @@ bool Model::load_parsed(cgltf_data* data)
         }
         if (prim.material && prim.material->alpha_mode != cgltf_alpha_mode_opaque)
             sub.alpha_blend = true;
+        sub.material = mat_name;
         SDL_Log("submesh %zu: mat=%s tex=%u alpha=%d indices=%u", p, mat_name,
                 sub.gl_texture, sub.alpha_blend ? 1 : 0, sub.index_count);
         submeshes.push_back(sub);

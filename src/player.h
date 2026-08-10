@@ -58,7 +58,12 @@ struct Player {
         const AnimClip* run_back = nullptr;
         const AnimClip* strafe_l = nullptr;
         const AnimClip* strafe_r = nullptr;
+        const AnimClip* run_sword = nullptr;   // run with the blade in hand
+        const AnimClip* slash_draw = nullptr;  // unsheathe into the first slash
     } clips;
+
+    bool weapons_drawn = false;  // sword/shield out: use the armed cycles
+    bool wants_draw = false;     // set when an attack unsheathes; game clears it
 
     struct Input {
         float move_x = 0, move_z = 0;  // camera-relative, magnitude <= 1

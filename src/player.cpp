@@ -140,6 +140,8 @@ void Player::init(const Model& m)
     clips.run_back = m.find_clip("RunBack");
     clips.strafe_l = m.find_clip("StrafeL");
     clips.strafe_r = m.find_clip("StrafeR");
+    clips.run_sword = m.find_clip("RunSword");
+    clips.slash_draw = m.find_clip("SlashDraw");
     upper_mask = m.subtree_mask("Root");
     anim.play(clips.idle, true);
 }
@@ -205,7 +207,13 @@ void Player::update(const Input& in, float dt)
                 attack_buffered = false;
                 speed = 0;
                 anim.rate = 1.0f;
-                anim.play(clips.slash, false, 0.06f);
+                // attacking with everything sheathed draws the blade first
+                if (!weapons_drawn && clips.slash_draw) {
+                    wants_draw = true;
+                    anim.play(clips.slash_draw, false, 0.06f);
+                } else {
+                    anim.play(clips.slash, false, 0.06f);
+                }
                 break;
             }
             // guard is an upper-body overlay: shield up, legs keep running
@@ -219,9 +227,12 @@ void Player::update(const Input& in, float dt)
             }
             pos.x += std::sin(yaw) * speed * dt;
             pos.z += std::cos(yaw) * speed * dt;
-            anim.play(speed > 0.3f ? clips.run : clips.idle, true);
+            // with the sword out, run with the blade-carrying arm pose
+            const AnimClip* run_cycle =
+                (weapons_drawn && clips.run_sword) ? clips.run_sword : clips.run;
+            anim.play(speed > 0.3f ? run_cycle : clips.idle, true);
             // scale the run cycle to the actual ground speed (no foot skating)
-            anim.rate = (anim.clip == clips.run)
+            anim.rate = (anim.clip == run_cycle)
                             ? std::max(0.6f, speed / kRunSpeed)
                             : 1.0f;
             break;

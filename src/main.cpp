@@ -489,6 +489,24 @@ int main(int argc, char** argv)
         shield_hand.offset = hand_forearm_inv * desired;
     };
     rebuild_hand_socket();
+
+    // --- sword: both placements authored in Blender. "Sword" carries the
+    // sheathed socket; the invisible "SwordHandSocket" marker carries the
+    // drawn-in-hand one, which we copy out and then collapse so it never
+    // renders ---
+    Model::Attachment sword_sheath{};
+    Model::Attachment sword_hand{};
+    bool sword_socket_valid = false;
+    if (Model::Attachment* sw = app.link.find_attachment("Sword")) {
+        sword_sheath = *sw;
+        sword_hand = *sw;
+        if (Model::Attachment* mk = app.link.find_attachment("SwordHandSocket")) {
+            sword_hand.anchor_node = mk->anchor_node;
+            sword_hand.offset = mk->offset;
+            for (float& v : mk->offset.m) v = 0.0f;  // degenerate: invisible
+            sword_socket_valid = true;
+        }
+    }
     if (shot_path) {
         if (const AnimClip* c = app.link.find_clip(shot_clip))
             app.clip_index = static_cast<int>(c - app.link.clips.data());
@@ -665,6 +683,11 @@ int main(int argc, char** argv)
     glBindVertexArray(0);
     std::vector<float> wind_verts;
     std::vector<int> wind_ranges;  // pairs: first vert, vert count
+
+    // last frame's view-projection: lets the sim test whether the lock-on
+    // target is actually on screen before allowing a lock
+    Mat4 last_viewproj{};
+    bool have_viewproj = false;
 
     Uint64 prev_ns = SDL_GetTicksNS();
     double accumulator = 0.0;
@@ -862,12 +885,40 @@ int main(int argc, char** argv)
                 in.attack_pressed = app.key_attack;
                 in.roll_pressed = app.key_roll;
                 in.guard_held = guard;
-                in.has_target = true;
+                // you can only lock on to what's on screen: project the target
+                // through last frame's camera. a wider margin while already
+                // locked keeps it from flickering off at the screen edge
+                bool target_visible = false;
+                if (have_viewproj) {
+                    const Vec3 tp = kTargetPos + Vec3{0, 0.5f, 0};
+                    const float* m = last_viewproj.m;
+                    const float cx = m[0] * tp.x + m[4] * tp.y + m[8] * tp.z + m[12];
+                    const float cy = m[1] * tp.x + m[5] * tp.y + m[9] * tp.z + m[13];
+                    const float cw = m[3] * tp.x + m[7] * tp.y + m[11] * tp.z + m[15];
+                    const float margin = app.player.locked ? 1.35f : 1.0f;
+                    target_visible = cw > 0.0f && std::fabs(cx) <= margin * cw &&
+                                     std::fabs(cy) <= margin * cw;
+                }
+                in.has_target = target_visible;
                 in.target_pos = kTargetPos;
+                app.player.weapons_drawn = shield_in_hand;
                 app.key_attack = app.key_roll = false;
                 app.player.update(in, static_cast<float>(kFixedDt));
+                if (app.player.wants_draw) {  // the attack unsheathed everything
+                    app.player.wants_draw = false;
+                    shield_in_hand = true;
+                }
             }
             accumulator -= kFixedDt;
+        }
+
+        // during the first part of SlashDraw the gear is still on his back --
+        // it comes out as the hand reaches the hilt
+        bool mid_draw = false;
+        if (!app.viewer_mode && app.player.anim.clip &&
+            app.player.anim.clip == app.player.clips.slash_draw) {
+            const float end = app.player.anim.clip_end();
+            mid_draw = end > 0.0f && app.player.anim.time < end * 0.35f;
         }
 
         // shield rides the forearm while guarding; once it's been raised it
@@ -882,13 +933,27 @@ int main(int argc, char** argv)
                        app.link.clips[app.clip_index].name == "Guard")
                     : (app.player.anim.overlay != nullptr);
             const bool hand_socket =
-                !guard_socket && (app.viewer_mode || shield_in_hand);
+                !guard_socket && !mid_draw && (app.viewer_mode || shield_in_hand);
             if (guard_socket && shield_arm.slot >= 0)
                 *sh = shield_arm;
             else if (hand_socket && shield_hand.slot >= 0)
                 *sh = shield_hand;
             else
                 *sh = shield_sheath;
+        }
+        // sword: drawn once weapons are out (same state as the shield); the
+        // viewer draws it for the attack clips so both sockets are visible
+        if (sword_socket_valid) {
+            if (Model::Attachment* sw = app.link.find_attachment("Sword")) {
+                bool drawn = shield_in_hand && !mid_draw;
+                if (app.viewer_mode) {
+                    const std::string& cn = app.link.clips.empty()
+                                                ? std::string()
+                                                : app.link.clips[app.clip_index].name;
+                    drawn = cn == "Slash" || cn == "Slash2" || cn == "SlashDraw";
+                }
+                *sw = drawn ? sword_hand : sword_sheath;
+            }
         }
 
         // animate
@@ -1039,7 +1104,10 @@ int main(int argc, char** argv)
         const float aspect = fb_h > 0 ? static_cast<float>(fb_w) / fb_h : 1.0f;
         const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.05f, 100.0f);
         const Mat4 view = mat4_look_at(app.cam.eye(), app.cam.target, {0, 1, 0});
+        // (viewproj is stored below for next frame's on-screen target test)
         const Mat4 viewproj = proj * view;
+        last_viewproj = viewproj;
+        have_viewproj = true;
 
         glUseProgram(grid_prog);
         glUniformMatrix4fv(g_viewproj, 1, GL_FALSE, viewproj.m);

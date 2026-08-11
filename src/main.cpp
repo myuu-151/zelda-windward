@@ -483,6 +483,7 @@ struct App {
     bool riding = false;         // Link is on its back
     bool mount_prompt = false;   // standing in a mount spot right now
     bool mount_go = false;       // SPACE pressed while the prompt showed
+    bool mount_pending = false;  // waiting for the sheathe before vaulting
     bool space_launch = false;   // SPACE pressed while riding on the ground
     bool mount_rear = false;     // which vault plays
     bool jerk_done = false;      // bird reacted to the landing
@@ -505,7 +506,7 @@ struct App {
     // user's final hand-tune, baked 2026-08-11 (on top of the derived seats)
     Vec3 seat_off_g{0.0f, -0.04f, -0.08f};
     Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
-    Vec3 seat_off_a{0.04f, -0.08f, 0.28f};
+    Vec3 seat_off_a{0.04f, 0.0f, 0.28f};
     float seat_pitch_r = 0.0f;
     float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
     float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
@@ -1907,8 +1908,26 @@ int main(int argc, char** argv)
                             app.player.state == PlayerState::Locomotion;
                         app.mount_prompt =
                             can_mount && (ds < 0.65f || dr < 0.65f);
-                        if (app.mount_prompt) {
-                            app.mount_rear = dr < ds;
+                        // gear away first: the vault was queued behind a
+                        // sheathe; fire it once the hands are free
+                        if (app.mount_pending) {
+                            if (std::min(ds, dr) > 2.0f) {
+                                app.mount_pending = false;  // walked away
+                            } else if (!shield_in_hand &&
+                                       app.player.state ==
+                                           PlayerState::Locomotion) {
+                                app.mount_pending = false;
+                                app.mount_go = true;
+                            }
+                            // hold the bird still while the sheathe plays
+                            if (app.bird_beh != 0) {
+                                app.bird_beh = 0;
+                                set_clip("IdleStand");
+                            }
+                        }
+                        if (app.mount_prompt || app.mount_go) {
+                            app.mount_rear = app.mount_prompt ? dr < ds
+                                                              : app.mount_rear;
                             // lock the bird: no wandering off mid-prompt
                             if (app.bird_beh != 0) {
                                 app.bird_beh = 0;
@@ -1916,6 +1935,12 @@ int main(int argc, char** argv)
                             }
                             if (app.mount_go) {
                                 app.mount_go = false;
+                                if (shield_in_hand) {
+                                    // put the sword and shield away, THEN vault
+                                    app.key_sheathe = true;
+                                    app.mount_pending = true;
+                                    break;
+                                }
                                 app.mount_prompt = false;
                                 app.bird_housed = false;  // wings out to droop
                                 set_clip("Kneel");
@@ -2021,14 +2046,29 @@ int main(int argc, char** argv)
                 }
                 case Bird::RideGround: {
                     app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
-                    if (app.space_launch) {
-                        app.space_launch = false;
-                        set_clip("Launch");
-                        app.bird_state = Bird::RideAir;
-                        break;
-                    }
                     const float mag = std::sqrt(app.ride_mx * app.ride_mx +
                                                 app.ride_mz * app.ride_mz);
+                    if (app.space_launch) {
+                        app.space_launch = false;
+                        if (mag > 0.25f) {
+                            // moving: take to the sky
+                            set_clip("Launch");
+                            app.bird_state = Bird::RideAir;
+                        } else {
+                            // standing: hop off beside it; the bird tucks its
+                            // wings away and goes back to pottering
+                            app.riding = false;
+                            const float cy = std::cos(app.bird_yaw);
+                            const float sy = std::sin(app.bird_yaw);
+                            app.player.pos = {
+                                app.bird_pos.x + 1.35f * cy - 0.35f * sy, 0.0f,
+                                app.bird_pos.z - 1.35f * sy - 0.35f * cy};
+                            app.player.speed = 0.0f;
+                            set_clip("Fold");
+                            app.bird_state = Bird::FoldDown;
+                        }
+                        break;
+                    }
                     if (mag > 0.25f) {
                         const float want_yaw =
                             std::atan2(app.ride_mx, app.ride_mz);
@@ -2066,10 +2106,21 @@ int main(int argc, char** argv)
                         std::min(1.0f, 3.0f * dtb);
                     const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                    std::cos(app.bird_yaw)};
-                    app.bird_pos = app.bird_pos + fwd * (8.5f * dtb);
+                    // diving (holding S) is allowed all the way to the
+                    // ground -- flatten out near it and touch down
+                    const bool diving = app.ride_in_y < -0.3f;
+                    const float speed =
+                        app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
+                    app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                     app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
-                    if (app.bird_pos.y < 2.5f) app.bird_pos.y = 2.5f;
+                    const float floor_y = diving ? 0.0f : 2.5f;
+                    if (app.bird_pos.y < floor_y) app.bird_pos.y = floor_y;
                     if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
+                    if (app.bird_pos.y <= 0.01f) {
+                        app.bird_pos.y = 0.0f;   // touchdown
+                        set_clip("RideIdle");
+                        app.bird_state = Bird::RideGround;
+                    }
                     break;
                 }
             }

@@ -505,6 +505,9 @@ struct App {
     Mat4 link_ride_mtx;      // Link's model matrix while riding
     Vec3 cam_aim{};          // where the view LOOKS (the eye still orbits
                              // cam.target, so a sky aim can't drag it up)
+    float sky_w = 0.0f;      // smooth 0..1: how "airborne" the lock target is
+    float aim_w = 0.0f;      // like sky_w but never zeroed by manual camera:
+                             // zooming out by hand keeps the aim on the bird
     Mat4 bird_world_mtx;     // bird's model matrix, computed pre-camera
     // live seat tuning (like the shield): offsets in bird-local space plus a
     // lean, one set per mode, persisted to seat_tune.txt on every keypress.
@@ -2391,10 +2394,24 @@ int main(int argc, char** argv)
                     const float want_pitch =
                         0.08f + u * (def + cam_rot_cap - 0.08f);
                     const float e = std::min(1.0f, 12.0f * dt_f);
+                    // up/down input while locked = the player wants the
+                    // camera: fall back to manual (like dragging does) so the
+                    // arc works and the sky auto-frame stands down
+                    if (tilt != 0.0f && app.player.locked)
+                        app.lock_cam_manual = true;
+                    // the sky auto-frame (eye at head height, pulled back)
+                    // fades in smoothly with the target's ALTITUDE -- a hard
+                    // threshold here snaps the whole camera when the bird
+                    // swoops low or lands
+                    float sky_t = (app.bird_pos.y - 1.2f) / 2.5f;
+                    sky_t = std::max(0.0f, std::min(1.0f, sky_t));
+                    const float aim_t = app.player.locked ? sky_t : 0.0f;
+                    app.aim_w += (aim_t - app.aim_w) * std::min(1.0f, 4.0f * dt_f);
+                    if (!app.player.locked || app.lock_cam_manual) sky_t = 0.0f;
+                    app.sky_w += (sky_t - app.sky_w) * std::min(1.0f, 4.0f * dt_f);
+                    const float wp = want_pitch + (0.03f - want_pitch) * app.sky_w;
                     app.cam.pull += (want_pull - app.cam.pull) * e;
-                    // sky-locked, the lock block below owns the pitch
-                    if (!(app.player.locked && app.bird_pos.y > 1.5f))
-                        app.cam.pitch += (want_pitch - app.cam.pitch) * e;
+                    app.cam.pitch += (wp - app.cam.pitch) * e;
                 }
             }
             if (app.player.locked && !app.lock_cam_manual) {
@@ -2408,10 +2425,7 @@ int main(int argc, char** argv)
                 while (dy < -3.14159265f) dy += 6.2831853f;
                 const float kf = std::min(1.0f, 8.0f * static_cast<float>(frame_dt));
                 app.cam.yaw += dy * kf;
-                // sky target: bring the eye down to Link's level so he stays
-                // in the bottom of the up-tilted frame
-                if (app.bird_pos.y > 1.5f)
-                    app.cam.pitch += (0.03f - app.cam.pitch) * kf;
+
             }
             // bias toward the bird by a CAPPED offset so backing away from
             // it doesn't slide Link toward the lens; a flying bird gets more
@@ -2428,10 +2442,12 @@ int main(int argc, char** argv)
             // the sky AIM: rises toward a flying bird, but only the look
             // direction -- the orbit pivot below stays at Link
             Vec3 aim_target = lock_target;
-            if (app.bird_pos.y > 1.5f && cube_dist > 1e-4f)
-                aim_target = head + Vec3{to_cube.x * 0.10f,
-                                         std::min(4.5f, to_cube.y * 0.45f),
-                                         to_cube.z * 0.10f};
+            if (cube_dist > 1e-4f) {
+                // aim AT the bird: locked on means it can never leave the
+                // frame, wherever it flies
+                const Vec3 sky_aim = app.bird_pos + Vec3{0, 1.3f, 0};
+                aim_target = lerp(lock_target, sky_aim, app.aim_w);
+            }
             // pulling out lifts the aim slightly toward the horizon so the
             // view reads as backing away, not staring down at the floor
             Vec3 free_target = head;

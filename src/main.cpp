@@ -480,7 +480,7 @@ struct App {
     Bird bird_state = Bird::Circle;
     bool bird_summon = false;   // set by Song of Skies recognition (a toggle)
     bool bird_housed = false;   // which wing set draws (Mt_WingsExt/Mt_WingsS)
-    Vec3 bird_pos{0, 11, 17};
+    Vec3 bird_pos{0, 14, 26};
     float bird_yaw = 0.0f, bird_roll = 0.0f;
     const AnimClip* bird_clip = nullptr;   // current clip + crossfade partner
     const AnimClip* bird_prev = nullptr;
@@ -1944,6 +1944,9 @@ int main(int argc, char** argv)
         Mat4 bird_mtx;
         if (app.has_loftwing) {
             using Bird = App::Bird;
+            // mount-sized: back height lands around Link's shoulders, so he
+            // can plausibly climb on. Distances/speeds scale with the body.
+            constexpr float kBirdScale = 2.0f;
             Model& bw = app.loftwing;
             const float dtb = static_cast<float>(frame_dt);
             const float now = static_cast<float>(app.sim_time);
@@ -1986,7 +1989,7 @@ int main(int argc, char** argv)
                 const Vec3 fwd{std::sin(app.bird_yaw), 0, std::cos(app.bird_yaw)};
                 app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                 // climb/sink capped so descents read as a glide, not a lift
-                app.bird_pos.y += std::max(-3.2f * dtb, std::min(3.2f * dtb, d.y));
+                app.bird_pos.y += std::max(-4.5f * dtb, std::min(4.5f * dtb, d.y));
                 return dist;
             };
 
@@ -1996,8 +1999,8 @@ int main(int argc, char** argv)
                     // out of the steering instead of being posed by hand
                     const float az =
                         std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.45f;
-                    fly_toward({std::sin(az) * 17.0f, 11.0f, std::cos(az) * 17.0f},
-                               4.0f);
+                    fly_toward({std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                               6.5f);
                     if (app.bird_summon) {
                         app.bird_summon = false;
                         set_clip("Flap");
@@ -2011,14 +2014,14 @@ int main(int argc, char** argv)
                     Vec3 away = app.bird_pos - app.player.pos;
                     away.y = 0;
                     away = normalize(away);
-                    const Vec3 land = app.player.pos + away * 2.6f;
+                    const Vec3 land = app.player.pos + away * (2.0f * kBirdScale);
                     const Vec3 to{land.x, 0.0f, land.z};
                     const Vec3 gap = to - app.bird_pos;
                     // slow up on final approach so touchdown isn't a faceplant
                     const float speed =
-                        std::min(7.0f, 1.5f + std::sqrt(dot(gap, gap)) * 0.9f);
+                        std::min(9.5f, 2.0f + std::sqrt(dot(gap, gap)) * 0.9f);
                     const float dist = fly_toward(to, speed);
-                    if (dist < 0.5f && app.bird_pos.y < 0.15f) {
+                    if (dist < 0.35f * kBirdScale && app.bird_pos.y < 0.15f) {
                         app.bird_pos.y = 0.0f;
                         set_clip("Fold");
                         app.bird_state = Bird::FoldDown;
@@ -2054,7 +2057,8 @@ int main(int argc, char** argv)
                             app.bird_beh = 1;
                             set_clip("Walk");
                             const float a = (std::rand() % 628) * 0.01f;
-                            const float rad = 1.6f + (std::rand() % 24) * 0.1f;
+                            const float rad =
+                                (1.4f + (std::rand() % 20) * 0.1f) * kBirdScale;
                             app.bird_wander =
                                 app.player.pos +
                                 Vec3{std::sin(a) * rad, 0, std::cos(a) * rad};
@@ -2070,7 +2074,7 @@ int main(int argc, char** argv)
                         Vec3 d = app.bird_wander - app.bird_pos;
                         d.y = 0;
                         const float dist = std::sqrt(dot(d, d));
-                        if (dist < 0.3f) {
+                        if (dist < 0.3f * kBirdScale) {
                             app.bird_timer = 0.0f;  // arrived: pick something new
                         } else {
                             const float want_yaw = std::atan2(d.x, d.z);
@@ -2081,7 +2085,9 @@ int main(int argc, char** argv)
                                 std::max(-2.5f * dtb, std::min(2.5f * dtb, dy));
                             const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                            std::cos(app.bird_yaw)};
-                            app.bird_pos = app.bird_pos + fwd * (0.8f * dtb);
+                            // stride length scales with the legs
+                            app.bird_pos =
+                                app.bird_pos + fwd * (0.8f * kBirdScale * dtb);
                         }
                     }
                     break;
@@ -2097,9 +2103,9 @@ int main(int argc, char** argv)
                         const float az =
                             std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.35f;
                         const float dist = fly_toward(
-                            {std::sin(az) * 17.0f, 11.0f, std::cos(az) * 17.0f},
-                            4.5f);
-                        if (dist < 1.5f) app.bird_state = Bird::Circle;
+                            {std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                            7.0f);
+                        if (dist < 2.5f) app.bird_state = Bird::Circle;
                     }
                     break;
                 }
@@ -2144,8 +2150,10 @@ int main(int argc, char** argv)
                              std::cos(app.bird_yaw * 0.5f)};
             const Quat q_roll{0, 0, std::sin(app.bird_roll * 0.5f),
                               std::cos(app.bird_roll * 0.5f)};
-            bird_mtx = mat4_from_trs(app.bird_pos, q_yaw, {1, 1, 1}) *
-                       mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
+            bird_mtx =
+                mat4_from_trs(app.bird_pos, q_yaw,
+                              {kBirdScale, kBirdScale, kBirdScale}) *
+                mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
         }
 
         glUseProgram(skin_prog);

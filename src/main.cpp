@@ -496,6 +496,7 @@ struct App {
     float mount_t = -1.0f;       // Link's vault clock (<0 = not vaulting)
     Vec3 mount_start{};          // where Link stood when the vault began
     float mount_start_yaw = 0.0f;
+    bool ride_shift = false;               // shift held (dive) while riding
     float ride_mx = 0.0f, ride_mz = 0.0f;  // camera-relative stick, for the bird
     float ride_in_x = 0.0f, ride_in_y = 0.0f;  // raw stick, for flight
     int saddle_node = -1;    // Spine_1
@@ -521,6 +522,11 @@ struct App {
     Vec3 seat_off_g{0.0f, -0.04f, -0.08f};
     Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
     Vec3 seat_off_a{0.04f, 0.0f, 0.28f};
+    Vec3 seat_off_d{0.04f, 0.0f, 0.28f};  // DIVE seat (starts = air)
+    float seat_pitch_d = 38.0f;
+    float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
+    bool stooping = false;   // dive visuals active (drives RideDive)
+    bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
     float seat_pitch_r = 0.0f;
     float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
     float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
@@ -696,14 +702,20 @@ int main(int argc, char** argv)
         // hand-tuned seat corrections from a previous session, if any
         if (FILE* f = std::fopen("seat_tune.txt", "r")) {
             const int n = std::fscanf(
-                f, "%f %f %f %f %f %f %f %f %f %f %f %f",
+                f, "%f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
                 &app.seat_off_g.x, &app.seat_off_g.y, &app.seat_off_g.z,
                 &app.seat_pitch_g, &app.seat_off_a.x, &app.seat_off_a.y,
                 &app.seat_off_a.z, &app.seat_pitch_a, &app.seat_off_r.x,
-                &app.seat_off_r.y, &app.seat_off_r.z, &app.seat_pitch_r);
+                &app.seat_off_r.y, &app.seat_off_r.z, &app.seat_pitch_r,
+                &app.seat_off_d.x, &app.seat_off_d.y, &app.seat_off_d.z,
+                &app.seat_pitch_d);
             if (n < 12) {  // old 8-float file: run inherits the idle seat
                 app.seat_off_r = app.seat_off_g;
                 app.seat_pitch_r = app.seat_pitch_g;
+            }
+            if (n < 16) {  // pre-dive file: dive inherits the air seat
+                app.seat_off_d = app.seat_off_a;
+                app.seat_pitch_d = app.seat_pitch_a;
             }
             std::fclose(f);
             SDL_Log("seat tune loaded: ground (%.2f %.2f %.2f, %.0f deg) "
@@ -1381,6 +1393,12 @@ int main(int argc, char** argv)
                 case SDL_EVENT_KEY_DOWN:
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
                     if (ev.key.key == SDLK_F2) want_shot = true;
+                    if (ev.key.key == SDLK_F4 && !ev.key.repeat && app.riding) {
+                        app.dive_freeze = !app.dive_freeze;
+                        SDL_Log("dive freeze: %s",
+                                app.dive_freeze ? "ON (tune the DIVE seat)"
+                                                : "off");
+                    }
                     if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
                         const bool on = !g_reverb.experimental.load(
                             std::memory_order_relaxed);
@@ -1478,12 +1496,16 @@ int main(int argc, char** argv)
                         // left-right, R/T lean fwd-back. Adjusts whichever
                         // seat mode is currently active.
                         if (app.riding) {
-                            const bool air = app.seat_air_w > 0.5f;
-                            const bool run = !air && app.run_w > 0.5f;
-                            Vec3* off = air   ? &app.seat_off_a
+                            const bool dive = app.stooping;
+                            const bool air = !dive && app.seat_air_w > 0.5f;
+                            const bool run =
+                                !dive && !air && app.run_w > 0.5f;
+                            Vec3* off = dive  ? &app.seat_off_d
+                                        : air ? &app.seat_off_a
                                         : run ? &app.seat_off_r
                                               : &app.seat_off_g;
-                            float* pit = air   ? &app.seat_pitch_a
+                            float* pit = dive  ? &app.seat_pitch_d
+                                         : air ? &app.seat_pitch_a
                                          : run ? &app.seat_pitch_r
                                                : &app.seat_pitch_g;
                             bool tuned = true;
@@ -1503,7 +1525,8 @@ int main(int argc, char** argv)
                                 char buf[160];
                                 SDL_snprintf(buf, sizeof(buf),
                                              "%s seat: off(%.2f %.2f %.2f) lean %.0f",
-                                             air   ? "AIR"
+                                             dive  ? "DIVE"
+                                             : air ? "AIR"
                                              : run ? "RUN"
                                                    : "IDLE",
                                              off->x, off->y, off->z, *pit);
@@ -1513,13 +1536,15 @@ int main(int argc, char** argv)
                                     std::fprintf(
                                         f,
                                         "%f %f %f %f %f %f %f %f "
-                                        "%f %f %f %f\n",
+                                        "%f %f %f %f %f %f %f %f\n",
                                         app.seat_off_g.x, app.seat_off_g.y,
                                         app.seat_off_g.z, app.seat_pitch_g,
                                         app.seat_off_a.x, app.seat_off_a.y,
                                         app.seat_off_a.z, app.seat_pitch_a,
                                         app.seat_off_r.x, app.seat_off_r.y,
-                                        app.seat_off_r.z, app.seat_pitch_r);
+                                        app.seat_off_r.z, app.seat_pitch_r,
+                                        app.seat_off_d.x, app.seat_off_d.y,
+                                        app.seat_off_d.z, app.seat_pitch_d);
                                     std::fclose(f);
                                 }
                             }
@@ -1698,6 +1723,7 @@ int main(int argc, char** argv)
                 app.ride_mz = fwd.z * in_y + right.z * in_x;
                 app.ride_in_x = in_x;
                 app.ride_in_y = in_y;
+                app.ride_shift = guard;
                 const bool mount_seq =
                     app.riding || app.bird_state == App::Bird::Kneel;
                 if (mount_seq) {
@@ -2142,18 +2168,39 @@ int main(int argc, char** argv)
                         std::min(1.0f, 3.0f * dtb);
                     const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                    std::cos(app.bird_yaw)};
-                    // climb/dive tilts the whole bird: W noses it up at the
-                    // sky, S pitches it into a dive
-                    app.bird_pitch +=
-                        ((-app.ride_in_y * 0.42f) - app.bird_pitch) *
-                        std::min(1.0f, 2.5f * dtb);
-                    // diving (holding S) is allowed all the way to the
-                    // ground -- flatten out near it and touch down
+                    // S + SHIFT held = the STOOP: wings snap back, the whole
+                    // bird pitches steeply and drops fast along its nose
                     const bool diving = app.ride_in_y < -0.3f;
-                    const float speed =
-                        app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
-                    app.bird_pos = app.bird_pos + fwd * (speed * dtb);
-                    app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
+                    const bool stoop =
+                        (diving && app.ride_shift) || app.dive_freeze;
+                    app.stooping = stoop;
+                    const float want_pitch =
+                        stoop ? 1.05f : -app.ride_in_y * 0.42f;
+                    app.bird_pitch += (want_pitch - app.bird_pitch) *
+                                      std::min(1.0f, 2.5f * dtb);
+                    if (stoop) {
+                        if (app.bird_clip && app.bird_clip->name != "Dive")
+                            set_clip("Dive");
+                    } else if (app.bird_clip && app.bird_clip->name == "Dive") {
+                        set_clip("Flap");   // pull out of the stoop
+                    }
+                    float speed = app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
+                    if (app.dive_freeze) {
+                        speed = 0.0f;   // held mid-air for seat tuning
+                    } else if (stoop) {
+                        // travel along the nose: fast, mostly downward
+                        speed = 16.0f;
+                        app.bird_pos =
+                            app.bird_pos +
+                            fwd * (std::cos(app.bird_pitch) * speed * dtb);
+                        app.bird_pos.y -=
+                            std::sin(app.bird_pitch) * speed * dtb;
+                    } else if (app.dive_freeze) {
+                        // frozen: dive visuals, no motion
+                    } else {
+                        app.bird_pos = app.bird_pos + fwd * (speed * dtb);
+                        app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
+                    }
                     const float floor_y = diving ? 0.0f : 2.5f;
                     if (app.bird_pos.y < floor_y) app.bird_pos.y = floor_y;
                     if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
@@ -2166,8 +2213,11 @@ int main(int argc, char** argv)
                 }
             }
 
-            if (app.bird_state != Bird::RideAir)
+            if (app.bird_state != Bird::RideAir) {
                 app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
+                app.stooping = false;
+                app.dive_freeze = false;
+            }
 
             // --- pose. Circling (and the ridden cruise) keeps the flap/soar
             // habit; everything else runs the clip machine with a short
@@ -2255,9 +2305,13 @@ int main(int argc, char** argv)
                 const float gpitch =
                     app.seat_pitch_g +
                     (app.seat_pitch_r - app.seat_pitch_g) * app.run_w;
-                const Vec3 off = lerp(goff, app.seat_off_a, w);
+                app.dive_w += ((app.stooping ? 1.0f : 0.0f) - app.dive_w) *
+                              std::min(1.0f, 3.0f * dtb);
+                Vec3 off = lerp(goff, app.seat_off_a, w);
+                off = lerp(off, app.seat_off_d, app.dive_w);
                 pb = pb + off;
-                const float lean = gpitch + (app.seat_pitch_a - gpitch) * w;
+                float lean = gpitch + (app.seat_pitch_a - gpitch) * w;
+                lean = lean + (app.seat_pitch_d - lean) * app.dive_w;
                 const float ga = lean * 3.14159265f / 180.0f;
                 const Quat qx{std::sin(ga * 0.5f), 0, 0, std::cos(ga * 0.5f)};
                 const Mat4 L = bird_mtx * mat4_from_trs(pb, qx, {1, 1, 1});
@@ -2300,7 +2354,8 @@ int main(int argc, char** argv)
                     app.link.evaluate(
                         *mc, std::min(app.mount_t, mc->duration - 1e-3f));
             } else if (app.riding) {
-                const AnimClip* rc = app.link.find_clip("Ride");
+                const AnimClip* rc =
+                    app.link.find_clip(app.stooping ? "RideDive" : "Ride");
                 if (rc)
                     app.link.evaluate(
                         *rc, std::fmod(static_cast<float>(app.sim_time),

@@ -202,6 +202,7 @@ const Glyph kFont[] = {
     {'D', {0x7F, 0x41, 0x41, 0x22, 0x1C}},
     {'G', {0x3E, 0x41, 0x49, 0x49, 0x7A}},
     {'I', {0x00, 0x41, 0x7F, 0x41, 0x00}},
+    {'K', {0x7F, 0x08, 0x14, 0x22, 0x41}},
     {'L', {0x7F, 0x40, 0x40, 0x40, 0x40}},
     {'N', {0x7F, 0x04, 0x08, 0x10, 0x7F}},
     {'P', {0x7F, 0x09, 0x09, 0x09, 0x06}},
@@ -964,6 +965,71 @@ int main(int argc, char** argv)
         {7.25f, 2, 1.0f},   // E4  eighth
         {7.50f, 1, 1.0f},   // D4  dotted half
     };
+
+    // --- Song of Skies: ours, not Nintendo's. Built like Zelda's Lullaby --
+    // a lyrical 3/4 hymn whose opening phrase IS the motif you play, so the
+    // trigger feels like the song. The shape is an arc: C rises through the
+    // fifth to the octave, then falls home, which is the "sky" idea.
+    // keys 1 5 8 6 5 3  (C G C' A G E)
+    const int kSongOfSkies[6] = {0, 4, 7, 5, 4, 2};
+    // 120bpm, quarter 0.5s. Flowing rather than stately: no long holds, and
+    // eighth-note pairs on the turns give it lift instead of a plod. Four
+    // bars of 4/4, resolving on the held C.
+    // Plays through to the D, hangs there, then takes it from the top; the
+    // second time round the D resolves onto the C and it's done.
+    const SongNote kSongOfSkiesFull[31] = {
+        // -- first pass, ending on the D -----------------------------------
+        { 0.00f, 0, 1.0f},   //  1  C   quarter
+        { 0.50f, 4, 0.9f},   //  2  G   quarter
+        { 1.00f, 7, 1.0f},   //  3  C'  quarter
+        { 1.50f, 5, 0.9f},   //  4  A   eighth
+        { 1.75f, 4, 0.9f},   //  5  G   eighth
+        { 2.00f, 2, 0.9f},   //  6  E   quarter
+        { 2.50f, 4, 1.0f},   //  7  G   half     -- breath
+        { 3.50f, 2, 0.9f},   //  8  E   eighth
+        { 3.75f, 4, 0.9f},   //  9  G   eighth
+        { 4.00f, 7, 1.0f},   // 10  C'  quarter
+        { 4.50f, 6, 1.0f},   // 11  B   quarter
+        { 5.00f, 5, 0.9f},   // 12  A   eighth
+        { 5.25f, 4, 0.9f},   // 13  G   eighth
+        { 5.50f, 2, 0.9f},   // 14  E   quarter
+        { 6.00f, 1, 0.9f},   // 15  D   half     -- hangs, then back to the top
+        // -- second pass ---------------------------------------------------
+        { 7.00f, 0, 1.0f},   //  1  C   quarter
+        { 7.50f, 4, 0.9f},   //  2  G   quarter
+        { 8.00f, 7, 1.0f},   //  3  C'  quarter
+        { 8.50f, 5, 0.9f},   //  4  A   eighth
+        { 8.75f, 4, 0.9f},   //  5  G   eighth
+        { 9.00f, 2, 0.9f},   //  6  E   quarter
+        { 9.50f, 4, 1.0f},   //  7  G   half     -- breath
+        {10.50f, 2, 0.9f},   //  8  E   eighth
+        {10.75f, 4, 0.9f},   //  9  G   eighth
+        {11.00f, 7, 1.0f},   // 10  C'  quarter
+        {11.50f, 6, 1.0f},   // 11  B   quarter
+        {12.00f, 5, 0.9f},   // 12  A   eighth
+        {12.25f, 4, 0.9f},   // 13  G   eighth
+        {12.50f, 2, 0.9f},   // 14  E   quarter
+        {13.00f, 1, 0.9f},   // 15  D   quarter  -- this time it resolves
+        {13.50f, 0, 1.0f},   // 16  C   held     -- home
+    };
+
+    struct Song {
+        const char* title;
+        const int* motif;
+        size_t motif_len;
+        const SongNote* full;
+        size_t full_len;
+    };
+    // lengths derived from the arrays: hand-written counts drift when a
+    // melody is edited and the tune silently stops early
+    const Song kSongs[2] = {
+        {"YOU PLAYED SONG OF TIME!", kSongOfTime, std::size(kSongOfTime),
+         kSongOfTimeFull, std::size(kSongOfTimeFull)},
+        {"YOU PLAYED SONG OF SKIES!", kSongOfSkies, std::size(kSongOfSkies),
+         kSongOfSkiesFull, std::size(kSongOfSkiesFull)},
+    };
+
+    const Song* song_active = nullptr;
     bool song_playing = false;
     float song_timer = 0.0f;
     size_t song_index = 0;
@@ -1035,26 +1101,26 @@ int main(int argc, char** argv)
                                 flute_notes.push_back(n * 4 + (acc + 1));
                                 play_note(kScale[n] + acc);
 
-                                // did the last few notes spell a song?
-                                const size_t need =
-                                    sizeof(kSongOfTime) / sizeof(kSongOfTime[0]);
-                                if (flute_notes.size() >= need) {
+                                // did the last few notes spell any song?
+                                for (const Song& song : kSongs) {
+                                    if (flute_notes.size() < song.motif_len) continue;
                                     bool hit = true;
-                                    const size_t off = flute_notes.size() - need;
-                                    for (size_t k = 0; k < need && hit; ++k) {
+                                    const size_t off =
+                                        flute_notes.size() - song.motif_len;
+                                    for (size_t k = 0; k < song.motif_len && hit; ++k) {
                                         const int v = flute_notes[off + k];
-                                        hit = (v / 4 == kSongOfTime[k]) && (v % 4 == 1);
+                                        hit = (v / 4 == song.motif[k]) && (v % 4 == 1);
                                     }
-                                    if (hit) {
-                                        // clear the staff, name it, play it in full
-                                        flute_notes.clear();
-                                        SDL_strlcpy(hud_message,
-                                                    "YOU PLAYED SONG OF TIME!",
-                                                    sizeof(hud_message));
-                                        song_playing = true;
-                                        song_timer = -0.6f;   // a beat of silence
-                                        song_index = 0;
-                                    }
+                                    if (!hit) continue;
+                                    // clear the staff, name it, play it in full
+                                    flute_notes.clear();
+                                    SDL_strlcpy(hud_message, song.title,
+                                                sizeof(hud_message));
+                                    song_active = &song;
+                                    song_playing = true;
+                                    song_timer = -0.6f;   // a beat of silence
+                                    song_index = 0;
+                                    break;
                                 }
                             }
                         }
@@ -1706,21 +1772,21 @@ int main(int argc, char** argv)
 
             // performing a recognised song: the notes land on the staff as
             // they sound, then everything resets so you start over, like OoT
-            if (song_playing) {
-                constexpr size_t kSongLen =
-                    sizeof(kSongOfTimeFull) / sizeof(kSongOfTimeFull[0]);
+            if (song_playing && song_active) {
+                const size_t len = song_active->full_len;
                 song_timer += static_cast<float>(frame_dt);
-                while (song_index < kSongLen &&
-                       song_timer >= kSongOfTimeFull[song_index].t) {
-                    const int st = kSongOfTimeFull[song_index].step;
-                    play_note(kScale[st], kSongOfTimeFull[song_index].vel);
+                while (song_index < len &&
+                       song_timer >= song_active->full[song_index].t) {
+                    const int st = song_active->full[song_index].step;
+                    play_note(kScale[st], song_active->full[song_index].vel);
                     if (flute_notes.size() >= 8) flute_notes.clear();  // page turn
                     flute_notes.push_back(st * 4 + 1);
                     ++song_index;
                 }
-                if (song_index >= kSongLen &&
-                    song_timer > kSongOfTimeFull[kSongLen - 1].t + 2.2f) {
+                if (song_index >= len &&
+                    song_timer > song_active->full[len - 1].t + 2.2f) {
                     song_playing = false;
+                    song_active = nullptr;
                     flute_notes.clear();
                     hud_message[0] = '\0';
                 }

@@ -471,6 +471,11 @@ struct App {
     Model link;
     int clip_index = 0;
     double clip_time = 0.0;
+
+    // ambient loftwing circling overhead (absent if the glb isn't found)
+    Model loftwing;
+    bool has_loftwing = false;
+    float loftw_theta = 0.0f;
     OrbitCamera cam;
     bool dragging = false;
 
@@ -587,6 +592,14 @@ int main(int argc, char** argv)
     }
     if (const AnimClip* idle = app.link.find_clip("Idle"))
         app.clip_index = static_cast<int>(idle - app.link.clips.data());
+
+    // the loftwing is ambient scenery: fly it if the glb is there, shrug if not
+    {
+        std::string lw = std::string(SDL_GetBasePath()) + "..\\..\\assets\\loftwing.glb";
+        app.has_loftwing =
+            app.loftwing.load(lw.c_str()) || app.loftwing.load("assets/loftwing.glb");
+        if (!app.has_loftwing) SDL_Log("no loftwing.glb -- skipping the bird");
+    }
 
     // --- shield sockets: sheath (as authored) and forearm (computed from the
     // guard stance: keep the sheathed orientation but spin it to face front,
@@ -1909,6 +1922,46 @@ int main(int argc, char** argv)
             // (drawn after the character, so his body can't paint over them)
         }
 
+        // --- the loftwing: big lazy circle overhead, gliding with flap
+        // bursts. Purely ambient -- it has no gameplay yet.
+        Mat4 bird_mtx;
+        if (app.has_loftwing) {
+            app.loftw_theta += 0.22f * static_cast<float>(frame_dt);
+            const AnimClip* flap = app.loftwing.find_clip("Flap");
+            const AnimClip* soar = app.loftwing.find_clip("Soar");
+            const float now = static_cast<float>(app.sim_time);
+            if (flap && soar) {
+                // 9s habit: a burst of flapping, then a long glide
+                const float cyc = std::fmod(now, 9.0f);
+                float w;  // 0 = flap, 1 = soar
+                if (cyc < 2.6f) w = 0.0f;
+                else if (cyc < 3.3f) w = (cyc - 2.6f) / 0.7f;
+                else if (cyc < 8.3f) w = 1.0f;
+                else w = 1.0f - (cyc - 8.3f) / 0.7f;
+                app.loftwing.sample(*flap, std::fmod(now, flap->duration),
+                                    app.loftwing.scratch_a);
+                app.loftwing.sample(*soar, std::fmod(now, soar->duration),
+                                    app.loftwing.scratch_b);
+                Model::blend(app.loftwing.scratch_a, app.loftwing.scratch_b, w,
+                             app.loftwing.scratch_mix);
+                app.loftwing.palette_from(app.loftwing.scratch_mix);
+            } else if (!app.loftwing.clips.empty()) {
+                const AnimClip& c0 = app.loftwing.clips[0];
+                app.loftwing.evaluate(c0, std::fmod(now, c0.duration));
+            }
+            const float R = 17.0f, H = 11.0f;
+            const Vec3 bpos{std::sin(app.loftw_theta) * R, H,
+                            std::cos(app.loftw_theta) * R};
+            // tangent heading; the bird faces +Z at rest, same as Link
+            const float yaw = std::atan2(std::cos(app.loftw_theta),
+                                         -std::sin(app.loftw_theta));
+            const Quat q_yaw{0, std::sin(yaw * 0.5f), 0, std::cos(yaw * 0.5f)};
+            const float bank = 0.24f;  // constant-rate turn = constant lean
+            const Quat q_roll{0, 0, std::sin(bank * 0.5f), std::cos(bank * 0.5f)};
+            bird_mtx = mat4_from_trs(bpos, q_yaw, {1, 1, 1}) *
+                       mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
+        }
+
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);
         const Mat4 model_mtx =
@@ -1947,6 +2000,37 @@ int main(int argc, char** argv)
             }
         }
         glBindVertexArray(0);
+
+        // the loftwing rides the same skinning shader; just repoint the
+        // model matrix and palette
+        if (app.has_loftwing && !app.loftwing.palette.empty()) {
+            glUniformMatrix4fv(u_model, 1, GL_FALSE, bird_mtx.m);
+            glUniformMatrix4fv(u_palette,
+                               static_cast<GLsizei>(app.loftwing.palette.size()),
+                               GL_FALSE, app.loftwing.palette.data()->m);
+            glBindVertexArray(app.loftwing.vao);
+            for (int pass = 0; pass < 2; ++pass) {
+                const bool alpha_pass = pass == 1;
+                if (alpha_pass) {
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glDepthMask(GL_FALSE);
+                }
+                for (const Submesh& sub : app.loftwing.submeshes) {
+                    if (sub.alpha_blend != alpha_pass) continue;
+                    glBindTexture(GL_TEXTURE_2D, sub.gl_texture);
+                    glDrawElements(
+                        GL_TRIANGLES, static_cast<GLsizei>(sub.index_count),
+                        GL_UNSIGNED_INT,
+                        reinterpret_cast<void*>(sub.first_index * sizeof(uint32_t)));
+                }
+                if (alpha_pass) {
+                    glDisable(GL_BLEND);
+                    glDepthMask(GL_TRUE);
+                }
+            }
+            glBindVertexArray(0);
+        }
 
         // sparkles last: additive, over the character
         if (!star_verts.empty()) {

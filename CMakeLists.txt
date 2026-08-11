@@ -32,23 +32,35 @@ if(MSVC)
     set_target_properties(zelda PROPERTIES WIN32_EXECUTABLE $<CONFIG:Release>)
 endif()
 
-# ---- zelda_packed: fully self-contained exe (model embedded, no assets dir) ----
-set(EMBED_SRC ${CMAKE_CURRENT_BINARY_DIR}/embedded_link.c)
-add_custom_command(
-    OUTPUT ${EMBED_SRC}
-    COMMAND ${CMAKE_COMMAND}
-            -DIN=${CMAKE_CURRENT_SOURCE_DIR}/assets/link.glb
-            -DOUT=${EMBED_SRC}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/link.glb
-            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
-    COMMENT "Embedding assets/link.glb")
+# ---- zelda_packed: fully self-contained exe (all assets embedded) ----
+set(EMBED_SRCS "")
+foreach(pair
+        "link.glb|link_glb"
+        "loftwing.glb|loftwing_glb"
+        "panflute_c.wav|panflute_wav"
+        "song_success.wav|chime_wav")
+    string(REPLACE "|" ";" pair "${pair}")
+    list(GET pair 0 asset)
+    list(GET pair 1 sym)
+    set(embed_src ${CMAKE_CURRENT_BINARY_DIR}/embedded_${sym}.c)
+    add_custom_command(
+        OUTPUT ${embed_src}
+        COMMAND ${CMAKE_COMMAND}
+                -DIN=${CMAKE_CURRENT_SOURCE_DIR}/assets/${asset}
+                -DOUT=${embed_src}
+                -DSYM=${sym}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/${asset}
+                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+        COMMENT "Embedding assets/${asset}")
+    list(APPEND EMBED_SRCS ${embed_src})
+endforeach()
 add_executable(zelda_packed
     src/main.cpp
     src/gl_loader.cpp
     src/model.cpp
     src/player.cpp
-    ${EMBED_SRC}
+    ${EMBED_SRCS}
 )
 target_include_directories(zelda_packed PRIVATE third_party/cgltf third_party/stb)
 target_compile_definitions(zelda_packed PRIVATE _CRT_SECURE_NO_WARNINGS EMBED_LINK_GLB)

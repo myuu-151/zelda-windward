@@ -502,9 +502,10 @@ struct App {
     // Defaults are the user's hand-tuned values, baked 2026-08-11.
     // the user's tuning is FOLDED INTO the surface-derived seat constants
     // (seat_local.py) -- these start at zero or they double-apply
-    Vec3 seat_off_g{};
-    Vec3 seat_off_r{};
-    Vec3 seat_off_a{0.04f, 0.0f, 0.28f};  // the user's 12:44 flight tune
+    // user's final hand-tune, baked 2026-08-11 (on top of the derived seats)
+    Vec3 seat_off_g{0.0f, -0.04f, -0.08f};
+    Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
+    Vec3 seat_off_a{0.04f, -0.08f, 0.28f};
     float seat_pitch_r = 0.0f;
     float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
     float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
@@ -2043,9 +2044,10 @@ int main(int argc, char** argv)
                     } else {
                         set_clip("RideIdle");
                     }
-                    // run seat split disabled for now: run rides the
-                    // idle seat, exactly the approved behaviour
-                    app.run_w = 0.0f;
+                    // idle<->run seat blend follows the actual gait, so
+                    // the RUN tune set only applies while moving
+                    app.run_w += ((mag > 0.25f ? 1.0f : 0.0f) - app.run_w) *
+                                 std::min(1.0f, 5.0f * dtb);
                     break;
                 }
                 case Bird::RideAir: {

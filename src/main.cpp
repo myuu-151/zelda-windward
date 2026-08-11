@@ -508,6 +508,7 @@ struct App {
     float sky_w = 0.0f;      // smooth 0..1: how "airborne" the lock target is
     float aim_w = 0.0f;      // like sky_w but never zeroed by manual camera:
                              // zooming out by hand keeps the aim on the bird
+    float manual_t = 0.0f;   // grace after arrow input; sky tracking resumes
     Mat4 bird_world_mtx;     // bird's model matrix, computed pre-camera
     // live seat tuning (like the shield): offsets in bird-local space plus a
     // lean, one set per mode, persisted to seat_tune.txt on every keypress.
@@ -2297,6 +2298,7 @@ int main(int argc, char** argv)
             app.lock_blend += ((app.player.locked ? 1.0f : 0.0f) - app.lock_blend) * k;
             if (app.player.locked && !app.was_locked) {
                 app.free_yaw = app.cam.yaw;  // remember the pre-lock angle
+                app.aim_w = 1.0f;            // fresh lock = full tracking
                 app.free_pitch = app.cam.pitch;
                 app.lock_cam_manual = false;
                 // nudge toward whichever side the camera already hangs on, so
@@ -2365,7 +2367,7 @@ int main(int argc, char** argv)
                     // angle (-1) .. default (0) .. pulled-out overview (+1),
                     // and pitch + pull are both derived from it, eased in step
                     const float dt_f = static_cast<float>(frame_dt);
-                    if (!fluting) {
+                    if (!fluting && !app.player.locked) {
                         app.cam_arc += tilt * 2.6f * dt_f;
                         if (app.cam_arc > 1.0f) app.cam_arc = 1.0f;
                         if (app.cam_arc < -1.0f) app.cam_arc = -1.0f;
@@ -2394,20 +2396,18 @@ int main(int argc, char** argv)
                     const float want_pitch =
                         0.08f + u * (def + cam_rot_cap - 0.08f);
                     const float e = std::min(1.0f, 12.0f * dt_f);
-                    // up/down input while locked = the player wants the
-                    // camera: fall back to manual (like dragging does) so the
-                    // arc works and the sky auto-frame stands down
-                    if (tilt != 0.0f && app.player.locked)
-                        app.lock_cam_manual = true;
-                    // the sky auto-frame (eye at head height, pulled back)
-                    // fades in smoothly with the target's ALTITUDE -- a hard
-                    // threshold here snaps the whole camera when the bird
-                    // swoops low or lands
-                    float sky_t = (app.bird_pos.y - 1.2f) / 2.5f;
-                    sky_t = std::max(0.0f, std::min(1.0f, sky_t));
-                    const float aim_t = app.player.locked ? sky_t : 0.0f;
-                    app.aim_w += (aim_t - app.aim_w) * std::min(1.0f, 4.0f * dt_f);
-                    if (!app.player.locked || app.lock_cam_manual) sky_t = 0.0f;
+                    // while locked, up/down is a TUG between the target and
+                    // Link: UP pulls the framing to the bird, DOWN hauls it
+                    // back behind Link. It stays where you leave it.
+                    if (app.player.locked)
+                        app.aim_w = std::max(
+                            0.0f, std::min(1.0f, app.aim_w - tilt * 1.4f * dt_f));
+                    // and the whole sky framing still fades with the bird's
+                    // ALTITUDE so landings never snap
+                    float alt_t = (app.bird_pos.y - 1.2f) / 2.5f;
+                    alt_t = std::max(0.0f, std::min(1.0f, alt_t));
+                    const float sky_t =
+                        app.player.locked ? alt_t * app.aim_w : 0.0f;
                     app.sky_w += (sky_t - app.sky_w) * std::min(1.0f, 4.0f * dt_f);
                     const float wp = want_pitch + (0.03f - want_pitch) * app.sky_w;
                     app.cam.pull += (want_pull - app.cam.pull) * e;
@@ -2446,7 +2446,7 @@ int main(int argc, char** argv)
                 // aim AT the bird: locked on means it can never leave the
                 // frame, wherever it flies
                 const Vec3 sky_aim = app.bird_pos + Vec3{0, 1.3f, 0};
-                aim_target = lerp(lock_target, sky_aim, app.aim_w);
+                aim_target = lerp(lock_target, sky_aim, app.sky_w);
             }
             // pulling out lifts the aim slightly toward the horizon so the
             // view reads as backing away, not staring down at the floor

@@ -509,6 +509,8 @@ struct App {
     float aim_w = 0.0f;      // like sky_w but never zeroed by manual camera:
                              // zooming out by hand keeps the aim on the bird
     float manual_t = 0.0f;   // grace after arrow input; sky tracking resumes
+    float bird_pitch = 0.0f; // visual nose up/down while ridden in flight
+    float fly_w = 0.5f;      // ridden flight anim mix: 0 = flap, 1 = soar
     Mat4 bird_world_mtx;     // bird's model matrix, computed pre-camera
     // live seat tuning (like the shield): offsets in bird-local space plus a
     // lean, one set per mode, persisted to seat_tune.txt on every keypress.
@@ -2140,6 +2142,11 @@ int main(int argc, char** argv)
                         std::min(1.0f, 3.0f * dtb);
                     const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                    std::cos(app.bird_yaw)};
+                    // climb/dive tilts the whole bird: W noses it up at the
+                    // sky, S pitches it into a dive
+                    app.bird_pitch +=
+                        ((-app.ride_in_y * 0.42f) - app.bird_pitch) *
+                        std::min(1.0f, 2.5f * dtb);
                     // diving (holding S) is allowed all the way to the
                     // ground -- flatten out near it and touch down
                     const bool diving = app.ride_in_y < -0.3f;
@@ -2159,6 +2166,9 @@ int main(int argc, char** argv)
                 }
             }
 
+            if (app.bird_state != Bird::RideAir)
+                app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
+
             // --- pose. Circling (and the ridden cruise) keeps the flap/soar
             // habit; everything else runs the clip machine with a short
             // crossfade on each switch.
@@ -2173,6 +2183,15 @@ int main(int argc, char** argv)
                 else if (cyc < 3.3f) w = (cyc - 2.6f) / 0.7f;
                 else if (cyc < 8.3f) w = 1.0f;
                 else w = 1.0f - (cyc - 8.3f) / 0.7f;
+                if (app.bird_state == Bird::RideAir) {
+                    // ridden: the stick owns the mix -- climbing FLAPS,
+                    // diving sets the wings into the soar glide
+                    const float tgt = app.ride_in_y > 0.3f   ? 0.0f
+                                      : app.ride_in_y < -0.3f ? 1.0f
+                                                              : w;
+                    app.fly_w += (tgt - app.fly_w) * std::min(1.0f, 3.0f * dtb);
+                    w = app.fly_w;
+                }
                 bw.sample(*flap, std::fmod(now, flap->duration), bw.scratch_a);
                 bw.sample(*soar, std::fmod(now, soar->duration), bw.scratch_b);
                 Model::blend(bw.scratch_a, bw.scratch_b, w, bw.scratch_mix);
@@ -2203,9 +2222,12 @@ int main(int argc, char** argv)
                              std::cos(app.bird_yaw * 0.5f)};
             const Quat q_roll{0, 0, std::sin(app.bird_roll * 0.5f),
                               std::cos(app.bird_roll * 0.5f)};
+            const Quat q_pitch{std::sin(app.bird_pitch * 0.5f), 0, 0,
+                               std::cos(app.bird_pitch * 0.5f)};
             bird_mtx =
                 mat4_from_trs(app.bird_pos, q_yaw,
                               {kBirdScale, kBirdScale, kBirdScale}) *
+                mat4_from_trs({0, 0, 0}, q_pitch, {1, 1, 1}) *
                 mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
 
             // --- Link rides the saddle: a point in Spine_1's local frame,

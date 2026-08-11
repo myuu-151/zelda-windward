@@ -62,7 +62,15 @@ struct Reverb {
     int ei[kMaxCh]{};
     float echo_lp[kMaxCh]{};
     float store[kCombs][kMaxCh]{};
+    // Limiter settings. The experimental set is what the echo work shipped
+    // with before the buzz was tracked down: an attack that settles in about
+    // four samples, which modulates the waveform it rides. Kept switchable
+    // (F3) so the two can be A/B'd without a rebuild.
     static constexpr float kCeiling = 0.88f;
+    static constexpr float kAttack = 0.01f;          // ~2ms
+    static constexpr float kCeilingExp = 0.92f;
+    static constexpr float kAttackExp = 0.25f;       // ~4 samples
+    std::atomic<bool> experimental{false};
     float wet = 0.0f;                 // audio thread only
     float limit = 1.0f;               // limiter gain, audio thread only
     std::atomic<float> target{0.0f};  // set by the game
@@ -97,6 +105,9 @@ struct Reverb {
     void process(float* buf, int frames, int channels) {
         if (!ready) return;
         const float tgt = target.load(std::memory_order_relaxed);
+        const bool exp = experimental.load(std::memory_order_relaxed);
+        const float ceiling = exp ? kCeilingExp : kCeiling;
+        const float attack = exp ? kAttackExp : kAttack;
         const int nch = channels < kMaxCh ? channels : kMaxCh;
         for (int i = 0; i < frames; ++i) {
             wet += (tgt - wet) * 0.0009f;      // ramp, so it never clicks
@@ -139,12 +150,12 @@ struct Reverb {
             float peak = 0.0f;
             for (int c = 0; c < nch; ++c)
                 peak = std::fabs(mix[c]) > peak ? std::fabs(mix[c]) : peak;
-            const float want = peak > kCeiling ? kCeiling / peak : 1.0f;
-            // attack over ~2ms rather than ~4 samples. A gain envelope that
-            // moves within a cycle of the waveform is modulation, not gain
-            // riding, and the sidebands it makes read as a buzz on the attack
-            // of a note -- which is where the limiter engages hardest.
-            limit += (want - limit) * (want < limit ? 0.01f : 0.00006f);
+            const float want = peak > ceiling ? ceiling / peak : 1.0f;
+            // A gain envelope that moves within a cycle of the waveform is
+            // modulation, not gain riding, and the sidebands it makes read as
+            // a buzz on the attack of a note -- which is where the limiter
+            // engages hardest. Hence the slow attack on the default set.
+            limit += (want - limit) * (want < limit ? attack : 0.00006f);
             for (int c = 0; c < nch; ++c) buf[i * channels + c] = mix[c] * limit;
         }
     }
@@ -1230,6 +1241,15 @@ int main(int argc, char** argv)
                 case SDL_EVENT_KEY_DOWN:
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
                     if (ev.key.key == SDLK_F2) want_shot = true;
+                    if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
+                        const bool on = !g_reverb.experimental.load(
+                            std::memory_order_relaxed);
+                        g_reverb.experimental.store(on,
+                                                    std::memory_order_relaxed);
+                        SDL_Log("limiter: %s (ceiling %.2f, attack %.2f)",
+                                on ? "EXPERIMENTAL (pre-fix)" : "default",
+                                on ? 0.92f : 0.88f, on ? 0.25f : 0.01f);
+                    }
                     if (ev.key.key == SDLK_F5 || ev.key.key == SDLK_F6 ||
                         ev.key.key == SDLK_F7 || ev.key.key == SDLK_F8) {
                         // live camera-arc tuning

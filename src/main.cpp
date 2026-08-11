@@ -348,7 +348,7 @@ struct App {
     bool viewer_mode = false;  // F1: clip viewer (arrow keys) vs play mode
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
-    bool key_flute = false;
+    bool key_flute = false, key_sheathe = false;
 };
 
 bool save_screenshot(const char* path, int fb_w, int fb_h)
@@ -509,8 +509,8 @@ int main(int argc, char** argv)
 
     // vertical-arc camera tunables (game mode: F5/F6 rotation cap -/+,
     // F7/F8 zoom-out max -/+), persisted like the shield tuning
-    float cam_rot_cap = -0.06f;  // top-of-sweep angle offset from the default
-    float cam_zoom_max = 3.0f;   // pull-out distance at full arc
+    float cam_rot_cap = -0.07f;  // top-of-sweep angle offset from the default
+    float cam_zoom_max = 4.6f;   // pull-out distance at full arc
     const std::string cam_tune_path = std::string(SDL_GetBasePath()) + "cam_tune.txt";
     if (FILE* tf = std::fopen(cam_tune_path.c_str(), "r")) {
         float v[2];
@@ -910,30 +910,63 @@ int main(int argc, char** argv)
     }
     // semitones above middle C for keys 1..8 (C D E F G A B C')
     const int kScale[8] = {0, 2, 4, 5, 7, 9, 11, 12};
-    auto play_note = [&](int semitones) {
+    // a pan flute plays one note at a time: starting a note releases whatever
+    // was still ringing. Without this the 1.7s sample covers the gaps between
+    // notes and the rhythm smears into a chord.
+    float voice_gain[kVoices] = {};
+    bool voice_releasing[kVoices] = {};
+    auto play_note = [&](int semitones, float vel = 1.0f) {
         if (!flute_wav || !voices[0]) return;
-        SDL_AudioStream* v = voices[voice_next];
+        const int idx = voice_next;
+        SDL_AudioStream* v = voices[idx];
         voice_next = (voice_next + 1) % kVoices;
+        for (int i = 0; i < kVoices; ++i)
+            if (i != idx && voices[i] && SDL_GetAudioStreamAvailable(voices[i]) > 0)
+                voice_releasing[i] = true;
         SDL_ClearAudioStream(v);
         SDL_SetAudioStreamFrequencyRatio(
             v, std::pow(2.0f, static_cast<float>(semitones) / 12.0f));
+        voice_gain[idx] = 0.85f * vel;
+        voice_releasing[idx] = false;
+        SDL_SetAudioStreamGain(v, voice_gain[idx]);
         SDL_PutAudioStreamData(v, flute_wav, static_cast<int>(flute_wav_len));
-        // share the headroom: a lone note rings at full level, and voices only
-        // duck while several overlap. 1/sqrt(n) because different pitches sum
-        // incoherently -- 1/n would throw away far too much level
-        int active = 0;
-        for (SDL_AudioStream* s : voices)
-            if (s && SDL_GetAudioStreamAvailable(s) > 0) ++active;
-        if (active < 1) active = 1;
-        const float g = 0.9f / std::sqrt(static_cast<float>(active));
-        for (SDL_AudioStream* s : voices)
-            if (s && SDL_GetAudioStreamAvailable(s) > 0) SDL_SetAudioStreamGain(s, g);
     };
 
     // notes played on the flute this session, packed as step*4 + (accidental+1)
     std::vector<int> flute_notes;
     bool was_fluting = false;
     char hud_message[64] = "";  // song names land here once one is recognised
+
+    // --- songs: match what he plays, then perform the full arrangement ---
+    // keys 6 2 4 6 2 4 -- A D F A D F, the Song of Time as OoT plays it
+    // (C-right, A, C-down, twice over)
+    const int kSongOfTime[6] = {5, 1, 3, 5, 1, 3};
+    // Onsets taken straight from the Song of Time MIDI (120bpm, quarter=0.5s).
+    // The D is the held note, not the A: "A  Daah  F". Note the two different
+    // C's -- C5 up in the ACB run, but C4 down in the closing C E D.
+    struct SongNote { float t; int step; float vel; };
+    const SongNote kSongOfTimeFull[17] = {
+        {0.00f, 5, 1.0f},   // A4  quarter
+        {0.50f, 1, 1.0f},   // D4  half
+        {1.50f, 3, 1.0f},   // F4  quarter
+        {2.00f, 5, 1.0f},   // A4  quarter
+        {2.50f, 1, 1.0f},   // D4  half
+        {3.50f, 3, 1.0f},   // F4  quarter
+        {4.00f, 5, 1.0f},   // A4  eighth
+        {4.25f, 7, 1.0f},   // C5  eighth
+        {4.50f, 6, 1.0f},   // B4  quarter
+        {5.00f, 4, 1.0f},   // G4  quarter
+        {5.50f, 3, 1.0f},   // F4  eighth
+        {5.75f, 4, 1.0f},   // G4  eighth
+        {6.00f, 5, 1.0f},   // A4  quarter
+        {6.50f, 1, 1.0f},   // D4  quarter
+        {7.00f, 0, 1.0f},   // C4  eighth  (the low C, key 1)
+        {7.25f, 2, 1.0f},   // E4  eighth
+        {7.50f, 1, 1.0f},   // D4  dotted half
+    };
+    bool song_playing = false;
+    float song_timer = 0.0f;
+    size_t song_index = 0;
 
     // last frame's view-projection: lets the sim test whether the lock-on
     // target is actually on screen before allowing a lock
@@ -988,7 +1021,7 @@ int main(int argc, char** argv)
                         if (ev.key.key == SDLK_I && !guarding_now) app.key_flute = true;
                         // 1..8 walk the octave; hold up/down for the sharp or
                         // flat, so the whole chromatic 12 is reachable
-                        if (app.player.state == PlayerState::Flute) {
+                        if (app.player.state == PlayerState::Flute && !song_playing) {
                             const SDL_Keycode nk[8] = {SDLK_1, SDLK_2, SDLK_3,
                                                        SDLK_4, SDLK_5, SDLK_6,
                                                        SDLK_7, SDLK_8};
@@ -1001,14 +1034,36 @@ int main(int argc, char** argv)
                                 if (flute_notes.size() >= 8) flute_notes.clear();
                                 flute_notes.push_back(n * 4 + (acc + 1));
                                 play_note(kScale[n] + acc);
+
+                                // did the last few notes spell a song?
+                                const size_t need =
+                                    sizeof(kSongOfTime) / sizeof(kSongOfTime[0]);
+                                if (flute_notes.size() >= need) {
+                                    bool hit = true;
+                                    const size_t off = flute_notes.size() - need;
+                                    for (size_t k = 0; k < need && hit; ++k) {
+                                        const int v = flute_notes[off + k];
+                                        hit = (v / 4 == kSongOfTime[k]) && (v % 4 == 1);
+                                    }
+                                    if (hit) {
+                                        // clear the staff, name it, play it in full
+                                        flute_notes.clear();
+                                        SDL_strlcpy(hud_message,
+                                                    "YOU PLAYED SONG OF TIME!",
+                                                    sizeof(hud_message));
+                                        song_playing = true;
+                                        song_timer = -0.6f;   // a beat of silence
+                                        song_index = 0;
+                                    }
+                                }
                             }
                         }
                         if (ev.key.key == SDLK_SPACE) {
-                            // standing still: re-house the shield on the back
+                            // standing still with the gear out: play it away
                             // (rolling needs movement input anyway)
                             if (app.player.state == PlayerState::Locomotion &&
-                                app.player.speed < 0.05f)
-                                shield_in_hand = false;
+                                app.player.speed < 0.05f && shield_in_hand)
+                                app.key_sheathe = true;
                             else
                                 app.key_roll = true;
                         }
@@ -1120,6 +1175,20 @@ int main(int argc, char** argv)
         double frame_dt = static_cast<double>(now_ns - prev_ns) / 1e9;
         prev_ns = now_ns;
         if (frame_dt > 0.25) frame_dt = 0.25;
+
+        // fade out notes that have been released, so each one ends cleanly
+        for (int i = 0; i < kVoices; ++i) {
+            if (!voices[i] || !voice_releasing[i]) continue;
+            voice_gain[i] -= static_cast<float>(frame_dt) * (0.85f / 0.16f);
+            if (voice_gain[i] <= 0.0f) {
+                voice_gain[i] = 0.0f;
+                voice_releasing[i] = false;
+                SDL_ClearAudioStream(voices[i]);
+            } else {
+                SDL_SetAudioStreamGain(voices[i], voice_gain[i]);
+            }
+        }
+
         accumulator += frame_dt;
         while (accumulator >= kFixedDt) {
             app.sim_time += kFixedDt;
@@ -1154,6 +1223,7 @@ int main(int argc, char** argv)
                 in.attack_pressed = app.key_attack;
                 in.roll_pressed = app.key_roll;
                 in.flute_pressed = app.key_flute;
+                in.sheathe_pressed = app.key_sheathe;
                 in.guard_held = guard;
                 in.cam_yaw = app.cam.yaw;  // he turns to face the lens
                 // you can only lock on to what's on screen: project the target
@@ -1174,6 +1244,7 @@ int main(int argc, char** argv)
                 in.target_pos = kTargetPos;
                 app.player.weapons_drawn = shield_in_hand;
                 app.key_attack = app.key_roll = app.key_flute = false;
+                app.key_sheathe = false;
                 app.player.update(in, static_cast<float>(kFixedDt));
                 if (app.player.wants_draw) {  // the attack unsheathed everything
                     app.player.wants_draw = false;
@@ -1188,6 +1259,15 @@ int main(int argc, char** argv)
             app.viewer_mode
                 ? (!app.link.clips.empty() && app.link.clips[app.clip_index].name == "Flute")
                 : (app.player.anim.clip && app.player.anim.clip->name == "Flute");
+
+        // sheathing: sword and shield both ride the hand until his hand
+        // reaches the scabbard, halfway through, then they sit on his back
+        if (!app.viewer_mode && app.player.state == PlayerState::Sheathe &&
+            app.player.anim.clip && app.player.anim.clip == app.player.clips.sheathe) {
+            const float end = app.player.anim.clip_end();
+            if (end > 0.0f && app.player.anim.time >= end * 0.5f)
+                shield_in_hand = false;
+        }
 
         // during the first part of SlashDraw the gear is still on his back --
         // it comes out as the hand reaches the hilt
@@ -1618,6 +1698,29 @@ int main(int argc, char** argv)
             if (want_hud != was_fluting) {   // fresh staff each time it opens
                 was_fluting = want_hud;
                 if (want_hud) {
+                    flute_notes.clear();
+                    hud_message[0] = '\0';
+                }
+                song_playing = false;
+            }
+
+            // performing a recognised song: the notes land on the staff as
+            // they sound, then everything resets so you start over, like OoT
+            if (song_playing) {
+                constexpr size_t kSongLen =
+                    sizeof(kSongOfTimeFull) / sizeof(kSongOfTimeFull[0]);
+                song_timer += static_cast<float>(frame_dt);
+                while (song_index < kSongLen &&
+                       song_timer >= kSongOfTimeFull[song_index].t) {
+                    const int st = kSongOfTimeFull[song_index].step;
+                    play_note(kScale[st], kSongOfTimeFull[song_index].vel);
+                    if (flute_notes.size() >= 8) flute_notes.clear();  // page turn
+                    flute_notes.push_back(st * 4 + 1);
+                    ++song_index;
+                }
+                if (song_index >= kSongLen &&
+                    song_timer > kSongOfTimeFull[kSongLen - 1].t + 2.2f) {
+                    song_playing = false;
                     flute_notes.clear();
                     hud_message[0] = '\0';
                 }

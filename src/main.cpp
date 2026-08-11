@@ -884,6 +884,7 @@ int main(int argc, char** argv)
     Uint8* flute_wav = nullptr;
     Uint32 flute_wav_len = 0;
     int voice_next = 0;
+    SDL_AudioDeviceID audio_dev = 0;
     {
         SDL_AudioSpec wav_spec{};
         std::string wpath = std::string(SDL_GetBasePath()) +
@@ -892,13 +893,12 @@ int main(int argc, char** argv)
             SDL_LoadWAV("assets/panflute_c.wav", &wav_spec, &flute_wav,
                         &flute_wav_len);
         if (flute_wav) {
-            const SDL_AudioDeviceID dev =
-                SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
-            if (dev) {
+            audio_dev = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+            if (audio_dev) {
                 for (SDL_AudioStream*& v : voices) {
                     v = SDL_CreateAudioStream(&wav_spec, nullptr);
                     if (!v) continue;
-                    SDL_BindAudioStream(dev, v);
+                    SDL_BindAudioStream(audio_dev, v);
                 }
                 SDL_Log("flute audio: %u bytes, %d ch @ %d Hz", flute_wav_len,
                         wav_spec.channels, wav_spec.freq);
@@ -909,6 +909,36 @@ int main(int argc, char** argv)
             SDL_Log("could not load assets/panflute_c.wav: %s", SDL_GetError());
         }
     }
+
+    // the chime for recognising a song -- its own stream, so it is never
+    // pitched or cut short by the notes that follow it
+    SDL_AudioStream* chime_stream = nullptr;
+    Uint8* chime_wav = nullptr;
+    Uint32 chime_wav_len = 0;
+    if (audio_dev) {
+        SDL_AudioSpec cs{};
+        std::string cpath = std::string(SDL_GetBasePath()) +
+                            "..\\..\\assets\\song_success.wav";
+        if (!SDL_LoadWAV(cpath.c_str(), &cs, &chime_wav, &chime_wav_len))
+            SDL_LoadWAV("assets/song_success.wav", &cs, &chime_wav, &chime_wav_len);
+        if (chime_wav) {
+            chime_stream = SDL_CreateAudioStream(&cs, nullptr);
+            if (chime_stream) {
+                SDL_SetAudioStreamGain(chime_stream, 0.7f);
+                SDL_BindAudioStream(audio_dev, chime_stream);
+            }
+            SDL_Log("chime: %u bytes, %d ch @ %d Hz", chime_wav_len, cs.channels,
+                    cs.freq);
+        } else {
+            SDL_Log("could not load assets/song_success.wav: %s", SDL_GetError());
+        }
+    }
+    auto play_chime = [&]() {
+        if (!chime_stream || !chime_wav) return;
+        SDL_ClearAudioStream(chime_stream);
+        SDL_PutAudioStreamData(chime_stream, chime_wav,
+                               static_cast<int>(chime_wav_len));
+    };
     // semitones above middle C for keys 1..8 (C D E F G A B C')
     const int kScale[8] = {0, 2, 4, 5, 7, 9, 11, 12};
     // a pan flute plays one note at a time: starting a note releases whatever
@@ -916,14 +946,22 @@ int main(int argc, char** argv)
     // notes and the rhythm smears into a chord.
     float voice_gain[kVoices] = {};
     bool voice_releasing[kVoices] = {};
+    float voice_release_rate[kVoices] = {};   // gain lost per second
+    float voice_release_delay[kVoices] = {};  // holds full level before fading
+    constexpr float kNoteRelease = 0.85f / 0.16f;   // note cutting off a note
+    constexpr float kSongRelease = 0.85f / 1.10f;   // gentler duck for a song
+    constexpr float kSongHold = 0.55f;    // let it sustain before that fade
     auto play_note = [&](int semitones, float vel = 1.0f) {
         if (!flute_wav || !voices[0]) return;
         const int idx = voice_next;
         SDL_AudioStream* v = voices[idx];
         voice_next = (voice_next + 1) % kVoices;
         for (int i = 0; i < kVoices; ++i)
-            if (i != idx && voices[i] && SDL_GetAudioStreamAvailable(voices[i]) > 0)
+            if (i != idx && voices[i] && SDL_GetAudioStreamAvailable(voices[i]) > 0) {
                 voice_releasing[i] = true;
+                voice_release_rate[i] = kNoteRelease;
+                voice_release_delay[i] = 0.0f;
+            }
         SDL_ClearAudioStream(v);
         SDL_SetAudioStreamFrequencyRatio(
             v, std::pow(2.0f, static_cast<float>(semitones) / 12.0f));
@@ -1033,6 +1071,9 @@ int main(int argc, char** argv)
     bool song_playing = false;
     float song_timer = 0.0f;
     size_t song_index = 0;
+    bool chime_pending = false;
+    constexpr float kNoteRing = 0.45f;   // chime lands while the note fades
+    constexpr float kChimeLead = 1.5f;   // then the chime, before the melody
 
     // last frame's view-projection: lets the sim test whether the lock-on
     // target is actually on screen before allowing a lock
@@ -1118,7 +1159,18 @@ int main(int argc, char** argv)
                                                 sizeof(hud_message));
                                     song_active = &song;
                                     song_playing = true;
-                                    song_timer = -0.6f;   // a beat of silence
+                                    // duck your last note away quickly rather
+                                    // than letting it ring its full length,
+                                    // then the chime, then the melody
+                                    for (int i = 0; i < kVoices; ++i)
+                                        if (voices[i] &&
+                                            SDL_GetAudioStreamAvailable(voices[i]) > 0) {
+                                            voice_releasing[i] = true;
+                                            voice_release_rate[i] = kSongRelease;
+                                            voice_release_delay[i] = kSongHold;
+                                        }
+                                    song_timer = -(kNoteRing + kChimeLead);
+                                    chime_pending = true;
                                     song_index = 0;
                                     break;
                                 }
@@ -1245,7 +1297,11 @@ int main(int argc, char** argv)
         // fade out notes that have been released, so each one ends cleanly
         for (int i = 0; i < kVoices; ++i) {
             if (!voices[i] || !voice_releasing[i]) continue;
-            voice_gain[i] -= static_cast<float>(frame_dt) * (0.85f / 0.16f);
+            if (voice_release_delay[i] > 0.0f) {   // sustain, then fade
+                voice_release_delay[i] -= static_cast<float>(frame_dt);
+                continue;
+            }
+            voice_gain[i] -= static_cast<float>(frame_dt) * voice_release_rate[i];
             if (voice_gain[i] <= 0.0f) {
                 voice_gain[i] = 0.0f;
                 voice_releasing[i] = false;
@@ -1775,6 +1831,10 @@ int main(int argc, char** argv)
             if (song_playing && song_active) {
                 const size_t len = song_active->full_len;
                 song_timer += static_cast<float>(frame_dt);
+                if (chime_pending && song_timer >= -kChimeLead) {
+                    play_chime();
+                    chime_pending = false;
+                }
                 while (song_index < len &&
                        song_timer >= song_active->full[song_index].t) {
                     const int st = song_active->full[song_index].step;

@@ -476,8 +476,38 @@ struct App {
     // the Song of Skies calls it down; the song again sends it back up.
     Model loftwing;
     bool has_loftwing = false;
-    enum class Bird { Circle, Arrive, FoldDown, Ground, Leave };
+    enum class Bird { Circle, Arrive, FoldDown, Ground, Leave, Kneel,
+                      RideGround, RideAir };
     Bird bird_state = Bird::Circle;
+    // --- mounting ---
+    bool riding = false;         // Link is on its back
+    bool mount_prompt = false;   // standing in a mount spot right now
+    bool mount_go = false;       // SPACE pressed while the prompt showed
+    bool space_launch = false;   // SPACE pressed while riding on the ground
+    bool mount_rear = false;     // which vault plays
+    bool jerk_done = false;      // bird reacted to the landing
+    float mount_t = -1.0f;       // Link's vault clock (<0 = not vaulting)
+    Vec3 mount_start{};          // where Link stood when the vault began
+    float mount_start_yaw = 0.0f;
+    float ride_mx = 0.0f, ride_mz = 0.0f;  // camera-relative stick, for the bird
+    float ride_in_x = 0.0f, ride_in_y = 0.0f;  // raw stick, for flight
+    int saddle_node = -1;    // Spine_1
+    Vec3 seat_bone_g{};      // user ground seat, in Spine_1's local frame
+    Vec3 seat_bone_a{};      // user flight seat, in Spine_1's local frame
+    float seat_air_w = 0.0f; // 0 = ground seat, 1 = flight seat
+    Mat4 link_ride_mtx;      // Link's model matrix while riding
+    Mat4 bird_world_mtx;     // bird's model matrix, computed pre-camera
+    // live seat tuning (like the shield): offsets in bird-local space plus a
+    // lean, one set per mode, persisted to seat_tune.txt on every keypress.
+    // Defaults are the user's hand-tuned values, baked 2026-08-11.
+    // the user's tuning is FOLDED INTO the surface-derived seat constants
+    // (seat_local.py) -- these start at zero or they double-apply
+    Vec3 seat_off_g{};
+    Vec3 seat_off_r{};
+    Vec3 seat_off_a{0.04f, 0.0f, 0.28f};  // the user's 12:44 flight tune
+    float seat_pitch_r = 0.0f;
+    float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
+    float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
     bool bird_summon = false;   // set by Song of Skies recognition (a toggle)
     bool bird_housed = false;   // which wing set draws (Mt_WingsExt/Mt_WingsS)
     Vec3 bird_pos{0, 14, 26};
@@ -613,6 +643,54 @@ int main(int argc, char** argv)
             app.loftwing.load(lw.c_str()) || app.loftwing.load("assets/loftwing.glb");
         if (!app.has_loftwing) SDL_Log("no loftwing.glb -- skipping the bird");
         std::srand(static_cast<unsigned>(SDL_GetTicks()));  // ground behaviours
+        // Seats are USER-AUTHORED: the SEAT empty in loftw_mount_tune.blend,
+        // keyed at f1 (standing) and f100 (flight). Each is converted into
+        // Spine_1's local frame against the pose it was authored on, so his
+        // POSITION rides the bone through every pose (launch coil, flight
+        // level, flap bob) while his LEAN blends between the two authored
+        // seats -- carrying the bone's full rotation instead is what caused
+        // the nose-dive. blender (x, y, z) -> game (x, z, -y).
+        if (app.has_loftwing) {
+            app.saddle_node = app.loftwing.find_node("Spine_1");
+            auto bone_local = [&](const char* clip_name, float t, Vec3 seat) {
+                const AnimClip* c = app.loftwing.find_clip(clip_name);
+                if (!c || app.saddle_node < 0) return seat;
+                app.loftwing.evaluate(*c, t);
+                const Mat4 inv =
+                    mat4_inverse(app.loftwing.world_pose[app.saddle_node]);
+                return Vec3{inv.m[0] * seat.x + inv.m[4] * seat.y +
+                                inv.m[8] * seat.z + inv.m[12],
+                            inv.m[1] * seat.x + inv.m[5] * seat.y +
+                                inv.m[9] * seat.z + inv.m[13],
+                            inv.m[2] * seat.x + inv.m[6] * seat.y +
+                                inv.m[10] * seat.z + inv.m[14]};
+            };
+            app.seat_bone_g = bone_local("RideIdle", 0.0f, {0.0f, 1.36f, -0.68f});  // surface-derived (seat_local.py)
+            // flight seat derived from geometry (air_seat.py): the back
+            // surface sits far FORWARD of the ground seat in bird-local
+            // space once the body levels out
+            app.seat_bone_a =
+                bone_local("Flap", 8.0f / 30.0f, {0.0f, 1.80f, 0.39f});
+        }
+        // hand-tuned seat corrections from a previous session, if any
+        if (FILE* f = std::fopen("seat_tune.txt", "r")) {
+            const int n = std::fscanf(
+                f, "%f %f %f %f %f %f %f %f %f %f %f %f",
+                &app.seat_off_g.x, &app.seat_off_g.y, &app.seat_off_g.z,
+                &app.seat_pitch_g, &app.seat_off_a.x, &app.seat_off_a.y,
+                &app.seat_off_a.z, &app.seat_pitch_a, &app.seat_off_r.x,
+                &app.seat_off_r.y, &app.seat_off_r.z, &app.seat_pitch_r);
+            if (n < 12) {  // old 8-float file: run inherits the idle seat
+                app.seat_off_r = app.seat_off_g;
+                app.seat_pitch_r = app.seat_pitch_g;
+            }
+            std::fclose(f);
+            SDL_Log("seat tune loaded: ground (%.2f %.2f %.2f, %.0f deg) "
+                    "air (%.2f %.2f %.2f, %.0f deg)",
+                    app.seat_off_g.x, app.seat_off_g.y, app.seat_off_g.z,
+                    app.seat_pitch_g, app.seat_off_a.x, app.seat_off_a.y,
+                    app.seat_off_a.z, app.seat_pitch_a);
+        }
     }
 
     // --- shield sockets: sheath (as authored) and forearm (computed from the
@@ -1360,14 +1438,70 @@ int main(int argc, char** argv)
                                 }
                             }
                         }
+                        // live seat tuning while riding (persisted like the
+                        // shield tune): Y/H up-down, U/J fwd-back, K/L slide
+                        // left-right, R/T lean fwd-back. Adjusts whichever
+                        // seat mode is currently active.
+                        if (app.riding) {
+                            const bool air = app.seat_air_w > 0.5f;
+                            const bool run = !air && app.run_w > 0.5f;
+                            Vec3* off = air   ? &app.seat_off_a
+                                        : run ? &app.seat_off_r
+                                              : &app.seat_off_g;
+                            float* pit = air   ? &app.seat_pitch_a
+                                         : run ? &app.seat_pitch_r
+                                               : &app.seat_pitch_g;
+                            bool tuned = true;
+                            const float s = 0.04f;
+                            switch (ev.key.key) {
+                                case SDLK_Y: off->y += s; break;
+                                case SDLK_H: off->y -= s; break;
+                                case SDLK_U: off->z += s; break;
+                                case SDLK_J: off->z -= s; break;
+                                case SDLK_K: off->x -= s; break;
+                                case SDLK_L: off->x += s; break;
+                                case SDLK_R: *pit += 2.0f; break;
+                                case SDLK_T: *pit -= 2.0f; break;
+                                default: tuned = false; break;
+                            }
+                            if (tuned) {
+                                char buf[160];
+                                SDL_snprintf(buf, sizeof(buf),
+                                             "%s seat: off(%.2f %.2f %.2f) lean %.0f",
+                                             air   ? "AIR"
+                                             : run ? "RUN"
+                                                   : "IDLE",
+                                             off->x, off->y, off->z, *pit);
+                                SDL_SetWindowTitle(app.window, buf);
+                                SDL_Log("%s", buf);
+                                if (FILE* f = std::fopen("seat_tune.txt", "w")) {
+                                    std::fprintf(
+                                        f,
+                                        "%f %f %f %f %f %f %f %f "
+                                        "%f %f %f %f\n",
+                                        app.seat_off_g.x, app.seat_off_g.y,
+                                        app.seat_off_g.z, app.seat_pitch_g,
+                                        app.seat_off_a.x, app.seat_off_a.y,
+                                        app.seat_off_a.z, app.seat_pitch_a,
+                                        app.seat_off_r.x, app.seat_off_r.y,
+                                        app.seat_off_r.z, app.seat_pitch_r);
+                                    std::fclose(f);
+                                }
+                            }
+                        }
                         if (ev.key.key == SDLK_SPACE) {
-                            // standing still with the gear out: play it away
-                            // (rolling needs movement input anyway)
-                            if (app.player.state == PlayerState::Locomotion &&
-                                app.player.speed < 0.05f && shield_in_hand)
+                            if (app.mount_prompt) {
+                                app.mount_go = true;    // climb on
+                            } else if (app.riding) {
+                                app.space_launch = true;  // take to the sky
+                            } else if (app.player.state == PlayerState::Locomotion &&
+                                       app.player.speed < 0.05f && shield_in_hand) {
+                                // standing still with the gear out: play it away
+                                // (rolling needs movement input anyway)
                                 app.key_sheathe = true;
-                            else
+                            } else {
                                 app.key_roll = true;
+                            }
                         }
                     }
                     if (app.viewer_mode && !app.link.clips.empty()) {
@@ -1523,6 +1657,19 @@ int main(int argc, char** argv)
                 fwd = normalize(fwd);
                 const Vec3 right{-fwd.z, 0, fwd.x};
 
+                // stash the stick for the bird: while mounted IT consumes
+                // movement, and Link's own state machine sits the turn out
+                app.ride_mx = fwd.x * in_y + right.x * in_x;
+                app.ride_mz = fwd.z * in_y + right.z * in_x;
+                app.ride_in_x = in_x;
+                app.ride_in_y = in_y;
+                const bool mount_seq =
+                    app.riding || app.bird_state == App::Bird::Kneel;
+                if (mount_seq) {
+                    app.key_attack = app.key_roll = app.key_flute = false;
+                    app.key_sheathe = false;
+                } else {
+
                 Player::Input in;
                 in.move_x = fwd.x * in_y + right.x * in_x;
                 in.move_z = fwd.z * in_y + right.z * in_x;
@@ -1556,6 +1703,7 @@ int main(int argc, char** argv)
                     app.player.wants_draw = false;
                     shield_in_hand = true;
                 }
+                }  // !mount_seq
             }
             accumulator -= kFixedDt;
         }
@@ -1627,6 +1775,405 @@ int main(int argc, char** argv)
         }
 
         // animate
+        // --- the loftwing: circles overhead until the Song of Skies calls it
+        // down to land nearby and potter about; the song again sends it home.
+        Mat4& bird_mtx = app.bird_world_mtx;
+        if (app.has_loftwing) {
+            using Bird = App::Bird;
+            // the mount scale is baked into the blend/glb now (scale_rig.py);
+            // this stays as the one knob if the size ever needs a nudge, and
+            // the scale-dependent distances below still hang off it
+            constexpr float kBirdScale = 1.0f;
+            // distances were tuned against the pre-baked scale-2 bird
+            constexpr float kBirdReach = 2.0f;
+            Model& bw = app.loftwing;
+            const float dtb = static_cast<float>(frame_dt);
+            const float now = static_cast<float>(app.sim_time);
+            const AnimClip* flap = bw.find_clip("Flap");
+            const AnimClip* soar = bw.find_clip("Soar");
+
+            auto set_clip = [&](const char* name) {
+                const AnimClip* c = bw.find_clip(name);
+                if (!c || c == app.bird_clip) return;
+                app.bird_prev = app.bird_clip;
+                app.bird_prev_t = app.bird_t;
+                app.bird_clip = c;
+                app.bird_t = 0.0;
+                app.bird_fade = app.bird_prev ? 0.0f : 1.0f;
+            };
+            auto is_oneshot = [](const AnimClip* c) {
+                return c && (c->name == "Fold" || c->name == "Unfold" ||
+                             c->name == "Peck" || c->name == "Launch");
+            };
+            auto clip_t = [&](const AnimClip* c, double t) {
+                if (!c || c->duration <= 0.0f) return 0.0f;
+                if (is_oneshot(c))
+                    return std::min(static_cast<float>(t), c->duration - 1e-3f);
+                return std::fmod(static_cast<float>(t), c->duration);
+            };
+            // steer toward `to` along the current heading (so it banks through
+            // turns instead of pivoting); returns remaining distance
+            auto fly_toward = [&](Vec3 to, float speed) {
+                Vec3 d = to - app.bird_pos;
+                const float dist = std::sqrt(dot(d, d));
+                if (dist < 1e-4f) return dist;
+                const float want_yaw = std::atan2(d.x, d.z);
+                float dy = want_yaw - app.bird_yaw;
+                while (dy > 3.14159265f) dy -= 6.2831853f;
+                while (dy < -3.14159265f) dy += 6.2831853f;
+                const float turn = std::max(-1.5f * dtb, std::min(1.5f * dtb, dy));
+                app.bird_yaw += turn;
+                const float want_roll = dtb > 1e-5f ? (turn / dtb) * 0.16f : 0.0f;
+                app.bird_roll += (want_roll - app.bird_roll) * std::min(1.0f, 4.0f * dtb);
+                const Vec3 fwd{std::sin(app.bird_yaw), 0, std::cos(app.bird_yaw)};
+                app.bird_pos = app.bird_pos + fwd * (speed * dtb);
+                // climb/sink capped so descents read as a glide, not a lift
+                app.bird_pos.y += std::max(-4.5f * dtb, std::min(4.5f * dtb, d.y));
+                return dist;
+            };
+
+            switch (app.bird_state) {
+                case Bird::Circle: {
+                    // chase a point a little ahead on the ring: banking falls
+                    // out of the steering instead of being posed by hand
+                    const float az =
+                        std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.45f;
+                    fly_toward({std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                               6.5f);
+                    if (app.bird_summon) {
+                        app.bird_summon = false;
+                        set_clip("Flap");
+                        app.bird_state = Bird::Arrive;
+                    }
+                    break;
+                }
+                case Bird::Arrive: {
+                    // land a couple of units from Link, approaching from
+                    // wherever the bird already is
+                    Vec3 away = app.bird_pos - app.player.pos;
+                    away.y = 0;
+                    away = normalize(away);
+                    const Vec3 land = app.player.pos + away * (2.0f * kBirdScale * kBirdReach);
+                    const Vec3 to{land.x, 0.0f, land.z};
+                    const Vec3 gap = to - app.bird_pos;
+                    // slow up on final approach so touchdown isn't a faceplant
+                    const float speed =
+                        std::min(9.5f, 2.0f + std::sqrt(dot(gap, gap)) * 0.9f);
+                    const float dist = fly_toward(to, speed);
+                    if (dist < 0.35f * kBirdScale * kBirdReach && app.bird_pos.y < 0.15f) {
+                        app.bird_pos.y = 0.0f;
+                        set_clip("Fold");
+                        app.bird_state = Bird::FoldDown;
+                    }
+                    break;
+                }
+                case Bird::FoldDown: {
+                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
+                    if (app.bird_clip && app.bird_t >= app.bird_clip->duration - 0.02f) {
+                        app.bird_housed = true;   // the swap hides in the tuck
+                        app.bird_timer = 0.0f;    // pick a behaviour right away
+                        app.bird_state = Bird::Ground;
+                    }
+                    break;
+                }
+                case Bird::Ground: {
+                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
+                    if (app.bird_summon) {
+                        app.bird_summon = false;
+                        app.bird_housed = false;  // wings reappear as they open
+                        set_clip("Unfold");
+                        app.bird_state = Bird::Leave;
+                        break;
+                    }
+                    // mount spots: its left flank, and directly behind. The
+                    // prompt only shows standing IN one, and while it shows
+                    // the bird holds still so the sequence starts clean.
+                    {
+                        const float cy = std::cos(app.bird_yaw);
+                        const float sy = std::sin(app.bird_yaw);
+                        auto local_to_world = [&](float lx, float lz) {
+                            return Vec3{app.bird_pos.x + lx * cy + lz * sy, 0.0f,
+                                        app.bird_pos.z - lx * sy + lz * cy};
+                        };
+                        const Vec3 side_spot = local_to_world(1.35f, -0.35f);
+                        const Vec3 rear_spot = local_to_world(0.0f, -1.85f);
+                        Vec3 dside = app.player.pos - side_spot;
+                        Vec3 drear = app.player.pos - rear_spot;
+                        dside.y = drear.y = 0;
+                        const float ds = std::sqrt(dot(dside, dside));
+                        const float dr = std::sqrt(dot(drear, drear));
+                        const bool can_mount =
+                            app.player.state == PlayerState::Locomotion;
+                        app.mount_prompt =
+                            can_mount && (ds < 0.65f || dr < 0.65f);
+                        if (app.mount_prompt) {
+                            app.mount_rear = dr < ds;
+                            // lock the bird: no wandering off mid-prompt
+                            if (app.bird_beh != 0) {
+                                app.bird_beh = 0;
+                                set_clip("IdleStand");
+                            }
+                            if (app.mount_go) {
+                                app.mount_go = false;
+                                app.mount_prompt = false;
+                                app.bird_housed = false;  // wings out to droop
+                                set_clip("Kneel");
+                                app.bird_state = Bird::Kneel;
+                                app.mount_t = -1.0f;
+                                app.jerk_done = false;
+                                app.mount_start = app.player.pos;
+                                app.mount_start_yaw = app.player.yaw;
+                                break;
+                            }
+                            break;  // held still: skip the behaviour scheduler
+                        }
+                        app.mount_go = false;
+                    }
+                    app.bird_timer -= dtb;
+                    if (app.bird_timer <= 0.0f) {
+                        const int r = std::rand() % 100;
+                        if (r < 40) {
+                            app.bird_beh = 0;
+                            set_clip("IdleStand");
+                            app.bird_timer = 3.0f + (std::rand() % 40) * 0.1f;
+                        } else if (r < 75) {
+                            app.bird_beh = 1;
+                            set_clip("Walk");
+                            const float a = (std::rand() % 628) * 0.01f;
+                            const float rad =
+                                (1.4f + (std::rand() % 20) * 0.1f) * kBirdScale * kBirdReach;
+                            app.bird_wander =
+                                app.player.pos +
+                                Vec3{std::sin(a) * rad, 0, std::cos(a) * rad};
+                            app.bird_timer = 6.0f;  // give up if it never gets there
+                        } else {
+                            app.bird_beh = 2;
+                            set_clip("Peck");
+                            const AnimClip* pk = bw.find_clip("Peck");
+                            app.bird_timer = pk ? pk->duration + 0.15f : 1.0f;
+                        }
+                    }
+                    if (app.bird_beh == 1) {
+                        Vec3 d = app.bird_wander - app.bird_pos;
+                        d.y = 0;
+                        const float dist = std::sqrt(dot(d, d));
+                        if (dist < 0.3f * kBirdScale * kBirdReach) {
+                            app.bird_timer = 0.0f;  // arrived: pick something new
+                        } else {
+                            const float want_yaw = std::atan2(d.x, d.z);
+                            float dy = want_yaw - app.bird_yaw;
+                            while (dy > 3.14159265f) dy -= 6.2831853f;
+                            while (dy < -3.14159265f) dy += 6.2831853f;
+                            app.bird_yaw +=
+                                std::max(-2.5f * dtb, std::min(2.5f * dtb, dy));
+                            const Vec3 fwd{std::sin(app.bird_yaw), 0,
+                                           std::cos(app.bird_yaw)};
+                            // stride length scales with the legs
+                            app.bird_pos =
+                                app.bird_pos + fwd * (0.8f * kBirdScale * kBirdReach * dtb);
+                        }
+                    }
+                    break;
+                }
+                case Bird::Leave: {
+                    const AnimClip* cur = app.bird_clip;
+                    if (cur && cur->name == "Unfold") {
+                        if (app.bird_t >= cur->duration - 0.02f) set_clip("Launch");
+                    } else if (cur && cur->name == "Launch") {
+                        if (app.bird_t >= cur->duration - 0.02f) set_clip("Flap");
+                    } else {
+                        // climb back out to the ring, then resume circling
+                        const float az =
+                            std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.35f;
+                        const float dist = fly_toward(
+                            {std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                            7.0f);
+                        if (dist < 2.5f) app.bird_state = Bird::Circle;
+                    }
+                    break;
+                }
+                case Bird::Kneel: {
+                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
+                    const AnimClip* cur = app.bird_clip;
+                    const bool knelt =
+                        cur && cur->name == "Kneel" &&
+                        app.bird_t >= cur->duration - 0.02f;
+                    if (knelt && app.mount_t < 0.0f)
+                        app.mount_t = 0.0f;          // Link starts his vault
+                    if (app.mount_t >= 0.0f) {
+                        app.mount_t += dtb;
+                        const float vault_len = app.mount_rear ? 20.0f / 30.0f
+                                                               : 24.0f / 30.0f;
+                        // the bird takes his weight just before he settles
+                        if (!app.jerk_done && app.mount_t >= vault_len * 0.55f) {
+                            app.jerk_done = true;
+                            set_clip("MountJerk");
+                        }
+                        if (app.mount_t >= vault_len) {
+                            app.riding = true;
+                            app.mount_t = -1.0f;
+                            set_clip("RideIdle");    // stand up under him
+                            app.bird_state = Bird::RideGround;
+                        }
+                    }
+                    break;
+                }
+                case Bird::RideGround: {
+                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
+                    if (app.space_launch) {
+                        app.space_launch = false;
+                        set_clip("Launch");
+                        app.bird_state = Bird::RideAir;
+                        break;
+                    }
+                    const float mag = std::sqrt(app.ride_mx * app.ride_mx +
+                                                app.ride_mz * app.ride_mz);
+                    if (mag > 0.25f) {
+                        const float want_yaw =
+                            std::atan2(app.ride_mx, app.ride_mz);
+                        float dy = want_yaw - app.bird_yaw;
+                        while (dy > 3.14159265f) dy -= 6.2831853f;
+                        while (dy < -3.14159265f) dy += 6.2831853f;
+                        app.bird_yaw +=
+                            std::max(-2.6f * dtb, std::min(2.6f * dtb, dy));
+                        const Vec3 fwd{std::sin(app.bird_yaw), 0,
+                                       std::cos(app.bird_yaw)};
+                        app.bird_pos = app.bird_pos + fwd * (3.9f * dtb);
+                        set_clip("RideRun");
+                    } else {
+                        set_clip("RideIdle");
+                    }
+                    // run seat split disabled for now: run rides the
+                    // idle seat, exactly the approved behaviour
+                    app.run_w = 0.0f;
+                    break;
+                }
+                case Bird::RideAir: {
+                    const AnimClip* cur = app.bird_clip;
+                    if (cur && cur->name == "Launch") {
+                        // the hop is baked; the engine adds the real climb
+                        if (app.bird_t > 0.6)
+                            app.bird_pos.y += 2.6f * dtb;
+                        if (app.bird_t >= cur->duration - 0.02f) set_clip("Flap");
+                        break;
+                    }
+                    // steered cruise: A/D turn, W/S climb and dive
+                    app.bird_yaw += app.ride_in_x * 1.15f * dtb;
+                    app.bird_roll +=
+                        (-app.ride_in_x * 0.30f - app.bird_roll) *
+                        std::min(1.0f, 3.0f * dtb);
+                    const Vec3 fwd{std::sin(app.bird_yaw), 0,
+                                   std::cos(app.bird_yaw)};
+                    app.bird_pos = app.bird_pos + fwd * (8.5f * dtb);
+                    app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
+                    if (app.bird_pos.y < 2.5f) app.bird_pos.y = 2.5f;
+                    if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
+                    break;
+                }
+            }
+
+            // --- pose. Circling (and the ridden cruise) keeps the flap/soar
+            // habit; everything else runs the clip machine with a short
+            // crossfade on each switch.
+            const bool habit_fly =
+                app.bird_state == Bird::Circle ||
+                (app.bird_state == Bird::RideAir && app.bird_clip &&
+                 (app.bird_clip->name == "Flap" || app.bird_clip->name == "Soar"));
+            if (habit_fly && flap && soar) {
+                const float cyc = std::fmod(now, 9.0f);
+                float w;  // 0 = flap, 1 = soar
+                if (cyc < 2.6f) w = 0.0f;
+                else if (cyc < 3.3f) w = (cyc - 2.6f) / 0.7f;
+                else if (cyc < 8.3f) w = 1.0f;
+                else w = 1.0f - (cyc - 8.3f) / 0.7f;
+                bw.sample(*flap, std::fmod(now, flap->duration), bw.scratch_a);
+                bw.sample(*soar, std::fmod(now, soar->duration), bw.scratch_b);
+                Model::blend(bw.scratch_a, bw.scratch_b, w, bw.scratch_mix);
+                bw.palette_from(bw.scratch_mix);
+                // seed the clip machine so leaving the circle crossfades
+                app.bird_clip = w > 0.5f ? soar : flap;
+                app.bird_t = now;
+                app.bird_fade = 1.0f;
+                app.bird_prev = nullptr;
+            } else if (app.bird_clip) {
+                app.bird_t += dtb;
+                bw.sample(*app.bird_clip, clip_t(app.bird_clip, app.bird_t),
+                          bw.scratch_a);
+                if (app.bird_fade < 1.0f && app.bird_prev) {
+                    app.bird_prev_t += dtb;
+                    bw.sample(*app.bird_prev, clip_t(app.bird_prev, app.bird_prev_t),
+                              bw.scratch_b);
+                    app.bird_fade = std::min(1.0f, app.bird_fade + dtb / 0.25f);
+                    Model::blend(bw.scratch_b, bw.scratch_a, app.bird_fade,
+                                 bw.scratch_mix);
+                    bw.palette_from(bw.scratch_mix);
+                } else {
+                    bw.palette_from(bw.scratch_a);
+                }
+            }
+
+            const Quat q_yaw{0, std::sin(app.bird_yaw * 0.5f), 0,
+                             std::cos(app.bird_yaw * 0.5f)};
+            const Quat q_roll{0, 0, std::sin(app.bird_roll * 0.5f),
+                              std::cos(app.bird_roll * 0.5f)};
+            bird_mtx =
+                mat4_from_trs(app.bird_pos, q_yaw,
+                              {kBirdScale, kBirdScale, kBirdScale}) *
+                mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
+
+            // --- Link rides the saddle: a point in Spine_1's local frame,
+            // pushed through the bird's CURRENT pose and full model matrix,
+            // so he stays glued through kneeling, flap bob and banking
+            if (app.riding || app.mount_t >= 0.0f) {
+                // the flight seat blends in over the launch, back out on land
+                const float want_air =
+                    app.bird_state == Bird::RideAir ? 1.0f : 0.0f;
+                app.seat_air_w +=
+                    (want_air - app.seat_air_w) * std::min(1.0f, 2.2f * dtb);
+                const float w = app.seat_air_w;
+                // position: the seat point rides Spine_1 through the pose
+                Vec3 p = lerp(app.seat_bone_g, app.seat_bone_a, w);
+                Vec3 pb{0.0f, 2.34f, -0.60f};
+                if (app.saddle_node >= 0 && !app.loftwing.world_pose.empty()) {
+                    const Mat4& bm = app.loftwing.world_pose[app.saddle_node];
+                    pb = {bm.m[0] * p.x + bm.m[4] * p.y + bm.m[8] * p.z + bm.m[12],
+                          bm.m[1] * p.x + bm.m[5] * p.y + bm.m[9] * p.z + bm.m[13],
+                          bm.m[2] * p.x + bm.m[6] * p.y + bm.m[10] * p.z + bm.m[14]};
+                }
+                // hand-tuned corrections (bird-local), then the lean --
+                // blended idle<->run on the ground, then toward the air set
+                const Vec3 goff = lerp(app.seat_off_g, app.seat_off_r, app.run_w);
+                const float gpitch =
+                    app.seat_pitch_g +
+                    (app.seat_pitch_r - app.seat_pitch_g) * app.run_w;
+                const Vec3 off = lerp(goff, app.seat_off_a, w);
+                pb = pb + off;
+                const float lean = gpitch + (app.seat_pitch_a - gpitch) * w;
+                const float ga = lean * 3.14159265f / 180.0f;
+                const Quat qx{std::sin(ga * 0.5f), 0, 0, std::cos(ga * 0.5f)};
+                const Mat4 L = bird_mtx * mat4_from_trs(pb, qx, {1, 1, 1});
+                app.link_ride_mtx = L;
+                const Vec3 saddle{L.m[12], L.m[13], L.m[14]};
+                if (app.mount_t >= 0.0f) {
+                    // mid-vault: root arcs from the ground to the saddle
+                    const float vl = app.mount_rear ? 20.0f / 30.0f : 24.0f / 30.0f;
+                    float u = std::min(1.0f, app.mount_t / vl);
+                    u = u * u * (3.0f - 2.0f * u);
+                    Vec3 p = lerp(app.mount_start, saddle, u);
+                    p.y += 0.35f * std::sin(u * 3.14159265f);  // the hop
+                    app.player.pos = p;
+                    float dy = app.bird_yaw - app.mount_start_yaw;
+                    while (dy > 3.14159265f) dy -= 6.2831853f;
+                    while (dy < -3.14159265f) dy += 6.2831853f;
+                    app.player.yaw = app.mount_start_yaw + dy * u;
+                } else {
+                    app.player.pos = saddle;
+                    app.player.yaw = app.bird_yaw;
+                }
+                app.player.speed = 0.0f;
+            }
+        }
+
         if (app.viewer_mode) {
             if (!app.link.clips.empty()) {
                 const AnimClip& clip = app.link.clips[app.clip_index];
@@ -1636,10 +2183,30 @@ int main(int argc, char** argv)
                 app.link.evaluate(clip, t);
             }
         } else {
-            app.player.anim.apply(app.link);
+            if (app.mount_t >= 0.0f) {
+                // mid-vault: the Mount one-shot, clock driven by the bird
+                const AnimClip* mc =
+                    app.link.find_clip(app.mount_rear ? "MountRear" : "Mount");
+                if (mc)
+                    app.link.evaluate(
+                        *mc, std::min(app.mount_t, mc->duration - 1e-3f));
+            } else if (app.riding) {
+                const AnimClip* rc = app.link.find_clip("Ride");
+                if (rc)
+                    app.link.evaluate(
+                        *rc, std::fmod(static_cast<float>(app.sim_time),
+                                       rc->duration));
+            } else {
+                app.player.anim.apply(app.link);
+            }
             // camera: free mode tracks Link exactly (no lag); the lock-on
-            // framing fades in/out via lock_blend so toggling never snaps
-            const Vec3 head = app.player.pos + Vec3{0, 0.85f, 0};
+            // framing fades in/out via lock_blend so toggling never snaps.
+            // Riding, it tracks the bird's SMOOTH position instead of the
+            // saddle -- following the seat means inheriting every wingbeat
+            // bob, which reads as the whole world shaking.
+            const Vec3 head =
+                app.riding ? app.bird_pos + Vec3{0, 2.3f, 0}
+                           : app.player.pos + Vec3{0, 0.85f, 0};
             const float k = std::min(1.0f, 3.5f * static_cast<float>(frame_dt));
             app.lock_blend += ((app.player.locked ? 1.0f : 0.0f) - app.lock_blend) * k;
             if (app.player.locked && !app.was_locked) {
@@ -1939,227 +2506,12 @@ int main(int argc, char** argv)
             // (drawn after the character, so his body can't paint over them)
         }
 
-        // --- the loftwing: circles overhead until the Song of Skies calls it
-        // down to land nearby and potter about; the song again sends it home.
-        Mat4 bird_mtx;
-        if (app.has_loftwing) {
-            using Bird = App::Bird;
-            // mount-sized: back height lands around Link's shoulders, so he
-            // can plausibly climb on. Distances/speeds scale with the body.
-            constexpr float kBirdScale = 2.0f;
-            Model& bw = app.loftwing;
-            const float dtb = static_cast<float>(frame_dt);
-            const float now = static_cast<float>(app.sim_time);
-            const AnimClip* flap = bw.find_clip("Flap");
-            const AnimClip* soar = bw.find_clip("Soar");
-
-            auto set_clip = [&](const char* name) {
-                const AnimClip* c = bw.find_clip(name);
-                if (!c || c == app.bird_clip) return;
-                app.bird_prev = app.bird_clip;
-                app.bird_prev_t = app.bird_t;
-                app.bird_clip = c;
-                app.bird_t = 0.0;
-                app.bird_fade = app.bird_prev ? 0.0f : 1.0f;
-            };
-            auto is_oneshot = [](const AnimClip* c) {
-                return c && (c->name == "Fold" || c->name == "Unfold" ||
-                             c->name == "Peck" || c->name == "Launch");
-            };
-            auto clip_t = [&](const AnimClip* c, double t) {
-                if (!c || c->duration <= 0.0f) return 0.0f;
-                if (is_oneshot(c))
-                    return std::min(static_cast<float>(t), c->duration - 1e-3f);
-                return std::fmod(static_cast<float>(t), c->duration);
-            };
-            // steer toward `to` along the current heading (so it banks through
-            // turns instead of pivoting); returns remaining distance
-            auto fly_toward = [&](Vec3 to, float speed) {
-                Vec3 d = to - app.bird_pos;
-                const float dist = std::sqrt(dot(d, d));
-                if (dist < 1e-4f) return dist;
-                const float want_yaw = std::atan2(d.x, d.z);
-                float dy = want_yaw - app.bird_yaw;
-                while (dy > 3.14159265f) dy -= 6.2831853f;
-                while (dy < -3.14159265f) dy += 6.2831853f;
-                const float turn = std::max(-1.5f * dtb, std::min(1.5f * dtb, dy));
-                app.bird_yaw += turn;
-                const float want_roll = dtb > 1e-5f ? (turn / dtb) * 0.16f : 0.0f;
-                app.bird_roll += (want_roll - app.bird_roll) * std::min(1.0f, 4.0f * dtb);
-                const Vec3 fwd{std::sin(app.bird_yaw), 0, std::cos(app.bird_yaw)};
-                app.bird_pos = app.bird_pos + fwd * (speed * dtb);
-                // climb/sink capped so descents read as a glide, not a lift
-                app.bird_pos.y += std::max(-4.5f * dtb, std::min(4.5f * dtb, d.y));
-                return dist;
-            };
-
-            switch (app.bird_state) {
-                case Bird::Circle: {
-                    // chase a point a little ahead on the ring: banking falls
-                    // out of the steering instead of being posed by hand
-                    const float az =
-                        std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.45f;
-                    fly_toward({std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
-                               6.5f);
-                    if (app.bird_summon) {
-                        app.bird_summon = false;
-                        set_clip("Flap");
-                        app.bird_state = Bird::Arrive;
-                    }
-                    break;
-                }
-                case Bird::Arrive: {
-                    // land a couple of units from Link, approaching from
-                    // wherever the bird already is
-                    Vec3 away = app.bird_pos - app.player.pos;
-                    away.y = 0;
-                    away = normalize(away);
-                    const Vec3 land = app.player.pos + away * (2.0f * kBirdScale);
-                    const Vec3 to{land.x, 0.0f, land.z};
-                    const Vec3 gap = to - app.bird_pos;
-                    // slow up on final approach so touchdown isn't a faceplant
-                    const float speed =
-                        std::min(9.5f, 2.0f + std::sqrt(dot(gap, gap)) * 0.9f);
-                    const float dist = fly_toward(to, speed);
-                    if (dist < 0.35f * kBirdScale && app.bird_pos.y < 0.15f) {
-                        app.bird_pos.y = 0.0f;
-                        set_clip("Fold");
-                        app.bird_state = Bird::FoldDown;
-                    }
-                    break;
-                }
-                case Bird::FoldDown: {
-                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
-                    if (app.bird_clip && app.bird_t >= app.bird_clip->duration - 0.02f) {
-                        app.bird_housed = true;   // the swap hides in the tuck
-                        app.bird_timer = 0.0f;    // pick a behaviour right away
-                        app.bird_state = Bird::Ground;
-                    }
-                    break;
-                }
-                case Bird::Ground: {
-                    app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
-                    if (app.bird_summon) {
-                        app.bird_summon = false;
-                        app.bird_housed = false;  // wings reappear as they open
-                        set_clip("Unfold");
-                        app.bird_state = Bird::Leave;
-                        break;
-                    }
-                    app.bird_timer -= dtb;
-                    if (app.bird_timer <= 0.0f) {
-                        const int r = std::rand() % 100;
-                        if (r < 40) {
-                            app.bird_beh = 0;
-                            set_clip("IdleStand");
-                            app.bird_timer = 3.0f + (std::rand() % 40) * 0.1f;
-                        } else if (r < 75) {
-                            app.bird_beh = 1;
-                            set_clip("Walk");
-                            const float a = (std::rand() % 628) * 0.01f;
-                            const float rad =
-                                (1.4f + (std::rand() % 20) * 0.1f) * kBirdScale;
-                            app.bird_wander =
-                                app.player.pos +
-                                Vec3{std::sin(a) * rad, 0, std::cos(a) * rad};
-                            app.bird_timer = 6.0f;  // give up if it never gets there
-                        } else {
-                            app.bird_beh = 2;
-                            set_clip("Peck");
-                            const AnimClip* pk = bw.find_clip("Peck");
-                            app.bird_timer = pk ? pk->duration + 0.15f : 1.0f;
-                        }
-                    }
-                    if (app.bird_beh == 1) {
-                        Vec3 d = app.bird_wander - app.bird_pos;
-                        d.y = 0;
-                        const float dist = std::sqrt(dot(d, d));
-                        if (dist < 0.3f * kBirdScale) {
-                            app.bird_timer = 0.0f;  // arrived: pick something new
-                        } else {
-                            const float want_yaw = std::atan2(d.x, d.z);
-                            float dy = want_yaw - app.bird_yaw;
-                            while (dy > 3.14159265f) dy -= 6.2831853f;
-                            while (dy < -3.14159265f) dy += 6.2831853f;
-                            app.bird_yaw +=
-                                std::max(-2.5f * dtb, std::min(2.5f * dtb, dy));
-                            const Vec3 fwd{std::sin(app.bird_yaw), 0,
-                                           std::cos(app.bird_yaw)};
-                            // stride length scales with the legs
-                            app.bird_pos =
-                                app.bird_pos + fwd * (0.8f * kBirdScale * dtb);
-                        }
-                    }
-                    break;
-                }
-                case Bird::Leave: {
-                    const AnimClip* cur = app.bird_clip;
-                    if (cur && cur->name == "Unfold") {
-                        if (app.bird_t >= cur->duration - 0.02f) set_clip("Launch");
-                    } else if (cur && cur->name == "Launch") {
-                        if (app.bird_t >= cur->duration - 0.02f) set_clip("Flap");
-                    } else {
-                        // climb back out to the ring, then resume circling
-                        const float az =
-                            std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.35f;
-                        const float dist = fly_toward(
-                            {std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
-                            7.0f);
-                        if (dist < 2.5f) app.bird_state = Bird::Circle;
-                    }
-                    break;
-                }
-            }
-
-            // --- pose. Circling keeps the flap/soar habit; everything else
-            // runs the clip machine with a short crossfade on each switch.
-            if (app.bird_state == Bird::Circle && flap && soar) {
-                const float cyc = std::fmod(now, 9.0f);
-                float w;  // 0 = flap, 1 = soar
-                if (cyc < 2.6f) w = 0.0f;
-                else if (cyc < 3.3f) w = (cyc - 2.6f) / 0.7f;
-                else if (cyc < 8.3f) w = 1.0f;
-                else w = 1.0f - (cyc - 8.3f) / 0.7f;
-                bw.sample(*flap, std::fmod(now, flap->duration), bw.scratch_a);
-                bw.sample(*soar, std::fmod(now, soar->duration), bw.scratch_b);
-                Model::blend(bw.scratch_a, bw.scratch_b, w, bw.scratch_mix);
-                bw.palette_from(bw.scratch_mix);
-                // seed the clip machine so leaving the circle crossfades
-                app.bird_clip = w > 0.5f ? soar : flap;
-                app.bird_t = now;
-                app.bird_fade = 1.0f;
-                app.bird_prev = nullptr;
-            } else if (app.bird_clip) {
-                app.bird_t += dtb;
-                bw.sample(*app.bird_clip, clip_t(app.bird_clip, app.bird_t),
-                          bw.scratch_a);
-                if (app.bird_fade < 1.0f && app.bird_prev) {
-                    app.bird_prev_t += dtb;
-                    bw.sample(*app.bird_prev, clip_t(app.bird_prev, app.bird_prev_t),
-                              bw.scratch_b);
-                    app.bird_fade = std::min(1.0f, app.bird_fade + dtb / 0.25f);
-                    Model::blend(bw.scratch_b, bw.scratch_a, app.bird_fade,
-                                 bw.scratch_mix);
-                    bw.palette_from(bw.scratch_mix);
-                } else {
-                    bw.palette_from(bw.scratch_a);
-                }
-            }
-
-            const Quat q_yaw{0, std::sin(app.bird_yaw * 0.5f), 0,
-                             std::cos(app.bird_yaw * 0.5f)};
-            const Quat q_roll{0, 0, std::sin(app.bird_roll * 0.5f),
-                              std::cos(app.bird_roll * 0.5f)};
-            bird_mtx =
-                mat4_from_trs(app.bird_pos, q_yaw,
-                              {kBirdScale, kBirdScale, kBirdScale}) *
-                mat4_from_trs({0, 0, 0}, q_roll, {1, 1, 1});
-        }
 
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);
-        const Mat4 model_mtx =
-            app.viewer_mode ? Mat4{} : app.player.model_matrix();
+        const Mat4 model_mtx = app.viewer_mode ? Mat4{}
+                               : app.riding    ? app.link_ride_mtx
+                                               : app.player.model_matrix();
         glUniformMatrix4fv(u_model, 1, GL_FALSE, model_mtx.m);
         glUniformMatrix4fv(u_palette, static_cast<GLsizei>(app.link.palette.size()),
                            GL_FALSE, app.link.palette.data()->m);
@@ -2198,7 +2550,7 @@ int main(int argc, char** argv)
         // the loftwing rides the same skinning shader; just repoint the
         // model matrix and palette
         if (app.has_loftwing && !app.loftwing.palette.empty()) {
-            glUniformMatrix4fv(u_model, 1, GL_FALSE, bird_mtx.m);
+            glUniformMatrix4fv(u_model, 1, GL_FALSE, app.bird_world_mtx.m);
             glUniformMatrix4fv(u_palette,
                                static_cast<GLsizei>(app.loftwing.palette.size()),
                                GL_FALSE, app.loftwing.palette.data()->m);
@@ -2483,6 +2835,56 @@ int main(int argc, char** argv)
                 glDisable(GL_BLEND);
                 glEnable(GL_DEPTH_TEST);
             }
+        }
+
+        // --- mount prompt: a small pill bottom-center while standing in the
+        // spot (the bird holds still for as long as it shows)
+        if (app.mount_prompt) {
+            constexpr float VW = 1280.0f, VH = 720.0f;
+            static std::vector<float> pverts;
+            pverts.clear();
+            auto vtx = [&](float x, float y, const float* c) {
+                pverts.insert(pverts.end(), {x, y, c[0], c[1], c[2], c[3]});
+            };
+            auto rect = [&](float x, float y, float w, float h, const float* c) {
+                vtx(x, y, c); vtx(x + w, y, c); vtx(x, y + h, c);
+                vtx(x + w, y, c); vtx(x + w, y + h, c); vtx(x, y + h, c);
+            };
+            const char* msg = "PRESS SPACE TO MOUNT";
+            const float px = 2.0f;
+            const float tw = static_cast<float>(std::strlen(msg)) * 6.0f * px;
+            const float bx = (VW - (tw + 36.0f)) * 0.5f, by = VH - 96.0f;
+            const float panel_c[4] = {0.05f, 0.04f, 0.06f, 0.82f};
+            const float white[4] = {0.96f, 0.96f, 0.94f, 1.0f};
+            rect(bx, by, tw + 36.0f, 34.0f, panel_c);
+            float x = bx + 18.0f;
+            for (const char* p = msg; *p; ++p) {
+                for (const Glyph& g : kFont) {
+                    if (g.c != *p) continue;
+                    for (int cx = 0; cx < 5; ++cx)
+                        for (int ry = 0; ry < 7; ++ry)
+                            if (g.col[cx] & (1 << ry))
+                                rect(x + cx * px, by + 10.0f + ry * px, px, px,
+                                     white);
+                    break;
+                }
+                x += 6.0f * px;
+            }
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(hud_prog);
+            const float screen_uni[3] = {VW, VH, 0.0f};
+            glUniform3fv(h_screen, 1, screen_uni);
+            glBindVertexArray(hud_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, hud_vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(pverts.size() * sizeof(float)),
+                         pverts.data(), GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pverts.size() / 6));
+            glBindVertexArray(0);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
         }
 
         if (want_shot || shot_path) {

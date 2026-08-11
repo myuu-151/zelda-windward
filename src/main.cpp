@@ -40,17 +40,31 @@ struct Reverb {
     static constexpr int kCombs = 4;
     static constexpr int kAps = 2;
     static constexpr int kMaxCh = 2;
-    static constexpr float kDamp = 0.28f;
-    static constexpr float kFeedback[kCombs] = {0.84f, 0.83f, 0.82f, 0.81f};
+    static constexpr float kDamp = 0.30f;
+    static constexpr float kFeedback[kCombs] = {0.83f, 0.825f, 0.82f, 0.815f};
     static constexpr int kCombLen[kCombs] = {1116, 1188, 1277, 1356};  // @44.1k
     static constexpr int kApLen[kAps] = {556, 441};
+    // Delay tap. 0.375s is a dotted eighth at 120bpm, so repeats land off the
+    // beat between melody notes instead of doubling them -- that's what makes
+    // them read as distinct echoes rather than mush. Each repeat is filtered
+    // darker so it sits behind the dry note and clarity survives.
+    static constexpr float kEchoSecs = 0.375f;
+    static constexpr float kEchoFb = 0.46f;
+    static constexpr float kEchoDamp = 0.34f;
+    static constexpr float kEchoLevel = 1.15f;   // scaled by the wet amount
+    static constexpr float kRoomLevel = 0.55f;   // room sits under the echo
 
     std::vector<float> comb[kCombs][kMaxCh];
     std::vector<float> ap[kAps][kMaxCh];
+    std::vector<float> echo[kMaxCh];
     int ci[kCombs][kMaxCh]{};
     int ai[kAps][kMaxCh]{};
+    int ei[kMaxCh]{};
+    float echo_lp[kMaxCh]{};
     float store[kCombs][kMaxCh]{};
+    static constexpr float kCeiling = 0.88f;
     float wet = 0.0f;                 // audio thread only
+    float limit = 1.0f;               // limiter gain, audio thread only
     std::atomic<float> target{0.0f};  // set by the game
     bool ready = false;
 
@@ -70,6 +84,11 @@ struct Reverb {
                     static_cast<size_t>(kApLen[k] * scale) + skew + 1, 0.0f);
                 ai[k][c] = 0;
             }
+            // right side offset a touch so the repeats widen out
+            echo[c].assign(
+                static_cast<size_t>(rate * kEchoSecs) + (c ? 1200 : 0) + 1, 0.0f);
+            ei[c] = 0;
+            echo_lp[c] = 0.0f;
         }
         (void)channels;
         ready = true;
@@ -78,9 +97,11 @@ struct Reverb {
     void process(float* buf, int frames, int channels) {
         if (!ready) return;
         const float tgt = target.load(std::memory_order_relaxed);
+        const int nch = channels < kMaxCh ? channels : kMaxCh;
         for (int i = 0; i < frames; ++i) {
             wet += (tgt - wet) * 0.0009f;      // ramp, so it never clicks
-            for (int c = 0; c < channels && c < kMaxCh; ++c) {
+            float mix[kMaxCh] = {};
+            for (int c = 0; c < nch; ++c) {
                 float& x = buf[i * channels + c];
                 float acc = 0.0f;
                 for (int k = 0; k < kCombs; ++k) {
@@ -100,18 +121,31 @@ struct Reverb {
                     if (++ai[k][c] >= static_cast<int>(b.size())) ai[k][c] = 0;
                     acc = out;
                 }
-                // pull the dry back as the wet comes up, instead of piling the
-                // tail on top of a signal already near full scale
-                float v = x * (1.0f - 0.45f * wet) + acc * wet;
-                // soft knee above 0.7 so stacked tails can't clip hard
-                const float mag = std::fabs(v);
-                if (mag > 0.7f) {
-                    const float over = mag - 0.7f;
-                    v = (v < 0.0f ? -1.0f : 1.0f) *
-                        (0.7f + over / (1.0f + over * 3.0f));
-                }
-                x = v;
+                // delay tap, with the feedback path filtered so each repeat is
+                // darker than the last
+                std::vector<float>& eb = echo[c];
+                const float e = eb[ei[c]];
+                echo_lp[c] = e * (1.0f - kEchoDamp) + echo_lp[c] * kEchoDamp;
+                eb[ei[c]] = x + echo_lp[c] * kEchoFb;
+                if (++ei[c] >= static_cast<int>(eb.size())) ei[c] = 0;
+                // only a light duck on the dry, so the direct note stays clear
+                mix[c] = x * (1.0f - 0.3f * wet) + acc * wet * kRoomLevel +
+                         e * wet * kEchoLevel;
             }
+            // Proper limiter: a smoothed gain envelope shared by both
+            // channels. Squashing individual samples instead (a soft knee)
+            // is waveshaping -- it adds harmonics and reads as overdrive on
+            // the high notes, which is exactly what it sounded like.
+            float peak = 0.0f;
+            for (int c = 0; c < nch; ++c)
+                peak = std::fabs(mix[c]) > peak ? std::fabs(mix[c]) : peak;
+            const float want = peak > kCeiling ? kCeiling / peak : 1.0f;
+            // attack over ~2ms rather than ~4 samples. A gain envelope that
+            // moves within a cycle of the waveform is modulation, not gain
+            // riding, and the sidebands it makes read as a buzz on the attack
+            // of a note -- which is where the limiter engages hardest.
+            limit += (want - limit) * (want < limit ? 0.01f : 0.00006f);
+            for (int c = 0; c < nch; ++c) buf[i * channels + c] = mix[c] * limit;
         }
     }
 };
@@ -1931,7 +1965,7 @@ int main(int argc, char** argv)
             // wet only while the game itself is playing, so his own notes and
             // the chime stay dry
             g_reverb.target.store(
-                (song_playing && song_timer >= -0.15f) ? 0.38f : 0.0f,
+                (song_playing && song_timer >= -0.15f) ? 0.34f : 0.0f,
                 std::memory_order_relaxed);
 
             if (song_playing && song_active) {

@@ -510,6 +510,7 @@ struct App {
     float aim_w = 0.0f;      // like sky_w but never zeroed by manual camera:
                              // zooming out by hand keeps the aim on the bird
     float manual_t = 0.0f;   // grace after arrow input; sky tracking resumes
+    float fall_vel = 0.0f;   // Link's fall speed off the edge of the world
     float bird_pitch = 0.0f; // visual nose up/down while ridden in flight
     float fly_w = 0.5f;      // ridden flight anim mix: 0 = flap, 1 = soar
     Mat4 bird_world_mtx;     // bird's model matrix, computed pre-camera
@@ -522,8 +523,8 @@ struct App {
     Vec3 seat_off_g{0.0f, -0.04f, -0.08f};
     Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
     Vec3 seat_off_a{0.04f, 0.0f, 0.28f};
-    Vec3 seat_off_d{0.04f, 0.0f, 0.28f};  // DIVE seat (starts = air)
-    float seat_pitch_d = 38.0f;
+    Vec3 seat_off_d{0.04f, 0.36f, 0.68f};  // DIVE seat, user-tuned
+    float seat_pitch_d = 60.0f;
     float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
     bool stooping = false;   // dive visuals active (drives RideDive)
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
@@ -1767,6 +1768,27 @@ int main(int argc, char** argv)
                     app.player.wants_draw = false;
                     shield_in_hand = true;
                 }
+                // only the grid is solid: step off the edge and you fall
+                {
+                    const bool on_grid =
+                        std::fabs(app.player.pos.x) <= 20.0f &&
+                        std::fabs(app.player.pos.z) <= 20.0f;
+                    if (!on_grid || app.player.pos.y > 0.0f) {
+                        app.fall_vel -= 26.0f * static_cast<float>(kFixedDt);
+                        app.player.pos.y +=
+                            app.fall_vel * static_cast<float>(kFixedDt);
+                        if (on_grid && app.player.pos.y <= 0.0f) {
+                            app.player.pos.y = 0.0f;
+                            app.fall_vel = 0.0f;
+                        }
+                    } else {
+                        app.fall_vel = 0.0f;
+                    }
+                    if (app.player.pos.y < -25.0f) {  // gone: back to the start
+                        app.player.pos = {0.0f, 0.0f, 2.0f};
+                        app.fall_vel = 0.0f;
+                    }
+                }
                 }  // !mount_seq
             }
             accumulator -= kFixedDt;
@@ -2142,6 +2164,11 @@ int main(int argc, char** argv)
                         const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                        std::cos(app.bird_yaw)};
                         app.bird_pos = app.bird_pos + fwd * (3.9f * dtb);
+                        // solid ground ends at the grid edge
+                        app.bird_pos.x =
+                            std::max(-19.0f, std::min(19.0f, app.bird_pos.x));
+                        app.bird_pos.z =
+                            std::max(-19.0f, std::min(19.0f, app.bird_pos.z));
                         set_clip("RideRun");
                     } else {
                         set_clip("RideIdle");
@@ -2201,10 +2228,19 @@ int main(int argc, char** argv)
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
                     }
+                    const bool over_grid =
+                        std::fabs(app.bird_pos.x) <= 20.0f &&
+                        std::fabs(app.bird_pos.z) <= 20.0f;
+                    // over the grid: normal floor (0 when diving to land).
+                    // off the edge: NO floor -- dive under the world and fly
+                    // beneath it. The clamp only applies above the plane so
+                    // crossing back over the grid from below never teleports.
                     const float floor_y = diving ? 0.0f : 2.5f;
-                    if (app.bird_pos.y < floor_y) app.bird_pos.y = floor_y;
+                    if (over_grid && app.bird_pos.y > -0.5f &&
+                        app.bird_pos.y < floor_y)
+                        app.bird_pos.y = floor_y;
                     if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
-                    if (app.bird_pos.y <= 0.01f) {
+                    if (app.bird_pos.y <= 0.01f && over_grid) {
                         app.bird_pos.y = 0.0f;   // touchdown
                         set_clip("RideIdle");
                         app.bird_state = Bird::RideGround;
@@ -2416,6 +2452,17 @@ int main(int argc, char** argv)
                 const bool* ks = SDL_GetKeyboardState(nullptr);
                 const float orbit = (ks[SDL_SCANCODE_LEFT] ? 1.0f : 0.0f) -
                                     (ks[SDL_SCANCODE_RIGHT] ? 1.0f : 0.0f);
+                // dive freeze: arrows become a free inspection orbit, all
+                // four directions, so the seat can actually be SEEN
+                if (app.dive_freeze) {
+                    const float dt_o = static_cast<float>(frame_dt);
+                    app.cam.yaw += orbit * 1.8f * dt_o;
+                    const float t2 = (ks[SDL_SCANCODE_DOWN] ? 1.0f : 0.0f) -
+                                     (ks[SDL_SCANCODE_UP] ? 1.0f : 0.0f);
+                    app.cam.pitch += t2 * 1.1f * dt_o;
+                    if (app.cam.pitch > 1.35f) app.cam.pitch = 1.35f;
+                    if (app.cam.pitch < -0.45f) app.cam.pitch = -0.45f;
+                } else {
                 if (orbit != 0.0f && app.player.locked)
                     app.lock_offset = orbit > 0.0f ? -kLockMaxOffset : kLockMaxOffset;
                 if (!app.player.locked) {
@@ -2490,6 +2537,7 @@ int main(int argc, char** argv)
                     app.cam.pull += (want_pull - app.cam.pull) * e;
                     app.cam.pitch += (wp - app.cam.pitch) * e;
                 }
+                }  // !dive_freeze
             }
             if (app.player.locked && !app.lock_cam_manual) {
                 Vec3 away = app.player.pos - app.bird_pos;

@@ -2606,12 +2606,15 @@ int main(int argc, char** argv)
                         (app.dive_freeze && app.freeze_boost);
                     app.stooping = stoop || boost;  // dive visuals for both
                     // the Dive clip's body is baked slightly nose-down, so
-                    // the boost trims the world pitch up to fly level; W/S
-                    // then carry normally either side of straight
+                    // the boost trims the world pitch up (kBoostTrim); on
+                    // top of that a gentle real nose-down (kBoostDip),
+                    // because a bird buys speed with altitude -- the boost
+                    // is a shallow power glide, not a flat sprint
                     constexpr float kBoostTrim = -0.18f;
+                    constexpr float kBoostDip = 0.10f;
                     const float want_pitch =
                         stoop ? 1.05f
-                              : (boost ? kBoostTrim : 0.0f) -
+                              : (boost ? kBoostTrim + kBoostDip : 0.0f) -
                                     app.ride_in_y * 0.42f;
                     app.bird_pitch += (want_pitch - app.bird_pitch) *
                                       std::min(1.0f, 2.5f * dtb);
@@ -2635,22 +2638,32 @@ int main(int argc, char** argv)
                     } else {
                         // boost ramps in with the tuck (dive_w) up to stoop
                         // speed; W/S climb authority stays live throughout
-                        if (boost)
+                        if (boost) {
                             speed = 8.5f + 7.5f * app.dive_w;
+                            // the altitude the speed is bought with: a
+                            // steady sink that W (3.2/s) can out-climb
+                            app.bird_pos.y -= 1.8f * app.dive_w * dtb;
+                        }
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
                     }
                     const bool over_grid =
                         std::fabs(app.bird_pos.x) <= kGroundHalf &&
                         std::fabs(app.bird_pos.z) <= kGroundHalf;
-                    // over the grid: normal floor (0 when diving to land).
-                    // off the edge: NO floor -- dive under the world and fly
-                    // beneath it. The clamp only applies above the plane so
-                    // crossing back over the grid from below never teleports.
-                    const float floor_y = diving ? 0.0f : 2.5f;
+                    // over the grid: normal floor (0 when diving to land --
+                    // or when boosting, so the power glide can be ridden all
+                    // the way down to touchdown). The clamp only applies
+                    // above the plane so crossing back over the grid from
+                    // below never teleports.
+                    const float floor_y = (diving || boost) ? 0.0f : 2.5f;
                     if (over_grid && app.bird_pos.y > -0.5f &&
                         app.bird_pos.y < floor_y)
                         app.bird_pos.y = floor_y;
+                    // the sea is solid to the bird: off the edge it can drop
+                    // no lower than a skim just above the wave crests
+                    constexpr float kWaterSkim = -2.7f;  // kWaterY + waves
+                    if (app.bird_pos.y < kWaterSkim)
+                        app.bird_pos.y = kWaterSkim;
                     if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
                     if (app.bird_pos.y <= 0.01f && over_grid) {
                         app.bird_pos.y = 0.0f;   // touchdown

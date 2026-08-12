@@ -401,13 +401,115 @@ const char* kGridFS = R"GLSL(
 #version 330 core
 in vec3 vWorld;
 out vec4 fragColor;
+uniform vec3 uEye;
 void main() {
     vec2 g = abs(fract(vWorld.xz - 0.5) - 0.5) / fwidth(vWorld.xz);
     float line = 1.0 - min(min(g.x, g.y), 1.0);
     vec3 base = vec3(0.16, 0.32, 0.20);
-    fragColor = vec4(mix(base, vec3(0.24, 0.44, 0.28), line), 1.0);
+    vec3 col = mix(base, vec3(0.24, 0.44, 0.28), line);
+    // gentle haze toward the sky's horizon color: invisible on foot, fades
+    // the island into the sky when seen from far away in flight
+    float d = length(vWorld - uEye);
+    col = mix(col, vec3(0.66, 0.80, 0.95), 0.85 * smoothstep(30.0, 90.0, d));
+    fragColor = vec4(col, 1.0);
 }
 )GLSL";
+
+// Procedural sky: one fullscreen triangle at the far plane (LEQUAL, no depth
+// writes), so it only shades pixels no opaque geometry covered. Gradient from
+// the view ray, toon sun, and domain-warped FBM clouds projected on a virtual
+// plane overhead, scrolled by wind. No dome mesh, no textures.
+const char* kSkyVS = R"GLSL(
+#version 330 core
+const vec2 verts[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+out vec2 vNdc;
+void main() {
+    vNdc = verts[gl_VertexID];
+    gl_Position = vec4(verts[gl_VertexID], 1.0, 1.0); // z/w = 1.0 -> far plane
+}
+)GLSL";
+
+const char* kSkyFS = R"GLSL(
+#version 330 core
+in vec2 vNdc;
+out vec4 fragColor;
+uniform mat4  uView;
+uniform float uAspect;
+uniform float uTanHalfFov;
+uniform float uTime;
+
+const vec3  kZenith   = vec3(0.22, 0.42, 0.86);
+const vec3  kHorizon  = vec3(0.66, 0.80, 0.95);
+const vec3  kSunDir   = vec3(0.45, 0.35, -0.60);
+const float kCoverage = 0.52;   // higher = fewer clouds
+const float kWind     = 0.02;
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash(i);
+    float b = hash(i + vec2(1, 0));
+    float c = hash(i + vec2(0, 1));
+    float d = hash(i + vec2(1, 1));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    mat2 rot = mat2(0.8, -0.6, 0.6, 0.8); // rotate octaves to hide the grid
+    for (int i = 0; i < 5; i++) {
+        v += a * vnoise(p);
+        p = rot * p * 2.03;
+        a *= 0.5;
+    }
+    return v;
+}
+
+void main() {
+    vec3 rayCam = vec3(vNdc.x * uTanHalfFov * uAspect,
+                       vNdc.y * uTanHalfFov, -1.0);
+    vec3 dir = normalize(transpose(mat3(uView)) * rayCam);
+    vec3 sun = normalize(kSunDir);
+
+    // vertical gradient
+    float h = clamp(dir.y, 0.0, 1.0);
+    vec3 col = mix(kHorizon, kZenith, pow(h, 0.55));
+
+    // toon sun: hard disc + soft halo
+    float sd = dot(dir, sun);
+    col += vec3(1.0, 0.9, 0.7) * 0.25 * pow(clamp(sd, 0.0, 1.0), 64.0);
+    col = mix(col, vec3(1.0, 0.98, 0.9), smoothstep(0.9995, 0.9997, sd));
+
+    // clouds on a virtual plane overhead (only above the horizon)
+    if (dir.y > 0.01) {
+        vec2 uv = dir.xz / dir.y * 1.6;
+        uv += normalize(vec2(1.0, 0.35)) * kWind * uTime;
+        vec2 warp = vec2(fbm(uv * 0.5 + 13.7), fbm(uv * 0.5 - 7.2)) - 0.5;
+        vec2 p = uv + warp * 1.4;
+
+        float f = fbm(p);
+        float mask = smoothstep(kCoverage, kCoverage + 0.10, f);
+        mask *= smoothstep(0.02, 0.14, dir.y); // fade into the horizon haze
+
+        col = mix(col, vec3(1.0), mask);
+    }
+
+    fragColor = vec4(col, 1.0);
+}
+)GLSL";
+
+// seat_tune.txt lives next to the exe (like guard_tune.txt) -- a relative
+// path here once loaded a stale copy from whatever the launch directory
+// happened to be, silently overriding the baked seat offsets
+static const char* seat_tune_path()
+{
+    static std::string path = std::string(SDL_GetBasePath()) + "seat_tune.txt";
+    return path.c_str();
+}
 
 GLuint compile_shader(GLenum type, const char* src)
 {
@@ -701,7 +803,7 @@ int main(int argc, char** argv)
                 bone_local("Flap", 8.0f / 30.0f, {0.0f, 1.80f, 0.39f});
         }
         // hand-tuned seat corrections from a previous session, if any
-        if (FILE* f = std::fopen("seat_tune.txt", "r")) {
+        if (FILE* f = std::fopen(seat_tune_path(), "r")) {
             const int n = std::fscanf(
                 f, "%f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
                 &app.seat_off_g.x, &app.seat_off_g.y, &app.seat_off_g.z,
@@ -923,8 +1025,20 @@ int main(int argc, char** argv)
     const GLint u_tex = glGetUniformLocation(skin_prog, "uTex");
     const GLint u_sun = glGetUniformLocation(skin_prog, "uSunDir");
     const GLint g_viewproj = glGetUniformLocation(grid_prog, "uViewProj");
+    const GLint g_eye = glGetUniformLocation(grid_prog, "uEye");
 
-    // ground quad
+    const GLuint sky_prog = link_program(kSkyVS, kSkyFS);
+    if (!sky_prog) return 1;
+    const GLint sky_view = glGetUniformLocation(sky_prog, "uView");
+    const GLint sky_aspect = glGetUniformLocation(sky_prog, "uAspect");
+    const GLint sky_tanfov = glGetUniformLocation(sky_prog, "uTanHalfFov");
+    const GLint sky_time = glGetUniformLocation(sky_prog, "uTime");
+    // core profile requires a bound VAO even for attribute-less draws
+    GLuint sky_vao = 0;
+    glGenVertexArrays(1, &sky_vao);
+
+    // ground quad -- matches the +/-20 solid extent: it's a floating island,
+    // the sky wraps everything past the edge
     const float ground[] = {-20, 0, -20, 20, 0, -20, 20, 0, 20,
                             -20, 0, -20, 20, 0, 20, -20, 0, 20};
     GLuint grid_vao = 0, grid_vbo = 0;
@@ -1533,7 +1647,7 @@ int main(int argc, char** argv)
                                              off->x, off->y, off->z, *pit);
                                 SDL_SetWindowTitle(app.window, buf);
                                 SDL_Log("%s", buf);
-                                if (FILE* f = std::fopen("seat_tune.txt", "w")) {
+                                if (FILE* f = std::fopen(seat_tune_path(), "w")) {
                                     std::fprintf(
                                         f,
                                         "%f %f %f %f %f %f %f %f "
@@ -2585,7 +2699,7 @@ int main(int argc, char** argv)
         int fb_w = 0, fb_h = 0;
         SDL_GetWindowSizeInPixels(app.window, &fb_w, &fb_h);
         glViewport(0, 0, fb_w, fb_h);
-        glClearColor(0.35f, 0.58f, 0.71f, 1.0f);
+        glClearColor(0.66f, 0.80f, 0.95f, 1.0f); // sky's horizon color
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
 
@@ -2600,8 +2714,27 @@ int main(int argc, char** argv)
 
         glUseProgram(grid_prog);
         glUniformMatrix4fv(g_viewproj, 1, GL_FALSE, viewproj.m);
+        const Vec3 cam_eye = app.cam.eye();
+        const float eye3[3] = {cam_eye.x, cam_eye.y, cam_eye.z};
+        glUniform3fv(g_eye, 1, eye3);
         glBindVertexArray(grid_vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // procedural sky: drawn after the opaque ground at far depth so it
+        // only fills background pixels, and before every blended pass so
+        // reticle/wind/stars composite over the clouds. Later opaque models
+        // simply depth-write over it.
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
+        glUseProgram(sky_prog);
+        glUniformMatrix4fv(sky_view, 1, GL_FALSE, view.m);
+        glUniform1f(sky_aspect, aspect);
+        glUniform1f(sky_tanfov, std::tan(25.0f * 3.14159265f / 180.0f));
+        glUniform1f(sky_time, static_cast<float>(app.sim_time));
+        glBindVertexArray(sky_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDepthMask(GL_TRUE);
+        glDepthFunc(GL_LESS);
 
         // floor reticle under the target, fading with lock engagement
         if (!app.viewer_mode && app.lock_blend > 0.01f) {

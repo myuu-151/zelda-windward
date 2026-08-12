@@ -839,8 +839,8 @@ struct App {
     float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
     bool stooping = false;   // dive visuals active (drives RideDive)
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
-    bool freeze_boost = false; // F4 hit while boosting: freeze the LEVEL
-                               // boost pose instead of the stoop
+    float boost_speed = 8.5f;  // momentum while shift-thrusting
+    bool was_thrust = false;   // thrust active last tick (entry detection)
     float seat_pitch_r = 0.0f;
     float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
     float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
@@ -1787,11 +1787,8 @@ int main(int argc, char** argv)
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
                     if (ev.key.key == SDLK_F2) want_shot = true;
                     if (ev.key.key == SDLK_F4 && !ev.key.repeat && app.riding) {
+                        // freezes the LEVEL boost pose (kBoostTrim pitch)
                         app.dive_freeze = !app.dive_freeze;
-                        // always freeze the LEVEL boost pose: the stoop is
-                        // the same pose + world pitch, so tuning here serves
-                        // both, and level is what you want to eyeball Link
-                        app.freeze_boost = app.dive_freeze;
                         SDL_Log("dive freeze: %s",
                                 app.dive_freeze
                                     ? "ON, boost pose (tune the DIVE seat)"
@@ -2595,67 +2592,65 @@ int main(int argc, char** argv)
                     // S + SHIFT held = the STOOP: wings snap back, the whole
                     // bird pitches steeply and drops fast along its nose
                     const bool diving = app.ride_in_y < -0.3f;
-                    const bool stoop =
-                        (diving && app.ride_shift) ||
-                        (app.dive_freeze && !app.freeze_boost);
-                    // SHIFT alone = the front BOOST: same tucked dive pose
-                    // (its tilt is world pitch, so the pose reads level),
-                    // driven forward fast instead of down the nose
-                    const bool boost =
-                        (app.ride_shift && !stoop && !app.dive_freeze) ||
-                        (app.dive_freeze && app.freeze_boost);
-                    app.stooping = stoop || boost;  // dive visuals for both
-                    // the Dive clip's body is baked slightly nose-down, so
-                    // the boost trims the world pitch up (kBoostTrim); on
-                    // top of that a gentle real nose-down (kBoostDip),
-                    // because a bird buys speed with altitude -- the boost
-                    // is a shallow power glide, not a flat sprint
+                    // SHIFT = momentum flight: the bird tucks and flies
+                    // along its nose with real energy exchange. S pitches
+                    // into the stoop (max energy gain), W rotates up toward
+                    // the sky but bleeds the momentum away. Without shift,
+                    // W just flaps him up as usual.
+                    const bool thrust = app.ride_shift && !app.dive_freeze;
+                    app.stooping = thrust || app.dive_freeze;  // dive visuals
+                    // the Dive clip's body is baked slightly nose-down
+                    // (kBoostTrim corrects it); neutral thrust sits in a
+                    // shallow glide (kBoostDip)
                     constexpr float kBoostTrim = -0.18f;
                     constexpr float kBoostDip = 0.18f;
                     const float want_pitch =
-                        stoop ? 1.05f
-                              : (boost ? kBoostTrim + kBoostDip : 0.0f) -
-                                    app.ride_in_y * 0.42f;
+                        thrust ? kBoostTrim + kBoostDip -
+                                     app.ride_in_y * 0.95f
+                        : app.dive_freeze ? kBoostTrim
+                                          : -app.ride_in_y * 0.42f;
                     app.bird_pitch += (want_pitch - app.bird_pitch) *
                                       std::min(1.0f, 2.5f * dtb);
                     if (app.stooping) {
                         if (app.bird_clip && app.bird_clip->name != "Dive")
                             set_clip("Dive");
                     } else if (app.bird_clip && app.bird_clip->name == "Dive") {
-                        set_clip("Flap");   // pull out of the stoop / boost
+                        set_clip("Flap");   // pull out of the thrust
                     }
                     float speed = app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
                     if (app.dive_freeze) {
                         speed = 0.0f;   // held mid-air for seat tuning
-                    } else if (stoop) {
-                        // travel along the nose: fast, mostly downward
-                        speed = 16.0f;
+                    } else if (thrust) {
+                        if (!app.was_thrust)
+                            app.boost_speed = speed;  // enter with cruise momentum
+                        // real flight-path angle (the trim is cosmetic)
+                        const float fp = app.bird_pitch - kBoostTrim;
+                        // energy exchange: gravity along the path builds
+                        // speed diving and bleeds it climbing; drag pulls
+                        // back toward cruise
+                        app.boost_speed +=
+                            (14.0f * std::sin(fp) -
+                             0.35f * (app.boost_speed - 8.5f)) * dtb;
+                        app.boost_speed = SDL_clamp(app.boost_speed, 4.0f, 26.0f);
+                        speed = app.boost_speed;
                         app.bird_pos =
                             app.bird_pos +
-                            fwd * (std::cos(app.bird_pitch) * speed * dtb);
-                        app.bird_pos.y -=
-                            std::sin(app.bird_pitch) * speed * dtb;
+                            fwd * (std::cos(fp) * speed * dtb);
+                        app.bird_pos.y -= std::sin(fp) * speed * dtb;
                     } else {
-                        // boost ramps in with the tuck (dive_w) up to stoop
-                        // speed; W/S climb authority stays live throughout
-                        if (boost) {
-                            speed = 8.5f + 7.5f * app.dive_w;
-                            // the altitude the speed is bought with: a
-                            // steady sink that W (3.2/s) can out-climb
-                            app.bird_pos.y -= 2.6f * app.dive_w * dtb;
-                        }
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
                     }
+                    app.was_thrust = thrust;
                     const bool over_grid =
                         std::fabs(app.bird_pos.x) <= kGroundHalf &&
                         std::fabs(app.bird_pos.z) <= kGroundHalf;
                     // over the grid: normal floor (0 when diving to land --
-                    // or when boosting, so the power glide can be ridden all
-                    // the way down to touchdown). The clamp only applies
-                    // above the plane so crossing back over the grid from
-                    // below never teleports.
-                    const float floor_y = (diving || boost) ? 0.0f : 2.5f;
+                    // or under thrust, so the glide can be ridden all the
+                    // way down to touchdown). The clamp only applies above
+                    // the plane so crossing back over the grid from below
+                    // never teleports.
+                    const float floor_y = (diving || thrust) ? 0.0f : 2.5f;
                     if (over_grid && app.bird_pos.y > -0.5f &&
                         app.bird_pos.y < floor_y)
                         app.bird_pos.y = floor_y;
@@ -2678,7 +2673,7 @@ int main(int argc, char** argv)
                 app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
                 app.stooping = false;
                 app.dive_freeze = false;
-                app.freeze_boost = false;
+                app.was_thrust = false;
             }
 
             // --- pose. Circling (and the ridden cruise) keeps the flap/soar

@@ -867,8 +867,7 @@ struct App {
     float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
     bool stooping = false;   // dive visuals active (drives RideDive)
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
-    float boost_speed = 8.5f;  // momentum while shift-thrusting
-    bool was_thrust = false;   // thrust active last tick (entry detection)
+    float boost_speed = 8.5f;  // flight momentum (thrust, twirl, glide-off)
     bool twirl_go = false;     // SPACE pressed mid-flight
     float twirl_t = -1.0f;     // barrel roll progress, <0 = inactive
     float seat_pitch_r = 0.0f;
@@ -2746,8 +2745,6 @@ int main(int argc, char** argv)
                     if (app.dive_freeze) {
                         speed = 0.0f;   // held mid-air for seat tuning
                     } else if (thrust) {
-                        if (!app.was_thrust)
-                            app.boost_speed = speed;  // enter with cruise momentum
                         // real flight-path angle (the trim is cosmetic)
                         const float fp = app.bird_pitch - kBoostTrim;
                         // energy exchange: gravity along the path builds
@@ -2763,23 +2760,23 @@ int main(int argc, char** argv)
                             fwd * (std::cos(fp) * speed * dtb);
                         app.bird_pos.y -= std::sin(fp) * speed * dtb;
                     } else {
+                        // momentum persists outside thrust too: boost_speed
+                        // drags off slowly toward cruise and the bird flies
+                        // at whatever it still holds
+                        app.boost_speed -=
+                            0.35f * (app.boost_speed - speed) * dtb;
+                        if (app.boost_speed < speed) app.boost_speed = speed;
+                        speed = app.boost_speed;
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
                     }
-                    // the twirl's speed burst, peaking mid-roll (the sway
-                    // phase glides on cruise speed); under thrust it also
-                    // pumps the momentum
+                    // the twirl pumps real momentum: it carries through the
+                    // sway and falls off with the same slow drag as any
+                    // other speed
                     if (app.twirl_t >= 0.0f && app.twirl_t < kTwirlDur &&
-                        !app.dive_freeze) {
-                        const float u = app.twirl_t / kTwirlDur;
-                        app.bird_pos =
-                            app.bird_pos +
-                            fwd * (22.0f * std::sin(3.1415926f * u) * dtb);
-                        if (thrust)
-                            app.boost_speed =
-                                SDL_min(26.0f, app.boost_speed + 16.0f * dtb);
-                    }
-                    app.was_thrust = thrust;
+                        !app.dive_freeze)
+                        app.boost_speed =
+                            SDL_min(26.0f, app.boost_speed + 24.0f * dtb);
                     const bool over_grid =
                         std::fabs(app.bird_pos.x) <= kGroundHalf &&
                         std::fabs(app.bird_pos.z) <= kGroundHalf;
@@ -2811,7 +2808,7 @@ int main(int argc, char** argv)
                 app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
                 app.stooping = false;
                 app.dive_freeze = false;
-                app.was_thrust = false;
+                app.boost_speed = 8.5f;  // momentum resets on the ground
             }
 
             // --- pose. Circling (and the ridden cruise) keeps the flap/soar

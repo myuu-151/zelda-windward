@@ -830,11 +830,13 @@ struct App {
     Vec3 seat_off_g{0.0f, -0.04f, -0.08f};
     Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
     Vec3 seat_off_a{0.04f, 0.0f, 0.28f};
-    Vec3 seat_off_d{0.04f, 0.36f, 0.68f};  // DIVE seat, user-tuned
-    float seat_pitch_d = 60.0f;
+    Vec3 seat_off_d{0.04f, 0.12f, 0.12f};  // DIVE seat, user-tuned 2026-08-12
+    float seat_pitch_d = 36.0f;            // (level boost-pose tune)
     float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
     bool stooping = false;   // dive visuals active (drives RideDive)
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
+    bool freeze_boost = false; // F4 hit while boosting: freeze the LEVEL
+                               // boost pose instead of the stoop
     float seat_pitch_r = 0.0f;
     float run_w = 0.0f;      // 0 = idle seat, 1 = run seat (smoothed)
     float seat_pitch_g = 0.0f, seat_pitch_a = 38.0f;
@@ -1760,9 +1762,14 @@ int main(int argc, char** argv)
                     if (ev.key.key == SDLK_F2) want_shot = true;
                     if (ev.key.key == SDLK_F4 && !ev.key.repeat && app.riding) {
                         app.dive_freeze = !app.dive_freeze;
+                        // always freeze the LEVEL boost pose: the stoop is
+                        // the same pose + world pitch, so tuning here serves
+                        // both, and level is what you want to eyeball Link
+                        app.freeze_boost = app.dive_freeze;
                         SDL_Log("dive freeze: %s",
-                                app.dive_freeze ? "ON (tune the DIVE seat)"
-                                                : "off");
+                                app.dive_freeze
+                                    ? "ON, boost pose (tune the DIVE seat)"
+                                    : "off");
                     }
                     if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
                         const bool on = !g_reverb.experimental.load(
@@ -2563,12 +2570,14 @@ int main(int argc, char** argv)
                     // bird pitches steeply and drops fast along its nose
                     const bool diving = app.ride_in_y < -0.3f;
                     const bool stoop =
-                        (diving && app.ride_shift) || app.dive_freeze;
+                        (diving && app.ride_shift) ||
+                        (app.dive_freeze && !app.freeze_boost);
                     // SHIFT alone = the front BOOST: same tucked dive pose
                     // (its tilt is world pitch, so the pose reads level),
                     // driven forward fast instead of down the nose
                     const bool boost =
-                        app.ride_shift && !stoop && !app.dive_freeze;
+                        (app.ride_shift && !stoop && !app.dive_freeze) ||
+                        (app.dive_freeze && app.freeze_boost);
                     app.stooping = stoop || boost;  // dive visuals for both
                     const float want_pitch =
                         stoop ? 1.05f : -app.ride_in_y * 0.42f;
@@ -2624,6 +2633,7 @@ int main(int argc, char** argv)
                 app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
                 app.stooping = false;
                 app.dive_freeze = false;
+                app.freeze_boost = false;
             }
 
             // --- pose. Circling (and the ridden cruise) keeps the flap/soar

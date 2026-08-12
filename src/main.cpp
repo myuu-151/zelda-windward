@@ -863,9 +863,13 @@ struct App {
     Vec3 seat_off_r{0.0f, -0.12f, -0.08f};
     Vec3 seat_off_a{0.04f, 0.0f, 0.28f};
     Vec3 seat_off_d{0.04f, 0.12f, 0.12f};  // DIVE seat, user-tuned 2026-08-12
-    float seat_pitch_d = 36.0f;            // (level boost-pose tune)
+    float seat_pitch_d = 36.0f;
+    Vec3 seat_off_b{0.04f, -0.12f, 0.12f}; // BOOST seat (straight/W thrust),
+    float seat_pitch_b = 26.0f;            // user-tuned 2026-08-12
     float dive_w = 0.0f;     // smooth 0..1 into the stoop seat
     bool stooping = false;   // dive visuals active (drives RideDive)
+    bool link_tuck = false;  // actually heading down (drives leg flutter)
+    float flutter_w = 0.0f;  // smoothed flutter weight
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
     float boost_speed = 8.5f;  // flight momentum (thrust, twirl, glide-off)
     bool twirl_go = false;     // SPACE pressed mid-flight
@@ -1056,13 +1060,18 @@ int main(int argc, char** argv)
 #ifndef ZELDA_RETAIL
         if (FILE* f = std::fopen(seat_tune_path(), "r")) {
             const int n = std::fscanf(
-                f, "%f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+                f,
+                "%f %f %f %f %f %f %f %f %f %f "
+                "%f %f %f %f %f %f %f %f %f %f",
                 &app.seat_off_g.x, &app.seat_off_g.y, &app.seat_off_g.z,
                 &app.seat_pitch_g, &app.seat_off_a.x, &app.seat_off_a.y,
                 &app.seat_off_a.z, &app.seat_pitch_a, &app.seat_off_r.x,
                 &app.seat_off_r.y, &app.seat_off_r.z, &app.seat_pitch_r,
                 &app.seat_off_d.x, &app.seat_off_d.y, &app.seat_off_d.z,
-                &app.seat_pitch_d);
+                &app.seat_pitch_d, &app.seat_off_b.x, &app.seat_off_b.y,
+                &app.seat_off_b.z, &app.seat_pitch_b);
+            // n < 20: pre-BOOST file -- the boost slot keeps its baked
+            // defaults rather than inheriting the dive hug
             if (n < 12) {  // old 8-float file: run inherits the idle seat
                 app.seat_off_r = app.seat_off_g;
                 app.seat_pitch_r = app.seat_pitch_g;
@@ -1950,15 +1959,21 @@ int main(int argc, char** argv)
                         // left-right, R/T lean fwd-back. Adjusts whichever
                         // seat mode is currently active.
                         if (app.riding) {
-                            const bool dive = app.stooping;
-                            const bool air = !dive && app.seat_air_w > 0.5f;
+                            // tucked + heading down = DIVE slot; tucked
+                            // straight/climbing = BOOST slot
+                            const bool dive = app.stooping && app.link_tuck;
+                            const bool bst = app.stooping && !app.link_tuck;
+                            const bool air = !app.stooping &&
+                                             app.seat_air_w > 0.5f;
                             const bool run =
-                                !dive && !air && app.run_w > 0.5f;
+                                !app.stooping && !air && app.run_w > 0.5f;
                             Vec3* off = dive  ? &app.seat_off_d
+                                        : bst ? &app.seat_off_b
                                         : air ? &app.seat_off_a
                                         : run ? &app.seat_off_r
                                               : &app.seat_off_g;
                             float* pit = dive  ? &app.seat_pitch_d
+                                         : bst ? &app.seat_pitch_b
                                          : air ? &app.seat_pitch_a
                                          : run ? &app.seat_pitch_r
                                                : &app.seat_pitch_g;
@@ -1980,6 +1995,7 @@ int main(int argc, char** argv)
                                 SDL_snprintf(buf, sizeof(buf),
                                              "%s seat: off(%.2f %.2f %.2f) lean %.0f",
                                              dive  ? "DIVE"
+                                             : bst ? "BOOST"
                                              : air ? "AIR"
                                              : run ? "RUN"
                                                    : "IDLE",
@@ -1989,8 +2005,8 @@ int main(int argc, char** argv)
                                 if (FILE* f = std::fopen(seat_tune_path(), "w")) {
                                     std::fprintf(
                                         f,
-                                        "%f %f %f %f %f %f %f %f "
-                                        "%f %f %f %f %f %f %f %f\n",
+                                        "%f %f %f %f %f %f %f %f %f %f "
+                                        "%f %f %f %f %f %f %f %f %f %f\n",
                                         app.seat_off_g.x, app.seat_off_g.y,
                                         app.seat_off_g.z, app.seat_pitch_g,
                                         app.seat_off_a.x, app.seat_off_a.y,
@@ -1998,7 +2014,9 @@ int main(int argc, char** argv)
                                         app.seat_off_r.x, app.seat_off_r.y,
                                         app.seat_off_r.z, app.seat_pitch_r,
                                         app.seat_off_d.x, app.seat_off_d.y,
-                                        app.seat_off_d.z, app.seat_pitch_d);
+                                        app.seat_off_d.z, app.seat_pitch_d,
+                                        app.seat_off_b.x, app.seat_off_b.y,
+                                        app.seat_off_b.z, app.seat_pitch_b);
                                     std::fclose(f);
                                 }
                             }
@@ -2721,6 +2739,14 @@ int main(int argc, char** argv)
                     app.stooping = thrust || app.dive_freeze ||
                                    (app.twirl_t >= 0.0f &&
                                     app.twirl_t < kTwirlDur - kSwayLead);
+                    // the leg flutter only plays when actually heading
+                    // down (S dive / steep pitch) -- a level or climbing
+                    // boost keeps the legs planted
+                    app.link_tuck =
+                        (thrust && (diving || app.bird_pitch > 0.5f)) ||
+                        app.dive_freeze ||
+                        (app.twirl_t >= 0.0f &&
+                         app.twirl_t < kTwirlDur - kSwayLead);
                     // the Dive clip's body is baked slightly nose-down
                     // (kBoostTrim corrects it); neutral thrust sits in a
                     // shallow glide (kBoostDip)
@@ -2807,6 +2833,7 @@ int main(int argc, char** argv)
             if (app.bird_state != Bird::RideAir) {
                 app.bird_pitch += (0.0f - app.bird_pitch) * std::min(1.0f, 4.0f * dtb);
                 app.stooping = false;
+                app.link_tuck = false;
                 app.dive_freeze = false;
                 app.boost_speed = 8.5f;  // momentum resets on the ground
             }
@@ -2933,11 +2960,23 @@ int main(int argc, char** argv)
                     (!app.stooping && app.twirl_t >= 0.0f) ? 1.4f : 3.0f;
                 app.dive_w += ((app.stooping ? 1.0f : 0.0f) - app.dive_w) *
                               std::min(1.0f, dw_rate * dtb);
+                // the flutter has its own weight: only when heading down
+                app.flutter_w +=
+                    ((app.link_tuck ? 1.0f : 0.0f) - app.flutter_w) *
+                    std::min(1.0f, 3.0f * dtb);
+                // the tucked seat is the BOOST slot when straight/climbing
+                // and the DIVE slot when actually heading down, matching
+                // the pose split
+                const Vec3 tuck_off =
+                    lerp(app.seat_off_b, app.seat_off_d, app.flutter_w);
+                const float tuck_pitch =
+                    app.seat_pitch_b +
+                    (app.seat_pitch_d - app.seat_pitch_b) * app.flutter_w;
                 Vec3 off = lerp(goff, app.seat_off_a, w);
-                off = lerp(off, app.seat_off_d, app.dive_w);
+                off = lerp(off, tuck_off, app.dive_w);
                 pb = pb + off;
                 float lean = gpitch + (app.seat_pitch_a - gpitch) * w;
-                lean = lean + (app.seat_pitch_d - lean) * app.dive_w;
+                lean = lean + (tuck_pitch - lean) * app.dive_w;
                 const float ga = lean * 3.14159265f / 180.0f;
                 const Quat qx{std::sin(ga * 0.5f), 0, 0, std::cos(ga * 0.5f)};
                 const Mat4 L = bird_mtx * mat4_from_trs(pb, qx, {1, 1, 1});
@@ -2992,6 +3031,23 @@ int main(int argc, char** argv)
                                     app.link.scratch_b);
                     Model::blend(app.link.scratch_a, app.link.scratch_b,
                                  app.dive_w, app.link.scratch_mix);
+                    // straight boost: the user's authored RideBoost hold
+                    // (streamlined, legs along the bird) blends over the
+                    // dive tuck whenever he's tucked but NOT heading down;
+                    // the S dive keeps the RideDive hug. Placed before the
+                    // hat/hair overlay so the whip still wins up top.
+                    if (const float straight_w =
+                            app.dive_w * (1.0f - app.flutter_w);
+                        straight_w > 0.01f) {
+                        if (const AnimClip* bc =
+                                app.link.find_clip("RideBoost")) {
+                            app.link.sample(*bc, bc->start,
+                                            app.link.scratch_ov);
+                            Model::blend(app.link.scratch_mix,
+                                         app.link.scratch_ov, straight_w,
+                                         app.link.scratch_mix);
+                        }
+                    }
                     // hat/hair: the Ride clip's are frozen stiff, so take
                     // them from elsewhere -- grounded, the cap drops and
                     // sways like Idle's; airborne, it blends to RideDive's
@@ -3033,11 +3089,11 @@ int main(int argc, char** argv)
                     // behind him like he's barely holding on -- alternating
                     // fast wobble down the hip/knee/ankle chain, scaled by
                     // the same dive_w that tucks him in
-                    if (app.dive_w > 0.01f) {
+                    if (app.flutter_w > 0.01f) {
                         const float ft = static_cast<float>(app.sim_time) * 11.0f;
                         for (const FlutterBone& fb : flutter_bones) {
                             if (fb.node < 0) continue;
-                            const float a = fb.amp * app.dive_w *
+                            const float a = fb.amp * app.flutter_w *
                                             std::sin(ft + fb.phase);
                             const Quat q{std::sin(a * 0.5f), 0, 0,
                                          std::cos(a * 0.5f)};
@@ -3245,7 +3301,11 @@ int main(int argc, char** argv)
         glEnable(GL_DEPTH_TEST);
 
         const float aspect = fb_h > 0 ? static_cast<float>(fb_w) / fb_h : 1.0f;
-        const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.05f, 600.0f);
+        // near 0.25 (was 0.05): depth precision at range scales with d^2 /
+        // near, and the bird's layered feathers z-fight (flicker) at
+        // distance on the old value. 0.25 buys 5x precision everywhere and
+        // the camera never sits closer than ~1.5 units from geometry.
+        const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.25f, 600.0f);
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;
         const Mat4 view = mat4_look_at(app.cam.eye(), aim, {0, 1, 0});
         // (viewproj is stored below for next frame's on-screen target test)

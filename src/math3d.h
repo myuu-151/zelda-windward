@@ -24,6 +24,13 @@ struct Quat {
     float x = 0, y = 0, z = 0, w = 1;
 };
 
+inline Quat qmul(Quat a, Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+            a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+            a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
 inline Quat nlerp(Quat a, Quat b, float t) {
     // take the short way around
     float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;

@@ -514,9 +514,12 @@ void main() {
 // plane at kWaterY, purely visual (no collision).
 const char* kWaterVS = R"GLSL(
 #version 330 core
-layout(location=0) in vec2 aPos;   // xz on the plane
+layout(location=0) in vec2 aPos;   // xz on the plane, camera-centered
 uniform mat4  uViewProj;
 uniform float uTime;
+uniform vec2  uCenter;  // camera xz snapped to the vertex grid: the mesh
+                        // follows the camera (endless sea) while the wave
+                        // and foam patterns stay anchored in world space
 out vec3 vWorld;
 
 const float M_2PI = 6.283185307;
@@ -527,12 +530,13 @@ const float kWaveHeight = 0.35;
 const float kWaterY     = -3.0;
 
 void main() {
-    vec2 uv = aPos * kWaveScale;
+    vec2 wxz = aPos + uCenter;
+    vec2 uv = wxz * kWaveScale;
     float t = uTime * kWaveSpeed;
     float d1 = mod(uv.x + uv.y, M_2PI) + t * 0.07;
     float d2 = mod((uv.x + uv.y + 0.25) * 1.3, M_6PI) + t * 0.5;
     float lift = cos(d1) * 0.15 + cos(d2) * 0.05;
-    vec3 world = vec3(aPos.x, kWaterY + lift * kWaveHeight, aPos.y);
+    vec3 world = vec3(wxz.x, kWaterY + lift * kWaveHeight, wxz.y);
     vWorld = world;
     gl_Position = uViewProj * vec4(world, 1.0);
 }
@@ -1121,6 +1125,27 @@ int main(int argc, char** argv)
     Model::Attachment shield_hand{};
     bool guard_socket_valid = false;
     bool shield_in_hand = false;  // set the first time the guard comes up
+    // the hat chain (misleading names: Spine4/Neck/Head) and the hair
+    // (hair_jntA/B, hanging under Spine3 -- the REAL head, not the hat) --
+    // used to give the cruise Ride pose the RideDive clip's bobbing
+    std::vector<uint8_t> hat_hair_mask = app.link.subtree_mask("Spine4");
+    {
+        const std::vector<uint8_t> hair = app.link.subtree_mask("hair_jntA_bone_id");
+        for (size_t i = 0; i < hat_hair_mask.size() && i < hair.size(); ++i)
+            hat_hair_mask[i] |= hair[i];
+    }
+    // leg chain for the dive-speed flutter: hips, knees, ankles
+    // (real legs: L/Rclotch = hip, L/RlegA = knee, L/RlegB = ankle)
+    struct FlutterBone { int node; float amp; float phase; };
+    const FlutterBone flutter_bones[] = {
+        {app.link.find_node("Lclotch_jnt_bone_id"), 0.26f, 0.0f},
+        {app.link.find_node("Rclotch_jnt_bone_id"), 0.26f, 3.1416f},
+        {app.link.find_node("LlegA_jnt_bone_id"), 0.14f, -1.2f},
+        {app.link.find_node("RlegA_jnt_bone_id"), 0.14f, 3.1416f - 1.2f},
+        {app.link.find_node("LlegB_jnt_bone_id"), 0.10f, -2.2f},
+        {app.link.find_node("RlegB_jnt_bone_id"), 0.10f, 3.1416f - 2.2f},
+    };
+
     if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
         shield_sheath = *sh;
         const int forearm = app.link.find_node("RarmB_jnt_bone_id");
@@ -1249,6 +1274,7 @@ int main(int argc, char** argv)
     const GLint wa_viewproj = glGetUniformLocation(water_prog, "uViewProj");
     const GLint wa_time = glGetUniformLocation(water_prog, "uTime");
     const GLint wa_eye = glGetUniformLocation(water_prog, "uEye");
+    const GLint wa_center = glGetUniformLocation(water_prog, "uCenter");
     // water sea: subdivided grid so the vertex waves can roll
     GLuint water_vao = 0, water_vbo = 0, water_ibo = 0;
     GLsizei water_indices = 0;
@@ -2579,8 +2605,14 @@ int main(int argc, char** argv)
                         (app.ride_shift && !stoop && !app.dive_freeze) ||
                         (app.dive_freeze && app.freeze_boost);
                     app.stooping = stoop || boost;  // dive visuals for both
+                    // the Dive clip's body is baked slightly nose-down, so
+                    // the boost trims the world pitch up to fly level; W/S
+                    // then carry normally either side of straight
+                    constexpr float kBoostTrim = -0.18f;
                     const float want_pitch =
-                        stoop ? 1.05f : -app.ride_in_y * 0.42f;
+                        stoop ? 1.05f
+                              : (boost ? kBoostTrim : 0.0f) -
+                                    app.ride_in_y * 0.42f;
                     app.bird_pitch += (want_pitch - app.bird_pitch) *
                                       std::min(1.0f, 2.5f * dtb);
                     if (app.stooping) {
@@ -2771,12 +2803,46 @@ int main(int argc, char** argv)
                     app.link.evaluate(
                         *mc, std::min(app.mount_t, mc->duration - 1e-3f));
             } else if (app.riding) {
-                const AnimClip* rc =
-                    app.link.find_clip(app.stooping ? "RideDive" : "Ride");
-                if (rc)
+                const AnimClip* rc = app.link.find_clip("Ride");
+                const AnimClip* dc = app.link.find_clip("RideDive");
+                if (rc && dc) {
+                    // the dive tuck blends in/out with the seat (dive_w)
+                    // instead of snapping between clips
+                    const float st = static_cast<float>(app.sim_time);
+                    app.link.sample(*rc, std::fmod(st, rc->duration),
+                                    app.link.scratch_a);
+                    app.link.sample(*dc, std::fmod(st, dc->duration),
+                                    app.link.scratch_b);
+                    Model::blend(app.link.scratch_a, app.link.scratch_b,
+                                 app.dive_w, app.link.scratch_mix);
+                    // the hat/hair bobbing is keyed only in RideDive: take
+                    // that subtree straight from the dive sample always, so
+                    // the cruise pose bobs the same way
+                    for (size_t i = 0; i < app.link.scratch_mix.size(); ++i)
+                        if (i < hat_hair_mask.size() && hat_hair_mask[i])
+                            app.link.scratch_mix[i] = app.link.scratch_b[i];
+                    // speed pressure: at dive/boost speed his legs flutter
+                    // behind him like he's barely holding on -- alternating
+                    // fast wobble down the hip/knee/ankle chain, scaled by
+                    // the same dive_w that tucks him in
+                    if (app.dive_w > 0.01f) {
+                        const float ft = static_cast<float>(app.sim_time) * 11.0f;
+                        for (const FlutterBone& fb : flutter_bones) {
+                            if (fb.node < 0) continue;
+                            const float a = fb.amp * app.dive_w *
+                                            std::sin(ft + fb.phase);
+                            const Quat q{std::sin(a * 0.5f), 0, 0,
+                                         std::cos(a * 0.5f)};
+                            TRS& trs = app.link.scratch_mix[fb.node];
+                            trs.r = qmul(trs.r, q);
+                        }
+                    }
+                    app.link.palette_from(app.link.scratch_mix);
+                } else if (rc) {
                     app.link.evaluate(
                         *rc, std::fmod(static_cast<float>(app.sim_time),
                                        rc->duration));
+                }
             } else {
                 app.player.anim.apply(app.link);
             }
@@ -2987,11 +3053,20 @@ int main(int argc, char** argv)
         glBindVertexArray(grid_vao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        // wind waker sea below and around the test plane (opaque)
+        // wind waker sea below and around the test plane (opaque). The mesh
+        // recenters on the camera each frame -- snapped to the vertex grid
+        // so vertices stay at fixed world positions -- making it endless
         glUseProgram(water_prog);
         glUniformMatrix4fv(wa_viewproj, 1, GL_FALSE, viewproj.m);
         glUniform1f(wa_time, static_cast<float>(app.sim_time));
         glUniform3fv(wa_eye, 1, eye3);
+        {
+            constexpr float kQuad = 2.0f * 500.0f / 140.0f;  // mesh grid step
+            const float center[2] = {
+                std::floor(cam_eye.x / kQuad) * kQuad,
+                std::floor(cam_eye.z / kQuad) * kQuad};
+            glUniform2fv(wa_center, 1, center);
+        }
         glBindVertexArray(water_vao);
         glDrawElements(GL_TRIANGLES, water_indices, GL_UNSIGNED_INT, nullptr);
 

@@ -33,19 +33,26 @@ constexpr float kGroundHalf = 37.5f;
 // the frame, across to the right edge, and settles back center in the
 // soar pose, banking into each swing
 constexpr float kTwirlDur = 0.8f;
-constexpr float kSwayDur = 2.2f;
+constexpr float kSwayLead = 0.25f; // sway starts before the spin fully ends
+constexpr float kSwayDur = 3.2f;
 constexpr float kSwayAmp = 3.4f;   // lateral reach toward the frame edges
 constexpr float kSwayBank = 0.55f; // bank into the swing, radians
 
-// 0 at the sway's ends, 1 through the middle -- eases the carve in and out
-inline float sway_env(float ts)
+// signed sway curve at sway-time ts: one flat-topped period -- launch out
+// left, DWELL at the edge, carve across right, DWELL, settle back center.
+// The tanh squashes the sine so it lingers at the extremes; the envelope
+// snaps in fast (the twirl hands straight into it) and eases out gently.
+inline float sway_shape(float ts)
 {
-    const float in = ts / 0.30f;
-    const float out = (kSwayDur - ts) / 0.45f;
+    if (ts <= 0.0f || ts >= kSwayDur)
+        return 0.0f;
+    const float in = ts / 0.12f;
+    const float out = (kSwayDur - ts) / 0.5f;
     float e = in < out ? in : out;
     if (e > 1.0f) e = 1.0f;
-    if (e < 0.0f) e = 0.0f;
-    return e * e * (3.0f - 2.0f * e);
+    e = e * e * (3.0f - 2.0f * e);
+    const float raw = std::sin(6.2831853f * ts / kSwayDur);
+    return e * std::tanh(2.2f * raw) * (1.0f / std::tanh(2.2f));
 }
 #ifdef EMBED_LINK_GLB
 extern "C" {
@@ -1474,7 +1481,7 @@ int main(int argc, char** argv)
         float len = 4, amp = 0.4f, loops = 1, phase = 0, dur = 3, t = -1;
         bool rush = false;  // twirl wind-rush burst slot (parked when idle)
     };
-    std::vector<WindStreak> winds(6 + 8);  // 6 ambient + 8 rush slots
+    std::vector<WindStreak> winds(6 + 16);  // 6 ambient + 16 rush slots
     uint32_t wind_seed = 0x9d2c5680u ^ static_cast<uint32_t>(SDL_GetTicksNS());
     auto wrand = [&]() {
         wind_seed = wind_seed * 1664525u + 1013904223u;
@@ -2657,30 +2664,50 @@ int main(int argc, char** argv)
                         app.twirl_go = false;
                         if (app.twirl_t < 0.0f && !app.dive_freeze) {
                             app.twirl_t = 0.0f;
-                            // wake the parked rush slots: streaks spawn
-                            // ahead and corkscrew past the bird, against
-                            // the flight direction
+                            // wake the parked rush slots. First 8: tight
+                            // corkscrews spawning ahead and spiraling past
+                            // the bird. Last 8: long, nearly straight
+                            // ribbons far off to the sides, all streaming
+                            // the same way -- the whole sky rushing by.
                             const Vec3 fdir{std::sin(app.bird_yaw), 0,
                                             std::cos(app.bird_yaw)};
+                            const Vec3 rdir{-fdir.z, 0, fdir.x};
                             for (size_t i = 6; i < winds.size(); ++i) {
                                 WindStreak& w = winds[i];
-                                w.len = 9.0f + wrand() * 6.0f;
-                                w.origin = app.bird_pos +
-                                           fdir * (w.len * 0.5f + 2.0f) +
-                                           Vec3{0, -0.5f + wrand() * 2.2f, 0};
+                                const bool far_off = i >= 14;
+                                if (far_off) {
+                                    w.len = 16.0f + wrand() * 10.0f;
+                                    const float side =
+                                        (wrand() < 0.5f ? -1.0f : 1.0f) *
+                                        (3.5f + wrand() * 6.0f);
+                                    w.origin = app.bird_pos +
+                                               fdir * (w.len * 0.5f +
+                                                       4.0f + wrand() * 8.0f) +
+                                               rdir * side +
+                                               Vec3{0, -1.5f + wrand() * 4.5f, 0};
+                                    w.amp = 0.05f + wrand() * 0.12f;
+                                    w.loops = 0.5f;
+                                    w.dur = w.len / 26.0f;   // screaming past
+                                    w.t = -wrand() * 0.35f;
+                                } else {
+                                    w.len = 9.0f + wrand() * 6.0f;
+                                    w.origin = app.bird_pos +
+                                               fdir * (w.len * 0.5f + 2.0f) +
+                                               Vec3{0, -0.5f + wrand() * 2.2f, 0};
+                                    w.amp = 0.8f + wrand() * 0.9f;
+                                    w.loops = 1.0f + wrand();
+                                    w.dur = w.len / 22.0f;  // rushing fast
+                                    w.t = -wrand() * 0.12f;
+                                }
                                 w.fwd = fdir * -1.0f;
                                 w.side = normalize(cross(w.fwd, Vec3{0, 1, 0}));
-                                w.amp = 0.8f + wrand() * 0.9f;
-                                w.loops = 1.0f + wrand();
                                 w.phase = wrand() * 6.2831853f;
-                                w.dur = w.len / 22.0f;  // rushing fast
-                                w.t = -wrand() * 0.12f; // slight stagger
                             }
                         }
                     }
                     if (app.twirl_t >= 0.0f) {
                         app.twirl_t += dtb;
-                        if (app.twirl_t >= kTwirlDur + kSwayDur)
+                        if (app.twirl_t >= kTwirlDur - kSwayLead + kSwayDur)
                             app.twirl_t = -1.0f;
                     }
                     // SHIFT = momentum flight: the bird tucks and flies
@@ -2689,11 +2716,12 @@ int main(int argc, char** argv)
                     // the sky but bleeds the momentum away. Without shift,
                     // W just flaps him up as usual.
                     const bool thrust = app.ride_shift && !app.dive_freeze;
-                    // dive visuals; the twirl's roll phase tucks the wings
-                    // (the sway that follows glides wings-out in the soar)
+                    // dive visuals; the twirl's roll phase tucks the wings,
+                    // and the untuck starts as the carve takes over (the
+                    // sway lead) so the pose melts into the sway
                     app.stooping = thrust || app.dive_freeze ||
                                    (app.twirl_t >= 0.0f &&
-                                    app.twirl_t < kTwirlDur);
+                                    app.twirl_t < kTwirlDur - kSwayLead);
                     // the Dive clip's body is baked slightly nose-down
                     // (kBoostTrim corrects it); neutral thrust sits in a
                     // shallow glide (kBoostDip)
@@ -2710,7 +2738,9 @@ int main(int argc, char** argv)
                         if (app.bird_clip && app.bird_clip->name != "Dive")
                             set_clip("Dive");
                     } else if (app.bird_clip && app.bird_clip->name == "Dive") {
-                        set_clip("Flap");   // pull out of the thrust
+                        // pull out of the thrust; the twirl's sway opens
+                        // straight into the soar (no flap hop between)
+                        set_clip(app.twirl_t >= 0.0f ? "Soar" : "Flap");
                     }
                     float speed = app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
                     if (app.dive_freeze) {
@@ -2744,10 +2774,10 @@ int main(int argc, char** argv)
                         const float u = app.twirl_t / kTwirlDur;
                         app.bird_pos =
                             app.bird_pos +
-                            fwd * (9.0f * std::sin(3.1415926f * u) * dtb);
+                            fwd * (22.0f * std::sin(3.1415926f * u) * dtb);
                         if (thrust)
                             app.boost_speed =
-                                SDL_min(26.0f, app.boost_speed + 8.0f * dtb);
+                                SDL_min(26.0f, app.boost_speed + 16.0f * dtb);
                     }
                     app.was_thrust = thrust;
                     const bool over_grid =
@@ -2802,7 +2832,8 @@ int main(int argc, char** argv)
                     // ridden: the stick owns the mix -- climbing FLAPS,
                     // diving sets the wings into the soar glide. The
                     // twirl's sway phase glides wings-out in the soar.
-                    const bool swaying = app.twirl_t >= kTwirlDur;
+                    const bool swaying =
+                        app.twirl_t >= kTwirlDur - kSwayLead;
                     const float tgt = swaying                 ? 1.0f
                                       : app.ride_in_y > 0.3f  ? 0.0f
                                       : app.ride_in_y < -0.3f ? 1.0f
@@ -2842,32 +2873,27 @@ int main(int argc, char** argv)
             // then a damped left-right sway that settles back onto the
             // steering roll exactly where the soar sits
             float roll_total = app.bird_roll;
+            Vec3 sway_pos = app.bird_pos;
             if (app.twirl_t >= 0.0f) {
                 if (app.twirl_t < kTwirlDur) {
                     const float u = app.twirl_t / kTwirlDur;
                     const float e = u * u * (3.0f - 2.0f * u);
                     roll_total += 6.2831853f * e;
-                } else {
-                    // the carve: one full period -- out LEFT, across to the
-                    // RIGHT, back to center -- banking into each swing
-                    const float ts = app.twirl_t - kTwirlDur;
-                    const float s =
-                        std::sin(6.2831853f * ts / kSwayDur) * sway_env(ts);
-                    roll_total += kSwayBank * s;
                 }
-            }
-            // the sway's lateral swing: a visual offset along the bird's
-            // right axis (the camera keeps following bird_pos, so the bird
-            // genuinely sweeps toward the frame edges)
-            Vec3 sway_pos = app.bird_pos;
-            if (app.twirl_t >= kTwirlDur) {
-                const float ts = app.twirl_t - kTwirlDur;
+                // the carve overlaps the spin's tail (kSwayLead) so the
+                // twirl blends straight into it: bank into each swing, and
+                // sweep laterally along the bird's right axis (the camera
+                // keeps following bird_pos, so the bird genuinely swings
+                // toward the frame edges)
                 const float s =
-                    std::sin(6.2831853f * ts / kSwayDur) * sway_env(ts);
-                const Vec3 bfwd{std::sin(app.bird_yaw), 0,
-                                std::cos(app.bird_yaw)};
-                const Vec3 bright{-bfwd.z, 0, bfwd.x};
-                sway_pos = sway_pos + bright * (-kSwayAmp * s);
+                    sway_shape(app.twirl_t - (kTwirlDur - kSwayLead));
+                if (s != 0.0f) {
+                    roll_total += kSwayBank * s;
+                    const Vec3 bfwd{std::sin(app.bird_yaw), 0,
+                                    std::cos(app.bird_yaw)};
+                    const Vec3 bright{-bfwd.z, 0, bfwd.x};
+                    sway_pos = sway_pos + bright * (-kSwayAmp * s);
+                }
             }
             const Quat q_roll{0, 0, std::sin(roll_total * 0.5f),
                               std::cos(roll_total * 0.5f)};
@@ -2904,8 +2930,12 @@ int main(int argc, char** argv)
                 const float gpitch =
                     app.seat_pitch_g +
                     (app.seat_pitch_r - app.seat_pitch_g) * app.run_w;
+                // untucking out of the twirl melts slowly into the sway
+                // pose; every other transition keeps the snappier rate
+                const float dw_rate =
+                    (!app.stooping && app.twirl_t >= 0.0f) ? 1.4f : 3.0f;
                 app.dive_w += ((app.stooping ? 1.0f : 0.0f) - app.dive_w) *
-                              std::min(1.0f, 3.0f * dtb);
+                              std::min(1.0f, dw_rate * dtb);
                 Vec3 off = lerp(goff, app.seat_off_a, w);
                 off = lerp(off, app.seat_off_d, app.dive_w);
                 pb = pb + off;

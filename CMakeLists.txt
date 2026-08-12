@@ -63,7 +63,9 @@ add_executable(zelda_packed
     ${EMBED_SRCS}
 )
 target_include_directories(zelda_packed PRIVATE third_party/cgltf third_party/stb)
-target_compile_definitions(zelda_packed PRIVATE _CRT_SECURE_NO_WARNINGS EMBED_LINK_GLB)
+# ZELDA_RETAIL: no tune files, no debug/tuning keys, no screenshot CLI --
+# everything runs off the baked constants, as retail intended
+target_compile_definitions(zelda_packed PRIVATE _CRT_SECURE_NO_WARNINGS EMBED_LINK_GLB ZELDA_RETAIL)
 target_link_libraries(zelda_packed PRIVATE SDL3::SDL3-static opengl32)
 if(MSVC)
     target_compile_options(zelda_packed PRIVATE /W4)

@@ -2564,16 +2564,21 @@ int main(int argc, char** argv)
                     const bool diving = app.ride_in_y < -0.3f;
                     const bool stoop =
                         (diving && app.ride_shift) || app.dive_freeze;
-                    app.stooping = stoop;
+                    // SHIFT alone = the front BOOST: same tucked dive pose
+                    // (its tilt is world pitch, so the pose reads level),
+                    // driven forward fast instead of down the nose
+                    const bool boost =
+                        app.ride_shift && !stoop && !app.dive_freeze;
+                    app.stooping = stoop || boost;  // dive visuals for both
                     const float want_pitch =
                         stoop ? 1.05f : -app.ride_in_y * 0.42f;
                     app.bird_pitch += (want_pitch - app.bird_pitch) *
                                       std::min(1.0f, 2.5f * dtb);
-                    if (stoop) {
+                    if (app.stooping) {
                         if (app.bird_clip && app.bird_clip->name != "Dive")
                             set_clip("Dive");
                     } else if (app.bird_clip && app.bird_clip->name == "Dive") {
-                        set_clip("Flap");   // pull out of the stoop
+                        set_clip("Flap");   // pull out of the stoop / boost
                     }
                     float speed = app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
                     if (app.dive_freeze) {
@@ -2586,9 +2591,11 @@ int main(int argc, char** argv)
                             fwd * (std::cos(app.bird_pitch) * speed * dtb);
                         app.bird_pos.y -=
                             std::sin(app.bird_pitch) * speed * dtb;
-                    } else if (app.dive_freeze) {
-                        // frozen: dive visuals, no motion
                     } else {
+                        // boost ramps in with the tuck (dive_w) up to stoop
+                        // speed; W/S climb authority stays live throughout
+                        if (boost)
+                            speed = 8.5f + 7.5f * app.dive_w;
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;
                     }

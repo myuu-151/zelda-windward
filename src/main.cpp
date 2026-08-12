@@ -1145,6 +1145,14 @@ int main(int argc, char** argv)
         {app.link.find_node("LlegB_jnt_bone_id"), 0.10f, -2.2f},
         {app.link.find_node("RlegB_jnt_bone_id"), 0.10f, 3.1416f - 2.2f},
     };
+    // torso buffet handled separately: the whole upper body sways
+    // (Spine + Spine2), with exact counter-rotations so the gripping
+    // arms (shoulders hang off Spine) and the head stay steady
+    const int buffet_spine = app.link.find_node("Spine");
+    const int buffet_chest = app.link.find_node("Spine2");
+    const int buffet_head = app.link.find_node("Spine3");  // the real head
+    const int buffet_lsh = app.link.find_node("Lshoulder_jnt_bone_id");
+    const int buffet_rsh = app.link.find_node("Rshoulder_jnt_bone_id");
 
     if (Model::Attachment* sh = app.link.find_attachment("Shield")) {
         shield_sheath = *sh;
@@ -2857,6 +2865,38 @@ int main(int argc, char** argv)
                                          std::cos(a * 0.5f)};
                             TRS& trs = app.link.scratch_mix[fb.node];
                             trs.r = qmul(trs.r, q);
+                        }
+                        // the whole upper body sways (Spine carries the
+                        // visible mass, Spine2 adds a chest ripple); the
+                        // shoulders cancel Spine's wobble and the head
+                        // cancels the full accumulated chain, both by
+                        // exact inverse rotations in their parent frames
+                        if (buffet_spine >= 0 && buffet_chest >= 0 &&
+                            buffet_head >= 0 && buffet_lsh >= 0 &&
+                            buffet_rsh >= 0) {
+                            auto qconj = [](Quat q) {
+                                return Quat{-q.x, -q.y, -q.z, q.w};
+                            };
+                            auto xrot = [](float a) {
+                                return Quat{std::sin(a * 0.5f), 0, 0,
+                                            std::cos(a * 0.5f)};
+                            };
+                            const float w = app.dive_w;
+                            const Quat q1 = xrot(0.10f * w * std::sin(ft + 0.9f));
+                            const Quat q2 = xrot(0.20f * w * std::sin(ft + 1.4f));
+                            Pose& mix = app.link.scratch_mix;
+                            mix[buffet_spine].r = qmul(mix[buffet_spine].r, q1);
+                            // shoulders: undo the parent's wobble
+                            mix[buffet_lsh].r = qmul(qconj(q1), mix[buffet_lsh].r);
+                            mix[buffet_rsh].r = qmul(qconj(q1), mix[buffet_rsh].r);
+                            const Quat R2 = mix[buffet_chest].r;  // pre-wobble
+                            mix[buffet_chest].r = qmul(R2, q2);
+                            // head: inv(q2) * inv(R2) * inv(q1) * R2 undoes
+                            // both wobbles through the chest's frame
+                            Quat t = qmul(qconj(q1), R2);
+                            t = qmul(qconj(R2), t);
+                            t = qmul(qconj(q2), t);
+                            mix[buffet_head].r = qmul(t, mix[buffet_head].r);
                         }
                     }
                     app.link.palette_from(app.link.scratch_mix);

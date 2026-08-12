@@ -2828,12 +2828,26 @@ int main(int argc, char** argv)
                                     app.link.scratch_b);
                     Model::blend(app.link.scratch_a, app.link.scratch_b,
                                  app.dive_w, app.link.scratch_mix);
-                    // the hat/hair bobbing is keyed only in RideDive: take
-                    // that subtree straight from the dive sample always, so
-                    // the cruise pose bobs the same way
-                    for (size_t i = 0; i < app.link.scratch_mix.size(); ++i)
-                        if (i < hat_hair_mask.size() && hat_hair_mask[i])
-                            app.link.scratch_mix[i] = app.link.scratch_b[i];
+                    // hat/hair: the Ride clip's are frozen stiff, so take
+                    // them from elsewhere -- grounded, the cap drops and
+                    // sways like Idle's; airborne, it blends to RideDive's
+                    // bobbing by the airborne weight
+                    if (const AnimClip* ic = app.link.find_clip("Idle")) {
+                        app.link.sample(*ic,
+                                        ic->start + std::fmod(st, ic->duration -
+                                                                      ic->start),
+                                        app.link.scratch_ov);
+                        const float hw = app.seat_air_w;
+                        for (size_t i = 0; i < app.link.scratch_mix.size(); ++i)
+                            if (i < hat_hair_mask.size() && hat_hair_mask[i]) {
+                                TRS& m = app.link.scratch_mix[i];
+                                const TRS& g = app.link.scratch_ov[i];
+                                const TRS& b = app.link.scratch_b[i];
+                                m.t = lerp(g.t, b.t, hw);
+                                m.r = nlerp(g.r, b.r, hw);
+                                m.s = lerp(g.s, b.s, hw);
+                            }
+                    }
                     // speed pressure: at dive/boost speed his legs flutter
                     // behind him like he's barely holding on -- alternating
                     // fast wobble down the hip/knee/ankle chain, scaled by

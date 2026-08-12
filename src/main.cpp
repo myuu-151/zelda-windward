@@ -2611,7 +2611,7 @@ int main(int argc, char** argv)
                     // because a bird buys speed with altitude -- the boost
                     // is a shallow power glide, not a flat sprint
                     constexpr float kBoostTrim = -0.18f;
-                    constexpr float kBoostDip = 0.10f;
+                    constexpr float kBoostDip = 0.18f;
                     const float want_pitch =
                         stoop ? 1.05f
                               : (boost ? kBoostTrim + kBoostDip : 0.0f) -
@@ -2642,7 +2642,7 @@ int main(int argc, char** argv)
                             speed = 8.5f + 7.5f * app.dive_w;
                             // the altitude the speed is bought with: a
                             // steady sink that W (3.2/s) can out-climb
-                            app.bird_pos.y -= 1.8f * app.dive_w * dtb;
+                            app.bird_pos.y -= 2.6f * app.dive_w * dtb;
                         }
                         app.bird_pos = app.bird_pos + fwd * (speed * dtb);
                         app.bird_pos.y += app.ride_in_y * 3.2f * dtb;

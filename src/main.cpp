@@ -4002,20 +4002,26 @@ int main(int argc, char** argv)
                     }
                 };
 
-                const float panel_c[4] = {0.05f, 0.04f, 0.06f, 0.88f};
+                // the user's swatch #2D231F, so the sheet reads as one
+                // piece with the frame art's band. NOTE: the framebuffer
+                // isn't sRGB, so colors here are display values (45/255,
+                // 35/255, 31/255) -- linearizing them renders near-black
+                const float panel_c[4] = {0.176f, 0.137f, 0.122f, 1.0f};
                 const float edge_c[4] = {0.55f, 0.42f, 0.20f, 0.75f};
-                const float staff_c[4] = {0.98f, 0.42f, 0.13f, 1.0f};
+                const float staff_c[4] = {0.749f, 0.545f, 0.224f, 1.0f};  // #bf8b39
+                const float staff_shadow_c[4] = {0.188f, 0.149f, 0.110f, 1.0f};  // #30261c
                 const float cream[4] = {0.97f, 0.94f, 0.88f, 1.0f};
                 const float white[4] = {0.96f, 0.96f, 0.94f, 1.0f};
 
                 const bool has_msg = hud_message[0] != '\0';
                 const float PH = has_msg ? 156.0f : 126.0f;
                 const float PX = 340.0f, PY = 690.0f - PH, PW = 600.0f;
-                // NOT just a border: round_rect fills, so the gold layer is
-                // the warm underlay the dark fill blends over -- skipping it
-                // shifts the whole sheet's color
-                round_rect(PX - 2, PY - 2, PW + 4, PH + 4, 16, edge_c);
-                round_rect(PX, PY, PW, PH, 15, panel_c);
+                // the frame art carries its own background, so the drawn
+                // panel is only the fallback when it didn't load
+                if (!frame_tex) {
+                    round_rect(PX - 2, PY - 2, PW + 4, PH + 4, 16, edge_c);
+                    round_rect(PX, PY, PW, PH, 15, panel_c);
+                }
 
                 if (has_msg) {
                     const float px = 2.0f;
@@ -4023,12 +4029,21 @@ int main(int argc, char** argv)
                     text(hud_message, x, PY + 16, px, white);
                 }
 
-                // staff: five orange lines, like the ocarina UI
+                // staff: five gold lines, each on a dark stroke so it reads
+                // as inlay rather than paint
                 const float SX = PX + 24, SW = PW - 48;
+                // only the bottom line runs into the frame's lower-right
+                // corner scroll (~46px into the panel), so just that one
+                // stops short; the other four keep the full width
+                const float SW_BOT = frame_tex ? PW - 24 - 50.0f : SW;
                 const float SGAP = 17.0f;
                 const float S0 = PY + (has_msg ? 52.0f : 26.0f);
-                for (int i = 0; i < 5; ++i)
-                    rect(SX, S0 + i * SGAP, SW, 2.4f, staff_c);
+                for (int i = 0; i < 5; ++i) {
+                    const float ly = S0 + i * SGAP;
+                    const float lw = (i == 4) ? SW_BOT : SW;
+                    rect(SX, ly - 1.2f, lw, 2.4f + 2.4f, staff_shadow_c);
+                    rect(SX, ly, lw, 2.4f, staff_c);
+                }
                 const float bottom_line = S0 + 4 * SGAP;
 
                 // the notes he has played, as real notation: the natural sits on
@@ -4054,6 +4069,11 @@ int main(int argc, char** argv)
                 glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                // the sheet itself: frame art + its own background, under
+                // the staff, notes and title
+                draw_sheet_frame(PX, PY, PW, PH, F);
+
                 glUseProgram(hud_prog);
                 const float screen_uni[3] = {VW, VH, 0.0f};
                 glUniform3fv(h_screen, 1, screen_uni);
@@ -4070,10 +4090,6 @@ int main(int argc, char** argv)
                 const float font_col[4] = {0.96f, 0.96f, 0.94f, F};
                 draw_font_verts(font_batch, font_col);
 
-                // the scrollwork frame, mapped at its native aspect around
-                // the panel (it was drawn around this exact layout)
-                draw_sheet_frame(PX, PY, PW, PH, F);
-
                 // the real clef glyph, as a tinted alpha quad
                 {
                     const float ch = 7.4f * SGAP;
@@ -4081,25 +4097,36 @@ int main(int argc, char** argv)
                     const float cx0 = SX + 8.0f;
                     // the spiral of the glyph sits ~63% down: line it up with G
                     const float cy0 = (S0 + 3 * SGAP) - 0.63f * ch;
-                    const float quad[6][4] = {
-                        {cx0, cy0, 0, 0},
-                        {cx0 + cw, cy0, 1, 0},
-                        {cx0, cy0 + ch, 0, 1},
-                        {cx0 + cw, cy0, 1, 0},
-                        {cx0 + cw, cy0 + ch, 1, 1},
-                        {cx0, cy0 + ch, 0, 1},
-                    };
-                    const float clef_col[4] = {0.98f, 0.74f, 0.24f, F};
                     glUseProgram(clef_prog);
                     glUniform3fv(ct_screen, 1, screen_uni);
-                    glUniform4fv(ct_color, 1, clef_col);
                     glUniform1i(ct_tex, 0);
                     glActiveTexture(GL_TEXTURE0);
                     glBindTexture(GL_TEXTURE_2D, clef_tex);
                     glBindVertexArray(clef_vao);
                     glBindBuffer(GL_ARRAY_BUFFER, clef_vbo);
-                    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STREAM_DRAW);
-                    glDrawArrays(GL_TRIANGLES, 0, 6);
+                    // drawn twice: a dark copy nudged down-right for the
+                    // drop shadow (same stroke color as the staff lines),
+                    // then the gold glyph itself
+                    const float clef_col[4] = {0.98f, 0.74f, 0.24f, F};
+                    const float clef_shadow[4] = {0.188f, 0.149f, 0.110f,
+                                                  F * 0.85f};
+                    for (int pass = 0; pass < 2; ++pass) {
+                        const float o = pass == 0 ? 2.5f : 0.0f;
+                        const float x0 = cx0 + o, y0 = cy0 + o;
+                        const float quad[6][4] = {
+                            {x0, y0, 0, 0},
+                            {x0 + cw, y0, 1, 0},
+                            {x0, y0 + ch, 0, 1},
+                            {x0 + cw, y0, 1, 0},
+                            {x0 + cw, y0 + ch, 1, 1},
+                            {x0, y0 + ch, 0, 1},
+                        };
+                        glUniform4fv(ct_color, 1,
+                                     pass == 0 ? clef_shadow : clef_col);
+                        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad,
+                                     GL_STREAM_DRAW);
+                        glDrawArrays(GL_TRIANGLES, 0, 6);
+                    }
                     glBindVertexArray(0);
                 }
                 glDisable(GL_BLEND);

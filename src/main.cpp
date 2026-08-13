@@ -76,8 +76,30 @@ extern unsigned char g_panflute_wav[];
 extern unsigned long long g_panflute_wav_size;
 extern unsigned char g_chime_wav[];
 extern unsigned long long g_chime_wav_size;
-extern unsigned char g_bird_call_wav[];
-extern unsigned long long g_bird_call_wav_size;
+extern unsigned char g_bird_call1_wav[];
+extern unsigned long long g_bird_call1_wav_size;
+extern unsigned char g_bird_call2_wav[];
+extern unsigned long long g_bird_call2_wav_size;
+extern unsigned char g_bird_call3_wav[];
+extern unsigned long long g_bird_call3_wav_size;
+extern unsigned char g_bird_call4_wav[];
+extern unsigned long long g_bird_call4_wav_size;
+extern unsigned char g_flap_wav[];
+extern unsigned long long g_flap_wav_size;
+extern unsigned char g_launch_flap_wav[];
+extern unsigned long long g_launch_flap_wav_size;
+extern unsigned char g_wind_loop_wav[];
+extern unsigned long long g_wind_loop_wav_size;
+extern unsigned char g_ocean_loop_wav[];
+extern unsigned long long g_ocean_loop_wav_size;
+extern unsigned char g_harsh_wind_wav[];
+extern unsigned long long g_harsh_wind_wav_size;
+extern unsigned char g_twirl1_wav[];
+extern unsigned long long g_twirl1_wav_size;
+extern unsigned char g_twirl2_wav[];
+extern unsigned long long g_twirl2_wav_size;
+extern unsigned char g_twirl3_wav[];
+extern unsigned long long g_twirl3_wav_size;
 extern unsigned char g_hud_font[];
 extern unsigned long long g_hud_font_size;
 extern unsigned char g_sheet_frame_png[];
@@ -900,6 +922,8 @@ struct App {
     float flutter_w = 0.0f;  // smoothed flutter weight
     bool dive_freeze = false;  // F4: hold the dive mid-air for seat tuning
     float boost_speed = 8.5f;  // flight momentum (thrust, twirl, glide-off)
+    float flap_phase = 0.0f;   // wingbeat clock, for the flap sfx
+    int twirl_sfx = 0;         // which of the twirl's three beats has played
     bool twirl_go = false;     // SPACE pressed mid-flight
     float twirl_t = -1.0f;     // barrel roll progress, <0 = inactive
     float seat_pitch_r = 0.0f;
@@ -1919,40 +1943,246 @@ int main(int argc, char** argv)
                                static_cast<int>(chime_wav_len));
     };
 
-    // the loftwing's cry, answering the Song of Skies
-    SDL_AudioStream* call_stream = nullptr;
-    Uint8* call_wav = nullptr;
-    Uint32 call_wav_len = 0;
+    // the loftwing's cry, answering the Song of Skies -- a handful of
+    // takes, one picked at random per summon so it never sounds canned
+    constexpr int kCalls = 4;
+    SDL_AudioStream* call_stream[kCalls] = {};
+    Uint8* call_wav[kCalls] = {};
+    Uint32 call_wav_len[kCalls] = {};
     if (audio_dev) {
-        SDL_AudioSpec bs{};
 #ifdef EMBED_LINK_GLB
-        SDL_LoadWAV_IO(
-            SDL_IOFromConstMem(g_bird_call_wav,
-                               static_cast<size_t>(g_bird_call_wav_size)),
-            true, &bs, &call_wav, &call_wav_len);
-#else
-        std::string bpath = std::string(SDL_GetBasePath()) +
-                            "..\\..\\assets\\bird_call.wav";
-        if (!SDL_LoadWAV(bpath.c_str(), &bs, &call_wav, &call_wav_len))
-            SDL_LoadWAV("assets/bird_call.wav", &bs, &call_wav, &call_wav_len);
+        unsigned char* const call_mem[kCalls] = {g_bird_call1_wav,
+                                                 g_bird_call2_wav,
+                                                 g_bird_call3_wav,
+                                                 g_bird_call4_wav};
+        const unsigned long long call_mem_size[kCalls] = {
+            g_bird_call1_wav_size, g_bird_call2_wav_size,
+            g_bird_call3_wav_size, g_bird_call4_wav_size};
 #endif
-        if (call_wav) {
-            call_stream = SDL_CreateAudioStream(&bs, nullptr);
-            if (call_stream) {
-                SDL_SetAudioStreamGain(call_stream, 0.85f);
-                SDL_BindAudioStream(audio_dev, call_stream);
+        for (int i = 0; i < kCalls; ++i) {
+            SDL_AudioSpec bs{};
+#ifdef EMBED_LINK_GLB
+            SDL_LoadWAV_IO(
+                SDL_IOFromConstMem(call_mem[i],
+                                   static_cast<size_t>(call_mem_size[i])),
+                true, &bs, &call_wav[i], &call_wav_len[i]);
+#else
+            char name[32];
+            SDL_snprintf(name, sizeof(name), "bird_call%d.wav", i + 1);
+            std::string bpath =
+                std::string(SDL_GetBasePath()) + "..\\..\\assets\\" + name;
+            if (!SDL_LoadWAV(bpath.c_str(), &bs, &call_wav[i], &call_wav_len[i]))
+                SDL_LoadWAV((std::string("assets/") + name).c_str(), &bs,
+                            &call_wav[i], &call_wav_len[i]);
+#endif
+            if (!call_wav[i]) continue;
+            call_stream[i] = SDL_CreateAudioStream(&bs, nullptr);
+            if (call_stream[i]) {
+                SDL_SetAudioStreamGain(call_stream[i], 0.85f);
+                SDL_BindAudioStream(audio_dev, call_stream[i]);
             }
-            SDL_Log("bird call: %u bytes, %d ch @ %d Hz", call_wav_len,
-                    bs.channels, bs.freq);
-        } else {
-            SDL_Log("could not load assets/bird_call.wav: %s", SDL_GetError());
         }
+        int loaded = 0;
+        for (int i = 0; i < kCalls; ++i) loaded += call_wav[i] ? 1 : 0;
+        SDL_Log("bird calls: %d/%d loaded", loaded, kCalls);
     }
+    // wingbeats, the heavy launch flap, and the wind of open sky. The
+    // flap gets two streams so a fast wingbeat can't cut off the last one.
+    SDL_AudioStream* flap_stream[2] = {};
+    Uint8* flap_wav = nullptr;
+    Uint32 flap_wav_len = 0;
+    int flap_next = 0;
+    std::vector<Sint16> flap_pan_buf;  // scratch for the panned copy
+    SDL_AudioStream* launch_stream = nullptr;
+    Uint8* launch_wav = nullptr;
+    Uint32 launch_wav_len = 0;
+    SDL_AudioStream* wind_stream = nullptr;
+    Uint8* wind_wav = nullptr;
+    Uint32 wind_wav_len = 0;
+    SDL_AudioStream* ocean_stream = nullptr;   // the sea, always down there
+    Uint8* ocean_wav = nullptr;
+    Uint32 ocean_wav_len = 0;
+    SDL_AudioStream* harsh_stream = nullptr;   // the roar of a fast dive
+    Uint8* harsh_wav = nullptr;
+    Uint32 harsh_wav_len = 0;
+    // the twirl's three wing beats: the roll, then one for each sway
+    SDL_AudioStream* twirl_stream[3] = {};
+    Uint8* twirl_wav[3] = {};
+    Uint32 twirl_wav_len[3] = {};
+    if (audio_dev) {
+        auto load_sfx = [&](const char* file, unsigned char* mem,
+                            unsigned long long mem_size, Uint8** out,
+                            Uint32* out_len, SDL_AudioSpec* spec) {
+#ifdef EMBED_LINK_GLB
+            (void)file;
+            SDL_LoadWAV_IO(SDL_IOFromConstMem(mem, static_cast<size_t>(mem_size)),
+                           true, spec, out, out_len);
+#else
+            (void)mem;
+            (void)mem_size;
+            const std::string p =
+                std::string(SDL_GetBasePath()) + "..\\..\\assets\\" + file;
+            if (!SDL_LoadWAV(p.c_str(), spec, out, out_len))
+                SDL_LoadWAV((std::string("assets/") + file).c_str(), spec, out,
+                            out_len);
+#endif
+        };
+        SDL_AudioSpec fs{}, ls{}, ws{}, os{}, hs{};
+#ifdef EMBED_LINK_GLB
+        load_sfx("flap.wav", g_flap_wav, g_flap_wav_size, &flap_wav,
+                 &flap_wav_len, &fs);
+        load_sfx("launch_flap.wav", g_launch_flap_wav, g_launch_flap_wav_size,
+                 &launch_wav, &launch_wav_len, &ls);
+        load_sfx("wind_loop.wav", g_wind_loop_wav, g_wind_loop_wav_size,
+                 &wind_wav, &wind_wav_len, &ws);
+        load_sfx("ocean_loop.wav", g_ocean_loop_wav, g_ocean_loop_wav_size,
+                 &ocean_wav, &ocean_wav_len, &os);
+        load_sfx("harsh_wind.wav", g_harsh_wind_wav, g_harsh_wind_wav_size,
+                 &harsh_wav, &harsh_wav_len, &hs);
+#else
+        load_sfx("flap.wav", nullptr, 0, &flap_wav, &flap_wav_len, &fs);
+        load_sfx("launch_flap.wav", nullptr, 0, &launch_wav, &launch_wav_len, &ls);
+        load_sfx("wind_loop.wav", nullptr, 0, &wind_wav, &wind_wav_len, &ws);
+        load_sfx("ocean_loop.wav", nullptr, 0, &ocean_wav, &ocean_wav_len, &os);
+        load_sfx("harsh_wind.wav", nullptr, 0, &harsh_wav, &harsh_wav_len, &hs);
+#endif
+        // the panner needs S16 stereo; anything else just plays unpanned
+        if (flap_wav && fs.format == SDL_AUDIO_S16 && fs.channels == 2)
+            flap_pan_buf.resize(flap_wav_len / sizeof(Sint16));
+        if (flap_wav)
+            for (SDL_AudioStream*& s : flap_stream) {
+                s = SDL_CreateAudioStream(&fs, nullptr);
+                if (!s) continue;
+                SDL_SetAudioStreamGain(s, 0.30f);
+                SDL_BindAudioStream(audio_dev, s);
+            }
+        if (launch_wav) {
+            launch_stream = SDL_CreateAudioStream(&ls, nullptr);
+            if (launch_stream) {
+                SDL_SetAudioStreamGain(launch_stream, 0.8f);
+                SDL_BindAudioStream(audio_dev, launch_stream);
+            }
+        }
+        if (wind_wav) {
+            wind_stream = SDL_CreateAudioStream(&ws, nullptr);
+            if (wind_stream) {
+                SDL_SetAudioStreamGain(wind_stream, 0.0f);  // faded by altitude
+                SDL_BindAudioStream(audio_dev, wind_stream);
+            }
+        }
+        if (ocean_wav) {
+            ocean_stream = SDL_CreateAudioStream(&os, nullptr);
+            if (ocean_stream) {
+                SDL_SetAudioStreamGain(ocean_stream, 0.0f);
+                SDL_BindAudioStream(audio_dev, ocean_stream);
+            }
+        }
+        {
+            SDL_AudioSpec ts_{};
+#ifdef EMBED_LINK_GLB
+            unsigned char* const tw_mem[3] = {g_twirl1_wav, g_twirl2_wav,
+                                              g_twirl3_wav};
+            const unsigned long long tw_size[3] = {
+                g_twirl1_wav_size, g_twirl2_wav_size, g_twirl3_wav_size};
+#endif
+            for (int i = 0; i < 3; ++i) {
+                char nm[16];
+                SDL_snprintf(nm, sizeof(nm), "twirl%d.wav", i + 1);
+#ifdef EMBED_LINK_GLB
+                load_sfx(nm, tw_mem[i], tw_size[i], &twirl_wav[i],
+                         &twirl_wav_len[i], &ts_);
+#else
+                load_sfx(nm, nullptr, 0, &twirl_wav[i], &twirl_wav_len[i], &ts_);
+#endif
+                if (!twirl_wav[i]) continue;
+                twirl_stream[i] = SDL_CreateAudioStream(&ts_, nullptr);
+                if (twirl_stream[i]) {
+                    SDL_SetAudioStreamGain(twirl_stream[i], 0.7f);
+                    SDL_BindAudioStream(audio_dev, twirl_stream[i]);
+                }
+            }
+        }
+        if (harsh_wav) {
+            harsh_stream = SDL_CreateAudioStream(&hs, nullptr);
+            if (harsh_stream) {
+                SDL_SetAudioStreamGain(harsh_stream, 0.0f);
+                SDL_BindAudioStream(audio_dev, harsh_stream);
+            }
+        }
+        SDL_Log("ambient sfx: flap %s, launch %s, wind %s, ocean %s, harsh %s",
+                flap_wav ? "ok" : "MISSING", launch_wav ? "ok" : "MISSING",
+                wind_wav ? "ok" : "MISSING", ocean_wav ? "ok" : "MISSING",
+                harsh_wav ? "ok" : "MISSING");
+    }
+    auto play_flap = [&]() {
+        SDL_AudioStream* s = flap_stream[flap_next];
+        flap_next ^= 1;
+        if (!s || !flap_wav) return;
+        // distance attenuation: full volume in the saddle, fading to
+        // nothing when the bird is circling away across the map
+        const Vec3 eye = app.cam.eye();
+        const Vec3 d = app.bird_pos - eye;
+        const float dist = std::sqrt(dot(d, d));
+        float a = 1.0f - (dist - 10.0f) / 45.0f;
+        a = SDL_clamp(a, 0.0f, 1.0f);
+        if (a <= 0.01f) return;
+        SDL_SetAudioStreamGain(s, 0.55f * a * a);  // squared: falls off fast
+
+        // stereo placement: how far the bird sits to the camera's right,
+        // so turning the view swings the wingbeats across the speakers
+        float pan = 0.0f;
+        if (dist > 1e-3f && !flap_pan_buf.empty()) {
+            Vec3 fwd = app.cam.target - eye;
+            fwd.y = 0.0f;
+            fwd = normalize(fwd);
+            const Vec3 right{-fwd.z, 0.0f, fwd.x};
+            pan = SDL_clamp(dot(d, right) / dist, -1.0f, 1.0f);
+            // close up (riding) it should stay centred
+            pan *= SDL_clamp((dist - 3.0f) / 8.0f, 0.0f, 1.0f);
+        }
+        const float gl = std::sqrt(0.5f * (1.0f - pan));  // equal-power
+        const float gr = std::sqrt(0.5f * (1.0f + pan));
+        const Sint16* src = reinterpret_cast<const Sint16*>(flap_wav);
+        const size_t n = flap_pan_buf.size() / 2;
+        for (size_t i = 0; i < n; ++i) {
+            flap_pan_buf[i * 2 + 0] =
+                static_cast<Sint16>(src[i * 2 + 0] * gl * 1.414f);
+            flap_pan_buf[i * 2 + 1] =
+                static_cast<Sint16>(src[i * 2 + 1] * gr * 1.414f);
+        }
+        SDL_ClearAudioStream(s);
+        if (flap_pan_buf.empty())
+            SDL_PutAudioStreamData(s, flap_wav, static_cast<int>(flap_wav_len));
+        else
+            SDL_PutAudioStreamData(
+                s, flap_pan_buf.data(),
+                static_cast<int>(flap_pan_buf.size() * sizeof(Sint16)));
+    };
+    auto play_twirl_flap = [&](int i) {
+        if (i < 0 || i > 2 || !twirl_stream[i] || !twirl_wav[i]) return;
+        SDL_ClearAudioStream(twirl_stream[i]);
+        SDL_PutAudioStreamData(twirl_stream[i], twirl_wav[i],
+                               static_cast<int>(twirl_wav_len[i]));
+    };
+    auto play_launch_flap = [&]() {
+        if (!launch_stream || !launch_wav) return;
+        SDL_ClearAudioStream(launch_stream);
+        SDL_PutAudioStreamData(launch_stream, launch_wav,
+                               static_cast<int>(launch_wav_len));
+    };
+    float wind_gain = 0.0f;   // smoothed sky-wind level
+    float ocean_gain = 0.0f;  // the sea, by how close you are to it
+    float harsh_gain = 0.0f;  // the dive roar
+
     auto play_bird_call = [&]() {
-        if (!call_stream || !call_wav) return;
-        SDL_ClearAudioStream(call_stream);
-        SDL_PutAudioStreamData(call_stream, call_wav,
-                               static_cast<int>(call_wav_len));
+        int pick[kCalls], n = 0;
+        for (int i = 0; i < kCalls; ++i)
+            if (call_stream[i] && call_wav[i]) pick[n++] = i;
+        if (n == 0) return;
+        const int i = pick[std::rand() % n];
+        SDL_ClearAudioStream(call_stream[i]);
+        SDL_PutAudioStreamData(call_stream[i], call_wav[i],
+                               static_cast<int>(call_wav_len[i]));
     };
     // the cry lands a beat after the summon, not on top of it
     float call_delay = -1.0f;
@@ -2860,6 +3090,7 @@ int main(int argc, char** argv)
                         app.space_launch = false;
                         if (mag > 0.25f) {
                             // moving: take to the sky
+                            play_launch_flap();
                             set_clip("Launch");
                             app.bird_state = Bird::RideAir;
                         } else {
@@ -2928,6 +3159,8 @@ int main(int argc, char** argv)
                         app.twirl_go = false;
                         if (app.twirl_t < 0.0f && !app.dive_freeze) {
                             app.twirl_t = 0.0f;
+                            app.twirl_sfx = 0;
+                            play_twirl_flap(0);  // the roll's wing snap
                             // wake the parked rush slots. First 8: tight
                             // corkscrews spawning ahead and spiraling past
                             // the bird. Last 8: long, nearly straight
@@ -2971,6 +3204,16 @@ int main(int argc, char** argv)
                     }
                     if (app.twirl_t >= 0.0f) {
                         app.twirl_t += dtb;
+                        // a beat as the carve swings out, another as it
+                        // reverses to settle
+                        const float ts = app.twirl_t - (kTwirlDur - kSwayLead);
+                        if (app.twirl_sfx < 1 && ts >= 0.0f) {
+                            app.twirl_sfx = 1;
+                            play_twirl_flap(1);
+                        } else if (app.twirl_sfx < 2 && ts >= kSwayDur * 0.5f) {
+                            app.twirl_sfx = 2;
+                            play_twirl_flap(2);
+                        }
                         if (app.twirl_t >= kTwirlDur - kSwayLead + kSwayDur)
                             app.twirl_t = -1.0f;
                     }
@@ -3111,6 +3354,13 @@ int main(int argc, char** argv)
                                                               : w;
                     app.fly_w += (tgt - app.fly_w) * std::min(1.0f, 3.0f * dtb);
                     w = app.fly_w;
+                }
+                // one wingbeat sound per flap cycle, only while the wings
+                // are actually beating (w = 0 is full flap, 1 is the glide)
+                {
+                    const float ph = std::fmod(now, flap->duration);
+                    if (ph < app.flap_phase && w < 0.65f) play_flap();
+                    app.flap_phase = ph;
                 }
                 bw.sample(*flap, std::fmod(now, flap->duration), bw.scratch_a);
                 bw.sample(*soar, std::fmod(now, soar->duration), bw.scratch_b);
@@ -3860,6 +4110,69 @@ int main(int argc, char** argv)
             g_reverb.target.store(
                 (song_playing && song_timer >= -0.15f) ? 0.34f : 0.0f,
                 std::memory_order_relaxed);
+
+            // the wind of open sky: rides in while flying, louder with
+            // speed and altitude, and keeps the loop topped up
+            if (wind_stream && wind_wav) {
+                const bool aloft = app.riding &&
+                                   app.bird_state == App::Bird::RideAir;
+                float want = 0.0f;
+                if (aloft) {
+                    const float sp = SDL_clamp(
+                        (app.boost_speed - 6.0f) / 18.0f, 0.0f, 1.0f);
+                    const float alt =
+                        SDL_clamp(app.bird_pos.y / 12.0f, 0.0f, 1.0f);
+                    want = 0.10f + 0.24f * sp + 0.08f * alt;
+                }
+                wind_gain += (want - wind_gain) *
+                             std::min(1.0f, 1.6f * static_cast<float>(frame_dt));
+                SDL_SetAudioStreamGain(wind_stream, wind_gain);
+                if (wind_gain > 0.01f &&
+                    SDL_GetAudioStreamAvailable(wind_stream) <
+                        static_cast<int>(wind_wav_len) / 2)
+                    SDL_PutAudioStreamData(wind_stream, wind_wav,
+                                           static_cast<int>(wind_wav_len));
+            }
+
+            // the sea: always audible, loudest down at the surface and
+            // out past the island's edge
+            if (ocean_stream && ocean_wav) {
+                const Vec3 ear = app.riding ? app.bird_pos : app.player.pos;
+                const float height =
+                    SDL_clamp((ear.y + 3.0f) / 26.0f, 0.0f, 1.0f);
+                const float edge = SDL_clamp(
+                    (SDL_max(std::fabs(ear.x), std::fabs(ear.z)) - 10.0f) /
+                        40.0f,
+                    0.0f, 1.0f);
+                const float want =
+                    (0.16f + 0.30f * edge) * (1.0f - 0.75f * height);
+                ocean_gain += (want - ocean_gain) *
+                              std::min(1.0f, 1.2f * static_cast<float>(frame_dt));
+                SDL_SetAudioStreamGain(ocean_stream, ocean_gain);
+                if (SDL_GetAudioStreamAvailable(ocean_stream) <
+                    static_cast<int>(ocean_wav_len) / 2)
+                    SDL_PutAudioStreamData(ocean_stream, ocean_wav,
+                                           static_cast<int>(ocean_wav_len));
+            }
+
+            // the harsh roar layered over the sky wind: only under thrust
+            // or a twirl, scaled by how much momentum you're carrying
+            if (harsh_stream && harsh_wav) {
+                float want = 0.0f;
+                if (app.riding && app.bird_state == App::Bird::RideAir &&
+                    (app.stooping || app.twirl_t >= 0.0f))
+                    want = 0.25f + 0.55f * SDL_clamp(
+                                              (app.boost_speed - 9.0f) / 15.0f,
+                                              0.0f, 1.0f);
+                harsh_gain += (want - harsh_gain) *
+                              std::min(1.0f, 2.5f * static_cast<float>(frame_dt));
+                SDL_SetAudioStreamGain(harsh_stream, harsh_gain);
+                if (harsh_gain > 0.01f &&
+                    SDL_GetAudioStreamAvailable(harsh_stream) <
+                        static_cast<int>(harsh_wav_len) / 2)
+                    SDL_PutAudioStreamData(harsh_stream, harsh_wav,
+                                           static_cast<int>(harsh_wav_len));
+            }
 
             if (call_delay >= 0.0f) {
                 call_delay -= static_cast<float>(frame_dt);

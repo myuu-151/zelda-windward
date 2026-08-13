@@ -2126,7 +2126,9 @@ int main(int argc, char** argv)
         float a = 1.0f - (dist - 10.0f) / 45.0f;
         a = SDL_clamp(a, 0.0f, 1.0f);
         if (a <= 0.01f) return;
-        SDL_SetAudioStreamGain(s, 0.55f * a * a);  // squared: falls off fast
+        // 0.78 not 0.55: the panner's equal-power gains sit at 0.707 in
+        // the centre, so this restores the level it used to have
+        SDL_SetAudioStreamGain(s, 0.78f * a * a);  // squared: falls off fast
 
         // stereo placement: how far the bird sits to the camera's right,
         // so turning the view swings the wingbeats across the speakers
@@ -2140,15 +2142,20 @@ int main(int argc, char** argv)
             // close up (riding) it should stay centred
             pan *= SDL_clamp((dist - 3.0f) / 8.0f, 0.0f, 1.0f);
         }
-        const float gl = std::sqrt(0.5f * (1.0f - pan));  // equal-power
+        // equal-power, peaking at 1.0 on a hard pan -- scaling these up to
+        // keep the centre at unity would push loud samples past int16 and
+        // clip, which is audible as distortion. The stream gain below
+        // makes up the 3dB centre dip instead.
+        const float gl = std::sqrt(0.5f * (1.0f - pan));
         const float gr = std::sqrt(0.5f * (1.0f + pan));
         const Sint16* src = reinterpret_cast<const Sint16*>(flap_wav);
         const size_t n = flap_pan_buf.size() / 2;
+        auto clip = [](float v) {
+            return static_cast<Sint16>(SDL_clamp(v, -32768.0f, 32767.0f));
+        };
         for (size_t i = 0; i < n; ++i) {
-            flap_pan_buf[i * 2 + 0] =
-                static_cast<Sint16>(src[i * 2 + 0] * gl * 1.414f);
-            flap_pan_buf[i * 2 + 1] =
-                static_cast<Sint16>(src[i * 2 + 1] * gr * 1.414f);
+            flap_pan_buf[i * 2 + 0] = clip(src[i * 2 + 0] * gl);
+            flap_pan_buf[i * 2 + 1] = clip(src[i * 2 + 1] * gr);
         }
         SDL_ClearAudioStream(s);
         if (flap_pan_buf.empty())

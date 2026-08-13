@@ -1,6 +1,6 @@
 # Zelda Windward
 
-A Zelda fan game about flying. C++20, SDL3, raw OpenGL 3.3, no engine.
+A Wind Waker–style Zelda fan game. C++20, SDL3, raw OpenGL 3.3, no engine.
 
 ![Link riding the loftwing over the Wind Waker sea](flight.png)
 

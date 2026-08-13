@@ -1768,10 +1768,9 @@ int main(int argc, char** argv)
     // 120bpm, quarter 0.5s. Flowing rather than stately: no long holds, and
     // eighth-note pairs on the turns give it lift instead of a plod. Four
     // bars of 4/4, resolving on the held C.
-    // Plays through to the D, hangs there, then takes it from the top; the
-    // second time round the D resolves onto the C and it's done.
-    const SongNote kSongOfSkiesFull[31] = {
-        // -- first pass, ending on the D -----------------------------------
+    // The single-pass version: one time through, and the D resolves
+    // straight onto the held C -- 16 notes, done.
+    const SongNote kSongOfSkiesFull[16] = {
         { 0.00f, 0, 1.0f},   //  1  C   quarter
         { 0.50f, 4, 0.9f},   //  2  G   quarter
         { 1.00f, 7, 1.0f},   //  3  C'  quarter
@@ -1786,24 +1785,8 @@ int main(int argc, char** argv)
         { 5.00f, 5, 0.9f},   // 12  A   eighth
         { 5.25f, 4, 0.9f},   // 13  G   eighth
         { 5.50f, 2, 0.9f},   // 14  E   quarter
-        { 6.00f, 1, 0.9f},   // 15  D   half     -- hangs, then back to the top
-        // -- second pass ---------------------------------------------------
-        { 7.00f, 0, 1.0f},   //  1  C   quarter
-        { 7.50f, 4, 0.9f},   //  2  G   quarter
-        { 8.00f, 7, 1.0f},   //  3  C'  quarter
-        { 8.50f, 5, 0.9f},   //  4  A   eighth
-        { 8.75f, 4, 0.9f},   //  5  G   eighth
-        { 9.00f, 2, 0.9f},   //  6  E   quarter
-        { 9.50f, 4, 1.0f},   //  7  G   half     -- breath
-        {10.50f, 2, 0.9f},   //  8  E   eighth
-        {10.75f, 4, 0.9f},   //  9  G   eighth
-        {11.00f, 7, 1.0f},   // 10  C'  quarter
-        {11.50f, 6, 1.0f},   // 11  B   quarter
-        {12.00f, 5, 0.9f},   // 12  A   eighth
-        {12.25f, 4, 0.9f},   // 13  G   eighth
-        {12.50f, 2, 0.9f},   // 14  E   quarter
-        {13.00f, 1, 0.9f},   // 15  D   quarter  -- this time it resolves
-        {13.50f, 0, 1.0f},   // 16  C   held     -- home
+        { 6.00f, 1, 0.9f},   // 15  D   quarter  -- resolves
+        { 6.50f, 0, 1.0f},   // 16  C   held     -- home
     };
 
     struct Song {

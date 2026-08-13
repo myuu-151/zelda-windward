@@ -14,7 +14,6 @@ cmake --build build --config Debug
 
 ## Assets
 
-The Link and loftwing models are © Nintendo, included only as part of
-this non-commercial fan work — don't redistribute them. The water shader
-derives from [NekotoArts' CC0 work](https://www.shadertoy.com/view/3tKBDz).
+Includes copyrighted assets. The water shader derives from
+[NekotoArts' CC0 work](https://www.shadertoy.com/view/3tKBDz).
 Not affiliated with or endorsed by Nintendo.

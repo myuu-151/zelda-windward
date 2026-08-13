@@ -1,8 +1,6 @@
 # Zelda Windward
 
-A Zelda fan game about flying. Toon Link, a rideable loftwing, a
-procedural sky and a Wind Waker sea — C++20, SDL3, raw OpenGL 3.3, no
-engine.
+A Zelda fan game about flying. C++20, SDL3, raw OpenGL 3.3, no engine.
 
 ![Link riding the loftwing over the Wind Waker sea](flight.png)
 
@@ -13,12 +11,6 @@ cmake -S . -B build          # first run downloads SDL 3.4.14
 cmake --build build --config Debug
 .\build\Debug\zelda.exe
 ```
-
-## Play
-
-Play the Song of Skies on the flute (`I`, notes `1`–`8`) and the bird
-comes down. Vault on, launch with space. WASD steers, SHIFT boosts
-(+S stoops, +W climbs), SPACE mid-flight twirls.
 
 ## Assets
 

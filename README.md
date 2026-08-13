@@ -3,7 +3,7 @@
 A small Zelda fan game: toon Link, a rideable loftwing, a procedural sky
 and a Wind Waker sea — SDL3 + OpenGL 3.3 core, C++20, no engine.
 
-![Link on the test plane, Wind Waker sea behind](screenshot.png)
+![Link riding the loftwing over the Wind Waker sea](flight.png)
 
 ## What's in it
 

@@ -20,6 +20,18 @@
 #include "model.h"
 #include "player.h"
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244 4245 4456 4457 4701 4702)
+#endif
+#define STBTT_STATIC
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+#include "stb_image.h"  // implementation lives in model.cpp
+
 namespace {
 
 constexpr int kWindowWidth = 1280;
@@ -64,6 +76,12 @@ extern unsigned char g_panflute_wav[];
 extern unsigned long long g_panflute_wav_size;
 extern unsigned char g_chime_wav[];
 extern unsigned long long g_chime_wav_size;
+extern unsigned char g_bird_call_wav[];
+extern unsigned long long g_bird_call_wav_size;
+extern unsigned char g_hud_font[];
+extern unsigned long long g_hud_font_size;
+extern unsigned char g_sheet_frame_png[];
+extern unsigned long long g_sheet_frame_png_size;
 }
 #endif
 
@@ -349,6 +367,16 @@ uniform sampler2D uTex;
 uniform vec4 uColor;
 out vec4 fragColor;
 void main() { fragColor = vec4(uColor.rgb, uColor.a * texture(uTex, vUV).a); }
+)GLSL";
+
+// full-color image quad (the sheet frame): texture RGB, tinted/faded
+const char* kHudImgFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() { fragColor = texture(uTex, vUV) * uColor; }
 )GLSL";
 
 // 5x7 glyphs, one byte per column, bit 0 = top row. Only the characters the
@@ -1611,6 +1639,202 @@ int main(int argc, char** argv)
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void*>(8));
     glBindVertexArray(0);
 
+    // --- HUD font: prompts and song titles render with a real typeface
+    // (assets/hud_font.ttf) baked once into an alpha atlas; if it's missing
+    // the old 5x7 pixel glyphs still work ---
+    GLuint font_tex = 0;
+    stbtt_bakedchar font_cd[96]{};
+    float font_ascent = 0.0f;             // pixels, at the baked size
+    constexpr float kFontBakePx = 48.0f;
+    constexpr int kFontAtlas = 512;
+    {
+        std::vector<unsigned char> ttf;
+#ifdef EMBED_LINK_GLB
+        ttf.assign(g_hud_font, g_hud_font + g_hud_font_size);
+#else
+        const std::string fpath =
+            std::string(SDL_GetBasePath()) + "..\\..\\assets\\hud_font.ttf";
+        for (const char* p : {fpath.c_str(), "assets/hud_font.ttf"}) {
+            if (FILE* f = std::fopen(p, "rb")) {
+                std::fseek(f, 0, SEEK_END);
+                ttf.resize(static_cast<size_t>(std::ftell(f)));
+                std::fseek(f, 0, SEEK_SET);
+                if (std::fread(ttf.data(), 1, ttf.size(), f) != ttf.size())
+                    ttf.clear();
+                std::fclose(f);
+                if (!ttf.empty()) break;
+            }
+        }
+#endif
+        if (!ttf.empty()) {
+            std::vector<unsigned char> alpha(
+                static_cast<size_t>(kFontAtlas) * kFontAtlas);
+            if (stbtt_BakeFontBitmap(ttf.data(), 0, kFontBakePx, alpha.data(),
+                                     kFontAtlas, kFontAtlas, 32, 96,
+                                     font_cd) != 0) {
+                stbtt_fontinfo fi;
+                if (stbtt_InitFont(&fi, ttf.data(), 0)) {
+                    int asc = 0, desc = 0, gap = 0;
+                    stbtt_GetFontVMetrics(&fi, &asc, &desc, &gap);
+                    font_ascent =
+                        asc * stbtt_ScaleForPixelHeight(&fi, kFontBakePx);
+                }
+                std::vector<unsigned char> rgba(alpha.size() * 4);
+                for (size_t i = 0; i < alpha.size(); ++i) {
+                    rgba[i * 4 + 0] = 255;
+                    rgba[i * 4 + 1] = 255;
+                    rgba[i * 4 + 2] = 255;
+                    rgba[i * 4 + 3] = alpha[i];
+                }
+                glGenTextures(1, &font_tex);
+                glBindTexture(GL_TEXTURE_2D, font_tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kFontAtlas, kFontAtlas,
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+        }
+        SDL_Log("hud font: %s", font_tex ? "baked" : "missing -- pixel fallback");
+    }
+    // append a string's textured quads (x,y,u,v) to `out`; y = top of the
+    // line, h = pixel height; returns the end pen x
+    auto font_quads = [&](std::vector<float>& out, const char* s, float x,
+                          float y, float h) {
+        const float sc = h / kFontBakePx;
+        float penx = 0.0f, peny = 0.0f;
+        for (const char* p = s; *p; ++p) {
+            const int ch = static_cast<unsigned char>(*p);
+            if (ch < 32 || ch >= 128) continue;
+            stbtt_aligned_quad q;
+            stbtt_GetBakedQuad(font_cd, kFontAtlas, kFontAtlas, ch - 32,
+                               &penx, &peny, &q, 1);
+            const float bx = x, by = y + font_ascent * sc;
+            const float x0 = bx + q.x0 * sc, y0 = by + q.y0 * sc;
+            const float x1 = bx + q.x1 * sc, y1 = by + q.y1 * sc;
+            out.insert(out.end(),
+                       {x0, y0, q.s0, q.t0, x1, y0, q.s1, q.t0,
+                        x0, y1, q.s0, q.t1, x1, y0, q.s1, q.t0,
+                        x1, y1, q.s1, q.t1, x0, y1, q.s0, q.t1});
+        }
+        return x + penx * sc;
+    };
+    auto font_width = [&](const char* s, float h) {
+        const float sc = h / kFontBakePx;
+        float w = 0.0f;
+        for (const char* p = s; *p; ++p) {
+            const int ch = static_cast<unsigned char>(*p);
+            if (ch >= 32 && ch < 128) w += font_cd[ch - 32].xadvance;
+        }
+        return w * sc;
+    };
+    // draw a batch of font quads through the clef pipeline (blend must be on)
+    auto draw_font_verts = [&](const std::vector<float>& v, const float* col) {
+        if (v.empty() || !font_tex) return;
+        glUseProgram(clef_prog);
+        const float screen[3] = {1280.0f, 720.0f, 0.0f};
+        glUniform3fv(ct_screen, 1, screen);
+        glUniform4fv(ct_color, 1, col);
+        glUniform1i(ct_tex, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, font_tex);
+        glBindVertexArray(clef_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, clef_vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(v.size() * sizeof(float)),
+                     v.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(v.size() / 4));
+        glBindVertexArray(0);
+    };
+
+    // --- the song-sheet frame: transparent-center gold scrollwork drawn
+    // over the panel edges. Drawn as a vertical 3-slice so the wave rows
+    // keep their shape and only the plain rails stretch when the panel
+    // grows for the song title ---
+    const GLuint frame_prog = link_program(kHudTexVS, kHudImgFS);
+    const GLint fr_screen = glGetUniformLocation(frame_prog, "uScreen");
+    const GLint fr_color = glGetUniformLocation(frame_prog, "uColor");
+    const GLint fr_tex = glGetUniformLocation(frame_prog, "uTex");
+    GLuint frame_tex = 0;
+    {
+        int fw = 0, fh = 0, comp = 0;
+        stbi_uc* pix = nullptr;
+#ifdef EMBED_LINK_GLB
+        pix = stbi_load_from_memory(
+            g_sheet_frame_png, static_cast<int>(g_sheet_frame_png_size), &fw,
+            &fh, &comp, 4);
+#else
+        const std::string ipath = std::string(SDL_GetBasePath()) +
+                                  "..\\..\\assets\\sheet_frame.png";
+        pix = stbi_load(ipath.c_str(), &fw, &fh, &comp, 4);
+        if (!pix)
+            pix = stbi_load("assets/sheet_frame.png", &fw, &fh, &comp, 4);
+#endif
+        if (pix) {
+            glGenTextures(1, &frame_tex);
+            glBindTexture(GL_TEXTURE_2D, frame_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, pix);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            stbi_image_free(pix);
+        }
+        SDL_Log("sheet frame: %s", frame_tex ? "loaded" : "missing");
+    }
+    auto draw_sheet_frame = [&](float x, float y, float w, float h,
+                                float fade) {
+        if (!frame_tex) return;
+        // the art was painted on the exported reference canvas (1980x558 =
+        // 660x186 game px at 3x, with the 600x126 panel inset 30px on every
+        // side), so it maps on by pure arithmetic -- no fitting constants.
+        // Two native-ratio halves: the top anchored to the panel's top, the
+        // bottom to its bottom. At the base panel size they meet exactly;
+        // when the panel grows for the title a thin stretched rail sliver
+        // bridges the gap.
+        constexpr float kPanelW = 600.0f, kInset = 30.0f;
+        constexpr float kArtW = 660.0f, kArtH = 186.0f;
+        const float s = w / kPanelW;            // screen px per game px
+        const float W = kArtW * s, H = kArtH * s;
+        const float half = H * 0.5f;
+        const float xl = x - kInset * s;
+        const float top_y = y - kInset * s;
+        const float bot_y = (y + h + kInset * s) - half;
+        auto quad = [&](std::vector<float>& out, float qy, float qh, float tv0,
+                        float tv1) {
+            out.insert(out.end(),
+                       {xl, qy, 0, tv0, xl + W, qy, 1, tv0, xl, qy + qh, 0,
+                        tv1, xl + W, qy, 1, tv0, xl + W, qy + qh, 1, tv1, xl,
+                        qy + qh, 0, tv1});
+        };
+        static std::vector<float> fv;
+        fv.clear();
+        quad(fv, top_y, half, 0.0f, 0.5f);
+        const float gap = bot_y - (top_y + half);
+        if (gap > 0.0f)
+            quad(fv, top_y + half - 0.5f, gap + 1.0f, 0.48f, 0.52f);
+        quad(fv, bot_y, half, 0.5f, 1.0f);
+        glUseProgram(frame_prog);
+        const float screen[3] = {1280.0f, 720.0f, 0.0f};
+        glUniform3fv(fr_screen, 1, screen);
+        const float col[4] = {1.0f, 1.0f, 1.0f, fade};
+        glUniform4fv(fr_color, 1, col);
+        glUniform1i(fr_tex, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, frame_tex);
+        glBindVertexArray(clef_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, clef_vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(fv.size() * sizeof(float)),
+                     fv.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(fv.size() / 4));
+        glBindVertexArray(0);
+    };
+
     // --- flute audio: one middle-C sample, pitched per semitone ---
     // a small pool of streams so overlapping notes ring together
     constexpr int kVoices = 6;
@@ -1694,6 +1918,44 @@ int main(int argc, char** argv)
         SDL_PutAudioStreamData(chime_stream, chime_wav,
                                static_cast<int>(chime_wav_len));
     };
+
+    // the loftwing's cry, answering the Song of Skies
+    SDL_AudioStream* call_stream = nullptr;
+    Uint8* call_wav = nullptr;
+    Uint32 call_wav_len = 0;
+    if (audio_dev) {
+        SDL_AudioSpec bs{};
+#ifdef EMBED_LINK_GLB
+        SDL_LoadWAV_IO(
+            SDL_IOFromConstMem(g_bird_call_wav,
+                               static_cast<size_t>(g_bird_call_wav_size)),
+            true, &bs, &call_wav, &call_wav_len);
+#else
+        std::string bpath = std::string(SDL_GetBasePath()) +
+                            "..\\..\\assets\\bird_call.wav";
+        if (!SDL_LoadWAV(bpath.c_str(), &bs, &call_wav, &call_wav_len))
+            SDL_LoadWAV("assets/bird_call.wav", &bs, &call_wav, &call_wav_len);
+#endif
+        if (call_wav) {
+            call_stream = SDL_CreateAudioStream(&bs, nullptr);
+            if (call_stream) {
+                SDL_SetAudioStreamGain(call_stream, 0.85f);
+                SDL_BindAudioStream(audio_dev, call_stream);
+            }
+            SDL_Log("bird call: %u bytes, %d ch @ %d Hz", call_wav_len,
+                    bs.channels, bs.freq);
+        } else {
+            SDL_Log("could not load assets/bird_call.wav: %s", SDL_GetError());
+        }
+    }
+    auto play_bird_call = [&]() {
+        if (!call_stream || !call_wav) return;
+        SDL_ClearAudioStream(call_stream);
+        SDL_PutAudioStreamData(call_stream, call_wav,
+                               static_cast<int>(call_wav_len));
+    };
+    // the cry lands a beat after the summon, not on top of it
+    float call_delay = -1.0f;
     // semitones above middle C for keys 1..8 (C D E F G A B C')
     const int kScale[8] = {0, 2, 4, 5, 7, 9, 11, 12};
     // a pan flute plays one note at a time: starting a note releases whatever
@@ -2388,6 +2650,7 @@ int main(int argc, char** argv)
                                6.5f);
                     if (app.bird_summon) {
                         app.bird_summon = false;
+                        call_delay = 1.2f;  // it answers the song, a beat later
                         set_clip("Flap");
                         app.bird_state = Bird::Arrive;
                     }
@@ -2426,6 +2689,7 @@ int main(int argc, char** argv)
                     app.bird_roll += (0.0f - app.bird_roll) * std::min(1.0f, 6.0f * dtb);
                     if (app.bird_summon) {
                         app.bird_summon = false;
+                        call_delay = 1.2f;  // it answers the song, a beat later
                         app.bird_housed = false;  // wings reappear as they open
                         set_clip("Unfold");
                         app.bird_state = Bird::Leave;
@@ -3597,6 +3861,12 @@ int main(int argc, char** argv)
                 (song_playing && song_timer >= -0.15f) ? 0.34f : 0.0f,
                 std::memory_order_relaxed);
 
+            if (call_delay >= 0.0f) {
+                call_delay -= static_cast<float>(frame_dt);
+                if (call_delay < 0.0f)
+                    play_bird_call();
+            }
+
             if (song_playing && song_active) {
                 const size_t len = song_active->full_len;
                 song_timer += static_cast<float>(frame_dt);
@@ -3680,8 +3950,18 @@ int main(int argc, char** argv)
                     tri(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x0 - nx, y0 - ny, c);
                     tri(x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
                 };
+                // text goes through the baked typeface when it loaded (the
+                // quads batch here, drawn after the flat hud verts so they
+                // sit on top); the 5x7 pixel glyphs remain the fallback
+                static std::vector<float> font_batch;
+                font_batch.clear();
                 auto glyph = [&](char ch, float x, float y, float px,
                                  const float* c) {
+                    if (font_tex) {
+                        const char s[2] = {ch, '\0'};
+                        font_quads(font_batch, s, x, y - 2.0f, 10.0f * px);
+                        return;
+                    }
                     if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
                     for (const Glyph& g : kFont) {
                         if (g.c != ch) continue;
@@ -3694,13 +3974,17 @@ int main(int argc, char** argv)
                 };
                 auto text = [&](const char* s, float x, float y, float px,
                                 const float* c) {
+                    if (font_tex)
+                        return font_quads(font_batch, s, x, y - 2.0f,
+                                          10.0f * px);
                     for (const char* p = s; *p; ++p) {
                         glyph(*p, x, y, px, c);
                         x += 6 * px;
                     }
                     return x;
                 };
-                auto text_w = [](const char* s, float px) {
+                auto text_w = [&](const char* s, float px) {
+                    if (font_tex) return font_width(s, 10.0f * px);
                     return static_cast<float>(std::strlen(s)) * 6.0f * px;
                 };
 
@@ -3727,6 +4011,9 @@ int main(int argc, char** argv)
                 const bool has_msg = hud_message[0] != '\0';
                 const float PH = has_msg ? 156.0f : 126.0f;
                 const float PX = 340.0f, PY = 690.0f - PH, PW = 600.0f;
+                // NOT just a border: round_rect fills, so the gold layer is
+                // the warm underlay the dark fill blends over -- skipping it
+                // shifts the whole sheet's color
                 round_rect(PX - 2, PY - 2, PW + 4, PH + 4, 16, edge_c);
                 round_rect(PX, PY, PW, PH, 15, panel_c);
 
@@ -3779,6 +4066,14 @@ int main(int argc, char** argv)
                              static_cast<GLsizei>(hud_verts.size() / 6));
                 glBindVertexArray(0);
 
+                // the typeface text, on top of the panel
+                const float font_col[4] = {0.96f, 0.96f, 0.94f, F};
+                draw_font_verts(font_batch, font_col);
+
+                // the scrollwork frame, mapped at its native aspect around
+                // the panel (it was drawn around this exact layout)
+                draw_sheet_frame(PX, PY, PW, PH, F);
+
                 // the real clef glyph, as a tinted alpha quad
                 {
                     const float ch = 7.4f * SGAP;
@@ -3825,25 +4120,35 @@ int main(int argc, char** argv)
                 vtx(x, y, c); vtx(x + w, y, c); vtx(x, y + h, c);
                 vtx(x + w, y, c); vtx(x + w, y + h, c); vtx(x, y + h, c);
             };
-            const char* msg = "PRESS SPACE TO MOUNT";
+            const char* msg = "Press SPACE to mount";
             const float px = 2.0f;
-            const float tw = static_cast<float>(std::strlen(msg)) * 6.0f * px;
+            const float tw =
+                font_tex ? font_width(msg, 10.0f * px)
+                         : static_cast<float>(std::strlen(msg)) * 6.0f * px;
             const float bx = (VW - (tw + 36.0f)) * 0.5f, by = VH - 96.0f;
             const float panel_c[4] = {0.05f, 0.04f, 0.06f, 0.82f};
             const float white[4] = {0.96f, 0.96f, 0.94f, 1.0f};
             rect(bx, by, tw + 36.0f, 34.0f, panel_c);
+            static std::vector<float> prompt_batch;
+            prompt_batch.clear();
             float x = bx + 18.0f;
-            for (const char* p = msg; *p; ++p) {
-                for (const Glyph& g : kFont) {
-                    if (g.c != *p) continue;
-                    for (int cx = 0; cx < 5; ++cx)
-                        for (int ry = 0; ry < 7; ++ry)
-                            if (g.col[cx] & (1 << ry))
-                                rect(x + cx * px, by + 10.0f + ry * px, px, px,
-                                     white);
-                    break;
+            if (font_tex) {
+                font_quads(prompt_batch, msg, x, by + 6.0f, 10.0f * px);
+            } else {
+                for (const char* p = msg; *p; ++p) {
+                    char ch = *p;
+                    if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
+                    for (const Glyph& g : kFont) {
+                        if (g.c != ch) continue;
+                        for (int cx = 0; cx < 5; ++cx)
+                            for (int ry = 0; ry < 7; ++ry)
+                                if (g.col[cx] & (1 << ry))
+                                    rect(x + cx * px, by + 10.0f + ry * px, px,
+                                         px, white);
+                        break;
+                    }
+                    x += 6.0f * px;
                 }
-                x += 6.0f * px;
             }
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
@@ -3858,6 +4163,7 @@ int main(int argc, char** argv)
                          pverts.data(), GL_STREAM_DRAW);
             glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pverts.size() / 6));
             glBindVertexArray(0);
+            draw_font_verts(prompt_batch, white);
             glDisable(GL_BLEND);
             glEnable(GL_DEPTH_TEST);
         }

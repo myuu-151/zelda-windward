@@ -38,7 +38,10 @@ foreach(pair
         "link.glb|link_glb"
         "loftwing.glb|loftwing_glb"
         "panflute_c.wav|panflute_wav"
-        "song_success.wav|chime_wav")
+        "song_success.wav|chime_wav"
+        "bird_call.wav|bird_call_wav"
+        "hud_font.ttf|hud_font"
+        "sheet_frame.png|sheet_frame_png")
     string(REPLACE "|" ";" pair "${pair}")
     list(GET pair 0 asset)
     list(GET pair 1 sym)

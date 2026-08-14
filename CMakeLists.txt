@@ -55,7 +55,20 @@ foreach(pair
         "sheet_frame.png|sheet_frame_png"
         "island.glb|island_glb"
         "island_height.bin|island_height_bin"
-        "props.glb|props_glb")
+        "props.glb|props_glb"
+        "footstep1.wav|footstep1_wav"
+        "footstep2.wav|footstep2_wav"
+        "footstep3.wav|footstep3_wav"
+        "footstep4.wav|footstep4_wav"
+        "footstep5.wav|footstep5_wav"
+        "footstep6.wav|footstep6_wav"
+        "footstep7.wav|footstep7_wav"
+        "footstep8.wav|footstep8_wav"
+        "footstep9.wav|footstep9_wav"
+        "footstep10.wav|footstep10_wav"
+        "footstep11.wav|footstep11_wav"
+        "footstep12.wav|footstep12_wav"
+        "footstep13.wav|footstep13_wav")
     string(REPLACE "|" ";" pair "${pair}")
     list(GET pair 0 asset)
     list(GET pair 1 sym)

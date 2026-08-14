@@ -115,8 +115,36 @@ extern unsigned char g_island_height_bin[];
 extern unsigned long long g_island_height_bin_size;
 extern unsigned char g_props_glb[];
 extern unsigned long long g_props_glb_size;
+extern unsigned char g_footstep1_wav[];
+extern unsigned long long g_footstep1_wav_size;
+extern unsigned char g_footstep2_wav[];
+extern unsigned long long g_footstep2_wav_size;
+extern unsigned char g_footstep3_wav[];
+extern unsigned long long g_footstep3_wav_size;
+extern unsigned char g_footstep4_wav[];
+extern unsigned long long g_footstep4_wav_size;
+extern unsigned char g_footstep5_wav[];
+extern unsigned long long g_footstep5_wav_size;
+extern unsigned char g_footstep6_wav[];
+extern unsigned long long g_footstep6_wav_size;
+extern unsigned char g_footstep7_wav[];
+extern unsigned long long g_footstep7_wav_size;
+extern unsigned char g_footstep8_wav[];
+extern unsigned long long g_footstep8_wav_size;
+extern unsigned char g_footstep9_wav[];
+extern unsigned long long g_footstep9_wav_size;
+extern unsigned char g_footstep10_wav[];
+extern unsigned long long g_footstep10_wav_size;
+extern unsigned char g_footstep11_wav[];
+extern unsigned long long g_footstep11_wav_size;
+extern unsigned char g_footstep12_wav[];
+extern unsigned long long g_footstep12_wav_size;
+extern unsigned char g_footstep13_wav[];
+extern unsigned long long g_footstep13_wav_size;
 }
 #endif
+
+constexpr int kFootstepCount = 13;
 
 // --- island heightfield -----------------------------------------------------
 // Baked in Blender coords (x east, y north, z up) by the export script; the
@@ -2608,6 +2636,14 @@ int main(int argc, char** argv)
     SDL_AudioStream* twirl_stream[3] = {};
     Uint8* twirl_wav[3] = {};
     Uint32 twirl_wav_len[3] = {};
+    // grass footsteps: the source clip split into its individual steps,
+    // played in their original order, looping; two streams so they overlap
+    SDL_AudioStream* foot_stream[2] = {};
+    Uint8* foot_wav[kFootstepCount] = {};
+    Uint32 foot_wav_len[kFootstepCount] = {};
+    int foot_next = 0;
+    int foot_cycle = 0;
+    float foot_prev_phase = 0.0f;
     if (audio_dev) {
         auto load_sfx = [&](const char* file, unsigned char* mem,
                             unsigned long long mem_size, Uint8** out,
@@ -2638,13 +2674,46 @@ int main(int argc, char** argv)
                  &ocean_wav, &ocean_wav_len, &os);
         load_sfx("harsh_wind.wav", g_harsh_wind_wav, g_harsh_wind_wav_size,
                  &harsh_wav, &harsh_wav_len, &hs);
+        SDL_AudioSpec foots{};
+        {
+            unsigned char* const fmem[kFootstepCount] = {
+                g_footstep1_wav, g_footstep2_wav, g_footstep3_wav,
+                g_footstep4_wav, g_footstep5_wav, g_footstep6_wav,
+                g_footstep7_wav, g_footstep8_wav, g_footstep9_wav,
+                g_footstep10_wav, g_footstep11_wav, g_footstep12_wav,
+                g_footstep13_wav};
+            const unsigned long long fsize[kFootstepCount] = {
+                g_footstep1_wav_size, g_footstep2_wav_size,
+                g_footstep3_wav_size, g_footstep4_wav_size,
+                g_footstep5_wav_size, g_footstep6_wav_size,
+                g_footstep7_wav_size, g_footstep8_wav_size,
+                g_footstep9_wav_size, g_footstep10_wav_size,
+                g_footstep11_wav_size, g_footstep12_wav_size,
+                g_footstep13_wav_size};
+            for (int i = 0; i < kFootstepCount; ++i)
+                load_sfx("", fmem[i], fsize[i], &foot_wav[i],
+                         &foot_wav_len[i], &foots);
+        }
 #else
         load_sfx("flap.wav", nullptr, 0, &flap_wav, &flap_wav_len, &fs);
         load_sfx("launch_flap.wav", nullptr, 0, &launch_wav, &launch_wav_len, &ls);
         load_sfx("wind_loop.wav", nullptr, 0, &wind_wav, &wind_wav_len, &ws);
         load_sfx("ocean_loop.wav", nullptr, 0, &ocean_wav, &ocean_wav_len, &os);
         load_sfx("harsh_wind.wav", nullptr, 0, &harsh_wav, &harsh_wav_len, &hs);
+        SDL_AudioSpec foots{};
+        for (int i = 0; i < kFootstepCount; ++i) {
+            char nm[24];
+            SDL_snprintf(nm, sizeof(nm), "footstep%d.wav", i + 1);
+            load_sfx(nm, nullptr, 0, &foot_wav[i], &foot_wav_len[i], &foots);
+        }
 #endif
+        if (foot_wav[0])
+            for (SDL_AudioStream*& s : foot_stream) {
+                s = SDL_CreateAudioStream(&foots, nullptr);
+                if (!s) continue;
+                SDL_SetAudioStreamGain(s, 0.55f);
+                SDL_BindAudioStream(audio_dev, s);
+            }
         // the panner needs S16 stereo; anything else just plays unpanned
         if (flap_wav && fs.format == SDL_AUDIO_S16 && fs.channels == 2)
             flap_pan_buf.resize(flap_wav_len / sizeof(Sint16));
@@ -2775,6 +2844,20 @@ int main(int argc, char** argv)
         SDL_ClearAudioStream(launch_stream);
         SDL_PutAudioStreamData(launch_stream, launch_wav,
                                static_cast<int>(launch_wav_len));
+    };
+    auto play_footstep = [&]() {
+        SDL_AudioStream* s = foot_stream[foot_next];
+        foot_next ^= 1;
+        if (!s) return;
+        // random step each time, never the same one twice in a row
+        int pick = std::rand() % (kFootstepCount - 1);
+        if (pick >= foot_cycle) ++pick;
+        foot_cycle = pick;
+        Uint8* wav = foot_wav[pick];
+        const Uint32 len = foot_wav_len[pick];
+        if (!wav) return;
+        SDL_ClearAudioStream(s);
+        SDL_PutAudioStreamData(s, wav, static_cast<int>(len));
     };
     float wind_gain = 0.0f;   // smoothed sky-wind level
     float ocean_gain = 0.0f;  // the sea, by how close you are to it
@@ -3343,6 +3426,32 @@ int main(int argc, char** argv)
                         app.player.pos = {0.0f, sy > -900.0f ? sy : 0.0f,
                                           2.0f};
                         app.fall_vel = 0.0f;
+                    }
+                }
+                // grass footsteps, timed to the run cycle's contact frames
+                {
+                    const AnimClip* c = app.player.anim.clip;
+                    const bool running =
+                        !app.viewer_mode && !app.riding &&
+                        (c == app.player.clips.run ||
+                         c == app.player.clips.run_sword ||
+                         c == app.player.clips.run_back) &&
+                        app.fall_vel == 0.0f;
+                    const float end = app.player.anim.clip_end();
+                    if (running && end > 0.0f) {
+                        const float ph =
+                            std::fmod(app.player.anim.time / end, 1.0f);
+                        auto crossed = [&](float mark) {
+                            if (ph >= foot_prev_phase)   // normal advance
+                                return foot_prev_phase < mark && ph >= mark;
+                            // wrapped around the loop point
+                            return mark >= foot_prev_phase || mark < ph;
+                        };
+                        if (crossed(0.20f) || crossed(0.70f))
+                            play_footstep();
+                        foot_prev_phase = ph;
+                    } else {
+                        foot_prev_phase = 0.0f;
                     }
                 }
                 }  // !mount_seq

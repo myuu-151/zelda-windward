@@ -25,6 +25,28 @@ cmake --build build --config Release --target zelda_packed
 That exe runs anywhere on its own: no `assets/` folder, no tune files,
 no debug keys, everything baked in.
 
+## Controls
+
+| input | action |
+|---|---|
+| W A S D | move · steer in flight (W climbs, S dives) |
+| space | roll · vault onto the bird · launch · **twirl** mid-flight |
+| shift | guard on foot · boost in flight (+S stoops, +W climbs) |
+| J | attack |
+| I | flute — `1`–`8` play the octave, hold ↑/↓ for sharps and flats |
+| arrows / drag LMB | orbit the camera, wheel zooms |
+| esc | quit |
+
+Play the Song of Skies (`1 5 8 6 5 3`) and the loftwing comes down.
+Guarding with a target in view locks the camera onto it. Flight speed is
+real momentum — it builds diving, bleeds climbing, and drags off slowly.
+
+Gamepad: left stick moves, A rolls, X attacks, RB guards. **Switch
+controller support coming soon.**
+
+The dev build adds F1 clip viewer, F2 screenshot, F4 dive-freeze and live
+seat/shield/camera tuning keys; `zelda_packed` has none of them.
+
 ## Assets
 
 Includes copyrighted assets. The water shader derives from

@@ -176,6 +176,19 @@ float floor_at(float x, float z)
     return gh > -900.0f ? std::max(gh, kWaterSkim) : kWaterSkim;
 }
 
+Mat4 mat4_ortho(float l, float r, float b, float t, float n, float f)
+{
+    Mat4 m{};
+    m.m[0] = 2.0f / (r - l);
+    m.m[5] = 2.0f / (t - b);
+    m.m[10] = -2.0f / (f - n);
+    m.m[12] = -(r + l) / (r - l);
+    m.m[13] = -(t + b) / (t - b);
+    m.m[14] = -(f + n) / (f - n);
+    m.m[15] = 1.0f;
+    return m;
+}
+
 // --- static island mesh (glb) ----------------------------------------------
 struct IslandMesh {
     GLuint vao = 0, vbo = 0, ebo = 0, tex = 0;
@@ -482,10 +495,43 @@ void main() {
     albedo.a = smoothstep(0.35, 0.65, albedo.a);
     if (albedo.a < 0.01) discard;
     float ndl = max(dot(normalize(vNormal), -uSunDir), 0.0);
-    // two-band toon shading
+    // two-band toon shading (characters CAST shadows but never receive --
+    // skinned self-shadowing bands ugly across the toon shading)
     float light = ndl > 0.35 ? 1.0 : 0.72;
     fragColor = vec4(albedo.rgb * light, albedo.a);
 }
+)GLSL";
+
+// depth-only programs for the sun shadow map: one for static meshes, one
+// riding the skinning palette so Link and the loftwing cast
+const char* kShadowVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightVP;
+uniform vec3 uOffset;
+void main() { gl_Position = uLightVP * vec4(aPos + uOffset, 1.0); }
+)GLSL";
+
+const char* kShadowSkinVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=3) in uvec4 aJoints;
+layout(location=4) in vec4 aWeights;
+uniform mat4 uLightVP;
+uniform mat4 uModel;
+uniform mat4 uPalette[64];
+void main() {
+    mat4 skin = aWeights.x * uPalette[aJoints.x]
+              + aWeights.y * uPalette[aJoints.y]
+              + aWeights.z * uPalette[aJoints.z]
+              + aWeights.w * uPalette[aJoints.w];
+    gl_Position = uLightVP * uModel * skin * vec4(aPos, 1.0);
+}
+)GLSL";
+
+const char* kShadowFS = R"GLSL(
+#version 330 core
+void main() {}
 )GLSL";
 
 const char* kCubeVS = R"GLSL(
@@ -669,14 +715,17 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec2 aUV;
 uniform mat4 uViewProj;
+uniform mat4 uLightVP;
 uniform vec3 uOffset;
 out vec3 vWorld;
 out vec3 vNrm;
 out vec2 vUV;
+out vec4 vShadowPos;
 void main() {
     vWorld = aPos + uOffset;
     vNrm = aNrm;
     vUV = aUV;
+    vShadowPos = uLightVP * vec4(vWorld, 1.0);
     gl_Position = uViewProj * vec4(vWorld, 1.0);
 }
 )GLSL";
@@ -686,14 +735,36 @@ const char* kIslandFS = R"GLSL(
 in vec3 vWorld;
 in vec3 vNrm;
 in vec2 vUV;
+in vec4 vShadowPos;
 out vec4 fragColor;
 uniform sampler2D uTex;
+uniform sampler2DShadow uShadow;
 uniform vec3 uEye;
+
+float shadow_factor(vec4 sp) {
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
+        c.z > 1.0)
+        return 1.0;
+    // small bias + 4-tap PCF on top of the hardware compare
+    float z = c.z - 0.0007;
+    float s = 0.0;
+    vec2 t = vec2(1.0 / 4096.0);
+    s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
+    return s * 0.25;
+}
+
 void main() {
     vec3 n = normalize(vNrm);
-    const vec3 L = normalize(vec3(0.45, 0.8, 0.35));
+    // lit from the sky's visible sun, so the cast shadows agree with it
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
+    float sh = shadow_factor(vShadowPos);
+    shade *= mix(0.58, 1.0, sh);
     vec3 col = texture(uTex, vUV).rgb * shade;
     float d = length(vWorld - uEye);
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
@@ -1609,6 +1680,54 @@ int main(int argc, char** argv)
     const GLint is_eye = glGetUniformLocation(island_prog, "uEye");
     const GLint is_offset = glGetUniformLocation(island_prog, "uOffset");
     const GLint is_tex = glGetUniformLocation(island_prog, "uTex");
+    const GLint is_lightvp = glGetUniformLocation(island_prog, "uLightVP");
+    const GLint is_shadowmap = glGetUniformLocation(island_prog, "uShadow");
+
+    // sun shadow map: depth-only pass from the sky's sun direction
+    const GLuint shadow_prog = link_program(kShadowVS, kShadowFS);
+    const GLuint shadow_skin_prog = link_program(kShadowSkinVS, kShadowFS);
+    if (!shadow_prog || !shadow_skin_prog) return 1;
+    const GLint sh_lightvp = glGetUniformLocation(shadow_prog, "uLightVP");
+    const GLint sh_offset = glGetUniformLocation(shadow_prog, "uOffset");
+    const GLint shs_lightvp = glGetUniformLocation(shadow_skin_prog, "uLightVP");
+    const GLint shs_model = glGetUniformLocation(shadow_skin_prog, "uModel");
+    const GLint shs_palette = glGetUniformLocation(shadow_skin_prog, "uPalette");
+
+    constexpr int kShadowRes = 4096;
+    GLuint shadow_fbo = 0, shadow_tex = 0;
+    {
+        glGenTextures(1, &shadow_tex);
+        glBindTexture(GL_TEXTURE_2D, shadow_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowRes,
+                     kShadowRes, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                        GL_COMPARE_REF_TO_TEXTURE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const float border[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+        glGenFramebuffers(1, &shadow_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_2D, shadow_tex, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE)
+            SDL_Log("shadow fbo incomplete");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    // static light frustum covering the island; direction = the sky's sun
+    const Mat4 light_vp = [] {
+        const Vec3 sun_dir = normalize({0.45f, 0.35f, -0.60f});
+        const Vec3 center{0.0f, 0.0f, 0.0f};
+        const Mat4 view =
+            mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
+        return mat4_ortho(-48.0f, 48.0f, -48.0f, 48.0f, 20.0f, 180.0f) * view;
+    }();
 
     const GLuint sky_prog = link_program(kSkyVS, kSkyFS);
     if (!sky_prog) return 1;
@@ -4083,12 +4202,80 @@ int main(int argc, char** argv)
         }
 
         // render
+        // ---- sun shadow pass: island + Link + loftwing into the depth map
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+            glViewport(0, 0, kShadowRes, kShadowRes);
+            glClear(GL_DEPTH_BUFFER_BIT);
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(2.0f, 4.0f);
+            if (island.index_count) {
+                glUseProgram(shadow_prog);
+                glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, light_vp.m);
+                const float off3[3] = {0.0f, kIslandY, 0.0f};
+                glUniform3fv(sh_offset, 1, off3);
+                glBindVertexArray(island.vao);
+                glDrawElements(GL_TRIANGLES, island.index_count,
+                               GL_UNSIGNED_INT, nullptr);
+            }
+            glUseProgram(shadow_skin_prog);
+            glUniformMatrix4fv(shs_lightvp, 1, GL_FALSE, light_vp.m);
+            glDisable(GL_CULL_FACE);
+            {
+                const Mat4 mm = app.viewer_mode ? Mat4{}
+                                : app.riding    ? app.link_ride_mtx
+                                                : app.player.model_matrix();
+                glUniformMatrix4fv(shs_model, 1, GL_FALSE, mm.m);
+                glUniformMatrix4fv(shs_palette,
+                                   static_cast<GLsizei>(app.link.palette.size()),
+                                   GL_FALSE, app.link.palette.data()->m);
+                glBindVertexArray(app.link.vao);
+                for (const Submesh& sub : app.link.submeshes) {
+                    if (sub.alpha_blend) continue;   // decals don't cast
+                    glDrawElements(
+                        GL_TRIANGLES, static_cast<GLsizei>(sub.index_count),
+                        GL_UNSIGNED_INT,
+                        reinterpret_cast<void*>(sub.first_index *
+                                                sizeof(uint32_t)));
+                }
+            }
+            if (app.has_loftwing && !app.loftwing.palette.empty()) {
+                glUniformMatrix4fv(shs_model, 1, GL_FALSE,
+                                   app.bird_world_mtx.m);
+                glUniformMatrix4fv(
+                    shs_palette,
+                    static_cast<GLsizei>(app.loftwing.palette.size()),
+                    GL_FALSE, app.loftwing.palette.data()->m);
+                glBindVertexArray(app.loftwing.vao);
+                for (const Submesh& sub : app.loftwing.submeshes) {
+                    if (sub.alpha_blend) continue;
+                    if (sub.material == "Mt_WingsExt" && app.bird_housed)
+                        continue;
+                    if (sub.material == "Mt_WingsS" && !app.bird_housed)
+                        continue;
+                    glDrawElements(
+                        GL_TRIANGLES, static_cast<GLsizei>(sub.index_count),
+                        GL_UNSIGNED_INT,
+                        reinterpret_cast<void*>(sub.first_index *
+                                                sizeof(uint32_t)));
+                }
+            }
+            glBindVertexArray(0);
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+
         int fb_w = 0, fb_h = 0;
         SDL_GetWindowSizeInPixels(app.window, &fb_w, &fb_h);
         glViewport(0, 0, fb_w, fb_h);
         glClearColor(0.66f, 0.80f, 0.95f, 1.0f); // sky's horizon color
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
+        // the shadow map rides unit 2 for every receiving pass this frame
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, shadow_tex);
+        glActiveTexture(GL_TEXTURE0);
 
         const float aspect = fb_h > 0 ? static_cast<float>(fb_w) / fb_h : 1.0f;
         // near 0.25 (was 0.05): depth precision at range scales with d^2 /
@@ -4108,10 +4295,12 @@ int main(int argc, char** argv)
         if (island.index_count) {
             glUseProgram(island_prog);
             glUniformMatrix4fv(is_viewproj, 1, GL_FALSE, viewproj.m);
+            glUniformMatrix4fv(is_lightvp, 1, GL_FALSE, light_vp.m);
             glUniform3fv(is_eye, 1, eye3);
             const float off3[3] = {0.0f, kIslandY, 0.0f};
             glUniform3fv(is_offset, 1, off3);
             glUniform1i(is_tex, 0);
+            glUniform1i(is_shadowmap, 2);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, island.tex);
             glBindVertexArray(island.vao);

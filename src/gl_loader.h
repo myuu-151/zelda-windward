@@ -58,6 +58,13 @@ extern PFNGLACTIVETEXTUREPROC p_glActiveTexture;
 #define glActiveTexture p_glActiveTexture
 extern PFNGLGENERATEMIPMAPPROC glGenerateMipmap;
 
+// framebuffers (shadow map)
+extern PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
+extern PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer;
+extern PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;
+extern PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus;
+extern PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
+
 // Loads every pointer above. Call once after SDL_GL_CreateContext.
 // Returns false (and logs) if anything is missing.
 bool gl_load_functions();

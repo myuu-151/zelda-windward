@@ -39,7 +39,12 @@
     X(PFNGLGETUNIFORMBLOCKINDEXPROC, glGetUniformBlockIndex) \
     X(PFNGLUNIFORMBLOCKBINDINGPROC, glUniformBlockBinding) \
     X(PFNGLACTIVETEXTUREPROC, glActiveTexture) \
-    X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)
+    X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap) \
+    X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) \
+    X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
+    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers)
 
 #define DEFINE_FUNC(type, name) type name = nullptr;
 GL_FUNCS(DEFINE_FUNC)

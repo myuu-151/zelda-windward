@@ -542,10 +542,12 @@ layout(location=4) in vec4 aWeights;
 
 uniform mat4 uViewProj;
 uniform mat4 uModel;
+uniform mat4 uLightVP;
 uniform mat4 uPalette[64];
 
 out vec3 vNormal;
 out vec2 vUV;
+out vec4 vShadowPos;
 
 void main() {
     mat4 skin = aWeights.x * uPalette[aJoints.x]
@@ -555,6 +557,12 @@ void main() {
     vec4 world = uModel * skin * vec4(aPos, 1.0);
     vNormal = normalize(mat3(uModel) * mat3(skin) * aNormal);
     vUV = aUV;
+    // ONE shadow probe for the whole character (not per-pixel -- skinned
+    // self-shadowing banded ugly): the model origin's head height, nudged
+    // toward the sun so his own cast shadow can't catch his own probe
+    const vec3 kSunWard = vec3(0.53523, 0.41629, -0.71364);
+    vec3 probe = (uModel * vec4(0.0, 1.0, 0.0, 1.0)).xyz + kSunWard * 1.5;
+    vShadowPos = uLightVP * vec4(probe, 1.0);
     gl_Position = uViewProj * world;
 }
 )GLSL";
@@ -563,9 +571,31 @@ const char* kSkinFS = R"GLSL(
 #version 330 core
 in vec3 vNormal;
 in vec2 vUV;
+in vec4 vShadowPos;
 uniform sampler2D uTex;
+uniform sampler2DShadow uShadow;
 uniform vec3 uSunDir;
 out vec4 fragColor;
+
+float shadow_factor(vec4 sp) {
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
+        c.z > 1.0)
+        return 1.0;
+    float z = c.z - 0.0010;
+    // a wide soft disc: the probe's penumbra spans ~half a unit of ground,
+    // so walking across a shadow edge fades the band in smoothly
+    const vec2 taps[12] = vec2[12](
+        vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457),
+        vec2(-0.203,  0.621), vec2( 0.962, -0.195), vec2( 0.473, -0.480),
+        vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
+        vec2( 0.896,  0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
+    float s = 0.0;
+    vec2 r = vec2(20.0 / 4096.0);
+    for (int i = 0; i < 12; ++i)
+        s += texture(uShadow, vec3(c.xy + taps[i] * r, z));
+    return s / 12.0;
+}
 
 void main() {
     vec4 albedo = texture(uTex, vUV);
@@ -573,9 +603,10 @@ void main() {
     albedo.a = smoothstep(0.35, 0.65, albedo.a);
     if (albedo.a < 0.01) discard;
     float ndl = max(dot(normalize(vNormal), -uSunDir), 0.0);
-    // two-band toon shading (characters CAST shadows but never receive --
-    // skinned self-shadowing bands ugly across the toon shading)
+    // two-band toon shading; standing in a cast shadow eases the whole
+    // character down to the dark band (uniform probe: no banding across him)
     float light = ndl > 0.35 ? 1.0 : 0.72;
+    light = mix(0.72, light, smoothstep(0.15, 0.85, shadow_factor(vShadowPos)));
     fragColor = vec4(albedo.rgb * light, albedo.a);
 }
 )GLSL";
@@ -1903,6 +1934,8 @@ int main(int argc, char** argv)
     const GLint u_palette = glGetUniformLocation(skin_prog, "uPalette");
     const GLint u_tex = glGetUniformLocation(skin_prog, "uTex");
     const GLint u_sun = glGetUniformLocation(skin_prog, "uSunDir");
+    const GLint u_lightvp = glGetUniformLocation(skin_prog, "uLightVP");
+    const GLint u_shadowmap = glGetUniformLocation(skin_prog, "uShadow");
     const GLint is_viewproj = glGetUniformLocation(island_prog, "uViewProj");
     const GLint is_eye = glGetUniformLocation(island_prog, "uEye");
     const GLint is_offset = glGetUniformLocation(island_prog, "uOffset");
@@ -4923,6 +4956,8 @@ int main(int argc, char** argv)
                            GL_FALSE, app.link.palette.data()->m);
         const Vec3 sun = normalize({-0.4f, -1.0f, -0.35f});
         glUniform3fv(u_sun, 1, &sun.x);
+        glUniformMatrix4fv(u_lightvp, 1, GL_FALSE, light_vp.m);
+        glUniform1i(u_shadowmap, 2);
         glUniform1i(u_tex, 0);
         glActiveTexture(GL_TEXTURE0);
         glDisable(GL_CULL_FACE);

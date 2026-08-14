@@ -37,9 +37,7 @@ no debug keys, everything baked in.
 | arrow keys | orbit the camera |
 | esc | quit |
 
-The Song of Skies is `1 5 8 6 5 3`. Guarding with a target in view locks
-the camera onto it. Flight speed is real momentum — it builds diving,
-bleeds climbing, and drags off slowly.
+The Song of Skies is `1 5 8 6 5 3`.
 
 Mounted, space launches only while you're **moving** — press it standing
 still and you hop back off instead.

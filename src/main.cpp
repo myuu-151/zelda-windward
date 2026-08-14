@@ -534,6 +534,66 @@ const char* kShadowFS = R"GLSL(
 void main() {}
 )GLSL";
 
+// post chain: the world renders into an offscreen target, bright spots are
+// blurred at half res, and the composite adds the glow with a gentle
+// vibrance lift -- WW's sunny haze, not an HDR bloom
+const char* kPostVS = R"GLSL(
+#version 330 core
+const vec2 verts[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+out vec2 vUV;
+void main() {
+    vec2 p = verts[gl_VertexID];
+    vUV = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kBrightFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uTex;
+void main() {
+    // the source holds only the sky and ocean: clouds, the sun, and the
+    // sea's white foam pass the gate; the deep blues stay dark
+    vec3 c = texture(uTex, vUV).rgb;
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    fragColor = vec4(c * smoothstep(0.72, 0.98, l), 1.0);
+}
+)GLSL";
+
+const char* kBlurFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform vec2 uDir;   // texel step along the blur axis
+void main() {
+    const float w[5] = float[5](0.227027, 0.1945946, 0.1216216,
+                                0.054054, 0.016216);
+    vec3 c = texture(uTex, vUV).rgb * w[0];
+    for (int i = 1; i < 5; ++i) {
+        c += texture(uTex, vUV + uDir * float(i)).rgb * w[i];
+        c += texture(uTex, vUV - uDir * float(i)).rgb * w[i];
+    }
+    fragColor = vec4(c, 1.0);
+}
+)GLSL";
+
+const char* kCompositeFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+void main() {
+    vec3 c = texture(uScene, vUV).rgb;
+    c += texture(uBloom, vUV).rgb * 0.50;   // sky + ocean glow
+    c *= 1.04;                              // brightness lift
+    fragColor = vec4(min(c, vec3(1.0)), 1.0);
+}
+)GLSL";
+
 const char* kCubeVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -870,11 +930,13 @@ const char* kWaterVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec2 aPos;   // xz on the plane, camera-centered
 uniform mat4  uViewProj;
+uniform mat4  uLightVP;
 uniform float uTime;
 uniform vec2  uCenter;  // camera xz snapped to the vertex grid: the mesh
                         // follows the camera (endless sea) while the wave
                         // and foam patterns stay anchored in world space
 out vec3 vWorld;
+out vec4 vShadowPos;
 
 const float M_2PI = 6.283185307;
 const float M_6PI = 18.84955592;
@@ -892,6 +954,7 @@ void main() {
     float lift = cos(d1) * 0.15 + cos(d2) * 0.05;
     vec3 world = vec3(wxz.x, kWaterY + lift * kWaveHeight, wxz.y);
     vWorld = world;
+    vShadowPos = uLightVP * vec4(world, 1.0);
     gl_Position = uViewProj * vec4(world, 1.0);
 }
 )GLSL";
@@ -899,9 +962,26 @@ void main() {
 const char* kWaterFS = R"GLSL(
 #version 330 core
 in vec3 vWorld;
+in vec4 vShadowPos;
 out vec4 fragColor;
 uniform vec3  uEye;
 uniform float uTime;
+uniform sampler2DShadow uShadowMap;
+
+float shadow_factor(vec4 sp) {
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
+        c.z > 1.0)
+        return 1.0;
+    float z = c.z - 0.0007;
+    float s = 0.0;
+    vec2 t = vec2(1.0 / 4096.0);
+    s += texture(uShadowMap, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
+    s += texture(uShadowMap, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
+    s += texture(uShadowMap, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
+    s += texture(uShadowMap, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
+    return s * 0.25;
+}
 
 const vec3 WATER_COL  = vec3(0.04, 0.38, 0.88);
 const vec3 WATER2_COL = vec3(0.04, 0.35, 0.78);
@@ -1090,6 +1170,9 @@ void main() {
             col = mix(col, FOAM_COL, foam);
         }
     }
+    // the sea receives shadows from everything -- the island's cliffs,
+    // Link, the bird overhead
+    col *= mix(0.66, 1.0, shadow_factor(vShadowPos));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -1720,6 +1803,67 @@ int main(int argc, char** argv)
             SDL_Log("shadow fbo incomplete");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    // post-processing programs + lazily-sized render targets
+    const GLuint bright_prog = link_program(kPostVS, kBrightFS);
+    const GLuint blur_prog = link_program(kPostVS, kBlurFS);
+    const GLuint composite_prog = link_program(kPostVS, kCompositeFS);
+    if (!bright_prog || !blur_prog || !composite_prog) return 1;
+    const GLint br_tex = glGetUniformLocation(bright_prog, "uTex");
+    const GLint bl_tex = glGetUniformLocation(blur_prog, "uTex");
+    const GLint bl_dir = glGetUniformLocation(blur_prog, "uDir");
+    const GLint cp_scene = glGetUniformLocation(composite_prog, "uScene");
+    const GLint cp_bloom = glGetUniformLocation(composite_prog, "uBloom");
+    struct RenderTarget {
+        GLuint fbo = 0, color = 0, depth = 0;
+        int w = 0, h = 0;
+    };
+    RenderTarget scene_rt, glow_rt, bloom_a, bloom_b;
+    bool ocean_bloom = true;   // "/" toggles it for quick comparison
+    auto make_target = [](RenderTarget& rt, int w, int h, bool with_depth,
+                          GLuint share_depth = 0) -> bool {
+        if (rt.w == w && rt.h == h) return false;
+        if (rt.fbo) {
+            glDeleteFramebuffers(1, &rt.fbo);
+            glDeleteTextures(1, &rt.color);
+            if (rt.depth) glDeleteTextures(1, &rt.depth);
+            rt = RenderTarget{};
+        }
+        rt.w = w;
+        rt.h = h;
+        glGenTextures(1, &rt.color);
+        glBindTexture(GL_TEXTURE_2D, rt.color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &rt.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, rt.color, 0);
+        if (with_depth) {
+            glGenTextures(1, &rt.depth);
+            glBindTexture(GL_TEXTURE_2D, rt.depth);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+                         GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                   GL_TEXTURE_2D, rt.depth, 0);
+        } else if (share_depth) {
+            // borrowed depth: glow pass tests against the scene's depth so
+            // occluded character pixels never bloom through terrain
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                   GL_TEXTURE_2D, share_depth, 0);
+        }
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE)
+            SDL_Log("post fbo incomplete");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return true;
+    };
+
     // static light frustum covering the island; direction = the sky's sun
     const Mat4 light_vp = [] {
         const Vec3 sun_dir = normalize({0.45f, 0.35f, -0.60f});
@@ -1748,6 +1892,8 @@ int main(int argc, char** argv)
     const GLint wa_shore = glGetUniformLocation(water_prog, "uShore");
     const GLint wa_shorerect = glGetUniformLocation(water_prog, "uShoreRect");
     const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
+    const GLint wa_lightvp = glGetUniformLocation(water_prog, "uLightVP");
+    const GLint wa_shadowmap = glGetUniformLocation(water_prog, "uShadowMap");
     // water sea: subdivided grid so the vertex waves can roll
     GLuint water_vao = 0, water_vbo = 0, water_ibo = 0;
     GLsizei water_indices = 0;
@@ -2766,6 +2912,10 @@ int main(int argc, char** argv)
                     if (ev.key.key == SDLK_F1 && !ev.key.repeat) {
                         app.viewer_mode = !app.viewer_mode;
                         set_title(app, 0);
+                    }
+                    if (ev.key.key == SDLK_SLASH && !ev.key.repeat) {
+                        ocean_bloom = !ocean_bloom;
+                        SDL_Log("ocean bloom: %s", ocean_bloom ? "ON" : "off");
                     }
 #endif
                     if (!ev.key.repeat && !app.viewer_mode) {
@@ -4268,6 +4418,13 @@ int main(int argc, char** argv)
 
         int fb_w = 0, fb_h = 0;
         SDL_GetWindowSizeInPixels(app.window, &fb_w, &fb_h);
+        if (make_target(scene_rt, fb_w, fb_h, true))
+            glow_rt.w = 0;   // scene depth changed: rebuild the glow target
+        make_target(glow_rt, fb_w, fb_h, false, scene_rt.depth);
+        make_target(bloom_a, fb_w / 2, fb_h / 2, false);
+        make_target(bloom_b, fb_w / 2, fb_h / 2, false);
+        // the world draws offscreen; the bloom composite writes the screen
+        glBindFramebuffer(GL_FRAMEBUFFER, scene_rt.fbo);
         glViewport(0, 0, fb_w, fb_h);
         glClearColor(0.66f, 0.80f, 0.95f, 1.0f); // sky's horizon color
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -4313,6 +4470,8 @@ int main(int argc, char** argv)
         // so vertices stay at fixed world positions -- making it endless
         glUseProgram(water_prog);
         glUniformMatrix4fv(wa_viewproj, 1, GL_FALSE, viewproj.m);
+        glUniformMatrix4fv(wa_lightvp, 1, GL_FALSE, light_vp.m);
+        glUniform1i(wa_shadowmap, 2);   // bound for the whole frame
         glUniform1f(wa_time, static_cast<float>(app.sim_time));
         glUniform3fv(wa_eye, 1, eye3);
         {
@@ -4589,6 +4748,69 @@ int main(int argc, char** argv)
             glDepthMask(GL_TRUE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDisable(GL_BLEND);
+        }
+
+        // --- glow source: the ocean only, tested against the scene's
+        // depth so the island and characters mask their own silhouettes
+        if (ocean_bloom) {
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_rt.fbo);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);   // depth is the scene's, keep it
+            glDepthMask(GL_FALSE);
+            glDepthFunc(GL_LEQUAL);
+            // water re-uses this frame's uniforms (program state persists)
+            glUseProgram(water_prog);
+            glBindVertexArray(water_vao);
+            glDrawElements(GL_TRIANGLES, water_indices, GL_UNSIGNED_INT,
+                           nullptr);
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+        }
+
+        // --- post: bright pass -> separable blur -> bloom composite -------
+        {
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(sky_vao);   // attribute-less fullscreen tri
+            glActiveTexture(GL_TEXTURE0);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, bloom_a.fbo);
+            glViewport(0, 0, bloom_a.w, bloom_a.h);
+            if (ocean_bloom) {
+                glUseProgram(bright_prog);
+                glUniform1i(br_tex, 0);
+                glBindTexture(GL_TEXTURE_2D, glow_rt.color);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                glUseProgram(blur_prog);
+                glUniform1i(bl_tex, 0);
+                const float th[2] = {1.0f / bloom_a.w, 0.0f};
+                const float tv[2] = {0.0f, 1.0f / bloom_a.h};
+                glBindFramebuffer(GL_FRAMEBUFFER, bloom_b.fbo);
+                glUniform2fv(bl_dir, 1, th);
+                glBindTexture(GL_TEXTURE_2D, bloom_a.color);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glBindFramebuffer(GL_FRAMEBUFFER, bloom_a.fbo);
+                glUniform2fv(bl_dir, 1, tv);
+                glBindTexture(GL_TEXTURE_2D, bloom_b.color);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            } else {
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // no glow this frame
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, fb_w, fb_h);
+            glUseProgram(composite_prog);
+            glUniform1i(cp_scene, 0);
+            glUniform1i(cp_bloom, 1);
+            glBindTexture(GL_TEXTURE_2D, scene_rt.color);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, bloom_a.color);
+            glActiveTexture(GL_TEXTURE0);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glEnable(GL_DEPTH_TEST);
         }
 
         // --- ocarina sheet-music HUD, fading in while the flute is out ---

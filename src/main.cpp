@@ -281,14 +281,22 @@ struct IslandMesh {
                         uv = a.data;
                 }
                 if (!pos || !prim.indices) continue;
-                const unsigned base = static_cast<unsigned>(verts.size() / 8);
+                const unsigned base = static_cast<unsigned>(verts.size() / 9);
                 for (size_t v = 0; v < pos->count; ++v) {
                     float p[3] = {0, 0, 0}, n[3] = {0, 1, 0}, t[2] = {0, 0};
                     cgltf_accessor_read_float(pos, v, p, 3);
                     if (nrm) cgltf_accessor_read_float(nrm, v, n, 3);
                     if (uv) cgltf_accessor_read_float(uv, v, t, 2);
-                    verts.insert(verts.end(), {p[0], p[1], p[2],
-                                               n[0], n[1], n[2], t[0], t[1]});
+                    // wind-sway weight: height above the terrain under this
+                    // vertex (heightfield must load before the meshes)
+                    float sway = 0.0f;
+                    float th = 0.0f, tsd = 0.0f;
+                    if (g_hf.sample(p[0], p[2], &th, &tsd) && th > -50.0f)
+                        sway = SDL_clamp((p[1] - th - 0.4f) / 9.0f,
+                                         0.0f, 1.0f);
+                    verts.insert(verts.end(),
+                                 {p[0], p[1], p[2], n[0], n[1], n[2],
+                                  t[0], t[1], sway});
                 }
                 Part part;
                 part.first_index = static_cast<uint32_t>(idx.size());
@@ -342,13 +350,16 @@ struct IslandMesh {
                      static_cast<GLsizeiptr>(idx.size() * sizeof(unsigned)),
                      idx.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, nullptr);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 36, nullptr);
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32,
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 36,
                               reinterpret_cast<void*>(12));
         glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32,
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 36,
                               reinterpret_cast<void*>(24));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 36,
+                              reinterpret_cast<void*>(32));
         glBindVertexArray(0);
         return true;
     }
@@ -575,12 +586,34 @@ const char* kShadowVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=2) in vec2 aUV;
+layout(location=3) in float aSway;
 uniform mat4 uLightVP;
 uniform vec3 uOffset;
+uniform float uTime;
+uniform float uWind;
+uniform int uClip;
 out vec2 vUV;
+vec3 wind_sway(vec3 p, float w) {
+    w *= uWind;
+    if (w <= 0.0) return p;
+    float t = uTime;
+    // downwind of the sky's cloud drift (clouds scroll along -(1.0, 0.35)),
+    // a steady lean with gusts plus a light cross-wind wobble
+    const vec2 W = normalize(vec2(-1.0, -0.35));
+    float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
+                 0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
+    vec2 perp = vec2(-W.y, W.x);
+    vec2 sway = W * (0.55 + gust) +
+                perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
+    p.xz += sway * (0.10 * w * w);
+    if (uClip == 1)
+        p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
+                     cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
+    return p;
+}
 void main() {
     vUV = aUV;
-    gl_Position = uLightVP * vec4(aPos + uOffset, 1.0);
+    gl_Position = uLightVP * vec4(wind_sway(aPos, aSway) + uOffset, 1.0);
 }
 )GLSL";
 
@@ -851,20 +884,45 @@ void main() {
 
 // the test island: textured static mesh, soft toon wrap light, and the
 // same horizon haze as the sea so it sits in the world
+// wind sway lives in both the main and shadow vertex shaders: aSway is a
+// baked height-above-terrain weight, so trunks stay planted and canopies
+// lean; leafy (clip) parts get an extra high-frequency flutter
 const char* kIslandVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec2 aUV;
+layout(location=3) in float aSway;
 uniform mat4 uViewProj;
 uniform mat4 uLightVP;
 uniform vec3 uOffset;
+uniform float uTime;
+uniform float uWind;
+uniform int uClip;
 out vec3 vWorld;
 out vec3 vNrm;
 out vec2 vUV;
 out vec4 vShadowPos;
+vec3 wind_sway(vec3 p, float w) {
+    w *= uWind;
+    if (w <= 0.0) return p;
+    float t = uTime;
+    // downwind of the sky's cloud drift (clouds scroll along -(1.0, 0.35)),
+    // a steady lean with gusts plus a light cross-wind wobble
+    const vec2 W = normalize(vec2(-1.0, -0.35));
+    float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
+                 0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
+    vec2 perp = vec2(-W.y, W.x);
+    vec2 sway = W * (0.55 + gust) +
+                perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
+    p.xz += sway * (0.10 * w * w);
+    if (uClip == 1)
+        p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
+                     cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
+    return p;
+}
 void main() {
-    vWorld = aPos + uOffset;
+    vWorld = wind_sway(aPos, aSway) + uOffset;
     vNrm = aNrm;
     vUV = aUV;
     vShadowPos = uLightVP * vec4(vWorld, 1.0);
@@ -1853,6 +1911,8 @@ int main(int argc, char** argv)
     const GLint is_shadowmap = glGetUniformLocation(island_prog, "uShadow");
     const GLint is_tint = glGetUniformLocation(island_prog, "uTint");
     const GLint is_clip = glGetUniformLocation(island_prog, "uClip");
+    const GLint is_time = glGetUniformLocation(island_prog, "uTime");
+    const GLint is_wind = glGetUniformLocation(island_prog, "uWind");
 
     // sun shadow map: depth-only pass from the sky's sun direction
     const GLuint shadow_prog = link_program(kShadowVS, kShadowClipFS);
@@ -1862,6 +1922,8 @@ int main(int argc, char** argv)
     const GLint sh_offset = glGetUniformLocation(shadow_prog, "uOffset");
     const GLint sh_tex = glGetUniformLocation(shadow_prog, "uTex");
     const GLint sh_clip = glGetUniformLocation(shadow_prog, "uClip");
+    const GLint sh_time = glGetUniformLocation(shadow_prog, "uTime");
+    const GLint sh_wind = glGetUniformLocation(shadow_prog, "uWind");
     const GLint shs_lightvp = glGetUniformLocation(shadow_skin_prog, "uLightVP");
     const GLint shs_model = glGetUniformLocation(shadow_skin_prog, "uModel");
     const GLint shs_palette = glGetUniformLocation(shadow_skin_prog, "uPalette");
@@ -2023,19 +2085,15 @@ int main(int argc, char** argv)
     GLuint shore_tex = 0;
     {
 #ifdef EMBED_LINK_GLB
+        // heightfield FIRST: mesh loading bakes wind-sway weights from it
+        const bool hf_ok = g_hf.load_bytes(
+            g_island_height_bin, static_cast<size_t>(g_island_height_bin_size));
         const bool mesh_ok = island.load_memory(
             g_island_glb, static_cast<size_t>(g_island_glb_size));
         props.load_memory(g_props_glb,
                           static_cast<size_t>(g_props_glb_size));
-        const bool hf_ok = g_hf.load_bytes(
-            g_island_height_bin, static_cast<size_t>(g_island_height_bin_size));
 #else
         const std::string base = std::string(SDL_GetBasePath());
-        const bool mesh_ok =
-            island.load((base + "..\\..\\assets\\island.glb").c_str()) ||
-            island.load("assets/island.glb");
-        if (!props.load((base + "..\\..\\assets\\props.glb").c_str()))
-            props.load("assets/props.glb");   // optional: fine if missing
         bool hf_ok = false;
         for (const std::string p : {base + "..\\..\\assets\\island_height.bin",
                                     std::string("assets/island_height.bin")}) {
@@ -2047,6 +2105,11 @@ int main(int argc, char** argv)
                 if (hf_ok) break;
             }
         }
+        const bool mesh_ok =
+            island.load((base + "..\\..\\assets\\island.glb").c_str()) ||
+            island.load("assets/island.glb");
+        if (!props.load((base + "..\\..\\assets\\props.glb").c_str()))
+            props.load("assets/props.glb");   // optional: fine if missing
 #endif
         if (!mesh_ok) SDL_Log("could not load island.glb");
         if (!hf_ok) SDL_Log("could not load island_height.bin");
@@ -4531,9 +4594,11 @@ int main(int argc, char** argv)
                 const float off3[3] = {0.0f, kIslandY, 0.0f};
                 glUniform3fv(sh_offset, 1, off3);
                 glUniform1i(sh_tex, 0);
+                glUniform1f(sh_time, static_cast<float>(app.sim_time));
                 glActiveTexture(GL_TEXTURE0);
                 for (const IslandMesh* m : {&island, &props}) {
                     if (!m->index_count) continue;
+                    glUniform1f(sh_wind, m == &props ? 1.0f : 0.0f);
                     glBindVertexArray(m->vao);
                     for (const IslandMesh::Part& part : m->parts) {
                         glUniform1i(sh_clip, part.clip ? 1 : 0);
@@ -4632,10 +4697,12 @@ int main(int argc, char** argv)
             glUniform3fv(is_offset, 1, off3);
             glUniform1i(is_tex, 0);
             glUniform1i(is_shadowmap, 2);
+            glUniform1f(is_time, static_cast<float>(app.sim_time));
             glActiveTexture(GL_TEXTURE0);
             glDisable(GL_CULL_FACE);   // leaf cards read from both sides
             for (const IslandMesh* m : {&island, &props}) {
                 if (!m->index_count) continue;
+                glUniform1f(is_wind, m == &props ? 1.0f : 0.0f);
                 glBindVertexArray(m->vao);
                 for (const IslandMesh::Part& part : m->parts) {
                     glUniform1i(is_clip, part.clip ? 1 : 0);

@@ -2592,12 +2592,8 @@ int main(int argc, char** argv)
                 case SDL_EVENT_GAMEPAD_REMOVED:
                     if (app.pad) { SDL_CloseGamepad(app.pad); app.pad = nullptr; }
                     break;
-                case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-                    if (!app.viewer_mode) {
-                        if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) app.key_roll = true;
-                        if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_WEST) app.key_attack = true;
-                    }
-                    break;
+                    // gamepads are opened but nothing is bound to them yet
+                    // -- proper controller support is still to come
                 // the mouse is viewer-mode only: in game the camera is
                 // arrow-key driven and attacking is J, so LMB-attack and
                 // wheel-zoom stay out of the way
@@ -2663,12 +2659,7 @@ int main(int argc, char** argv)
                 if (keys[SDL_SCANCODE_D]) in_x += 1;
                 if (keys[SDL_SCANCODE_A]) in_x -= 1;
                 bool guard = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
-                if (app.pad) {
-                    in_x += SDL_GetGamepadAxis(app.pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-                    in_y -= SDL_GetGamepadAxis(app.pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
-                    guard = guard ||
-                            SDL_GetGamepadButton(app.pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-                }
+                // (no gamepad input yet -- see SDL_EVENT_GAMEPAD_ADDED)
                 const float mag = std::sqrt(in_x * in_x + in_y * in_y);
                 if (mag > 1.0f) { in_x /= mag; in_y /= mag; }
                 // camera basis on the ground plane

@@ -37,15 +37,14 @@ no debug keys, everything baked in.
 | arrow keys | orbit the camera |
 | esc | quit |
 
-Play the Song of Skies (`1 5 8 6 5 3`) and the loftwing comes down.
-Guarding with a target in view locks the camera onto it. Flight speed is
-real momentum — it builds diving, bleeds climbing, and drags off slowly.
+The Song of Skies is `1 5 8 6 5 3`. Guarding with a target in view locks
+the camera onto it. Flight speed is real momentum — it builds diving,
+bleeds climbing, and drags off slowly.
 
 Mounted, space launches only while you're **moving** — press it standing
 still and you hop back off instead.
 
-Gamepad: left stick moves, A rolls, X attacks, RB guards. **Switch
-controller support coming soon.**
+**SDL controller support coming soon.** Keyboard only for now.
 
 The dev build adds F1 clip viewer, F2 screenshot, F4 dive-freeze and live
 seat/shield/camera tuning keys; `zelda_packed` has none of them.

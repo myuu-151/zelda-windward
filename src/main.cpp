@@ -31,15 +31,18 @@
 #pragma warning(pop)
 #endif
 #include "stb_image.h"  // implementation lives in model.cpp
+#include "cgltf.h"      // implementation lives in model.cpp
 
 namespace {
 
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr double kFixedDt = 1.0 / 60.0;
-// half-extent of the solid test plane: Link and the bird collide with
-// y=0 inside this square; past the edge you fall / fly beneath the world
-constexpr float kGroundHalf = 37.5f;
+// the test island (assets/island.glb) replaces the old white plane: its
+// baked heightfield (assets/island_height.bin) is the solid ground for
+// Link and the bird; everything else is open sea
+constexpr float kIslandY = -3.65f;   // sunk so every tile base is submerged
+constexpr float kWaterSkim = -2.7f;  // kWaterY + waves: the sea is solid
 // SPACE mid-flight: barrel-roll twirl boost -- a tucked 360, which twirls
 // out into one big carving sway: the bird swings OUT to the left edge of
 // the frame, across to the right edge, and settles back center in the
@@ -104,8 +107,198 @@ extern unsigned char g_hud_font[];
 extern unsigned long long g_hud_font_size;
 extern unsigned char g_sheet_frame_png[];
 extern unsigned long long g_sheet_frame_png_size;
+extern unsigned char g_island_glb[];
+extern unsigned long long g_island_glb_size;
+extern unsigned char g_island_height_bin[];
+extern unsigned long long g_island_height_bin_size;
 }
 #endif
+
+// --- island heightfield -----------------------------------------------------
+// Baked in Blender coords (x east, y north, z up) by the export script; the
+// glb is exported +Y-up so game x = blender x, game z = -blender y. Two
+// channels per cell: terrain height (z, -100 = open water) and signed
+// shore distance in world units (+ = water side) for the foam ring.
+struct HeightField {
+    float x0 = 0, y0 = 0, x1 = 1, y1 = 1;
+    int nx = 0, ny = 0;
+    std::vector<float> data;  // 2 floats per cell
+
+    bool load_bytes(const void* bytes, size_t size)
+    {
+        if (size < 24) return false;
+        const float* f = static_cast<const float*>(bytes);
+        x0 = f[0]; y0 = f[1]; x1 = f[2]; y1 = f[3];
+        const int* ii = reinterpret_cast<const int*>(f + 4);
+        nx = ii[0]; ny = ii[1];
+        const size_t need = 24 + size_t(nx) * ny * 2 * sizeof(float);
+        if (nx <= 1 || ny <= 1 || size < need) { nx = ny = 0; return false; }
+        data.assign(f + 6, f + 6 + size_t(nx) * ny * 2);
+        return true;
+    }
+
+    // bilinear sample at world (x, z); false when outside the baked rect
+    bool sample(float x, float z, float* h, float* sd) const
+    {
+        if (nx <= 1) return false;
+        const float bx = x, by = -z;
+        const float u = (bx - x0) / (x1 - x0) * (nx - 1);
+        const float v = (by - y0) / (y1 - y0) * (ny - 1);
+        if (u < 0 || v < 0 || u > nx - 1.001f || v > ny - 1.001f)
+            return false;
+        const int i = std::min(int(u), nx - 2), j = std::min(int(v), ny - 2);
+        const float fu = u - i, fv = v - j;
+        auto at = [&](int ii2, int jj, int c) {
+            return data[(size_t(jj) * nx + ii2) * 2 + c];
+        };
+        *h = (at(i, j, 0) * (1 - fu) + at(i + 1, j, 0) * fu) * (1 - fv) +
+             (at(i, j + 1, 0) * (1 - fu) + at(i + 1, j + 1, 0) * fu) * fv;
+        *sd = (at(i, j, 1) * (1 - fu) + at(i + 1, j, 1) * fu) * (1 - fv) +
+              (at(i, j + 1, 1) * (1 - fu) + at(i + 1, j + 1, 1) * fu) * fv;
+        return true;
+    }
+};
+
+HeightField g_hf;
+
+// world-space terrain height under (x, z); -1000 over open water
+float ground_h(float x, float z)
+{
+    float h = 0, sd = 0;
+    if (!g_hf.sample(x, z, &h, &sd) || h <= -50.0f) return -1000.0f;
+    return h + kIslandY;
+}
+
+// the solid floor anywhere: island terrain, or the sea skim height
+float floor_at(float x, float z)
+{
+    const float gh = ground_h(x, z);
+    return gh > -900.0f ? std::max(gh, kWaterSkim) : kWaterSkim;
+}
+
+// --- static island mesh (glb) ----------------------------------------------
+struct IslandMesh {
+    GLuint vao = 0, vbo = 0, ebo = 0, tex = 0;
+    GLsizei index_count = 0;
+
+    bool load_parsed(cgltf_data* data)
+    {
+        std::vector<float> verts;  // pos3 nrm3 uv2
+        std::vector<unsigned> idx;
+        for (size_t mi = 0; mi < data->meshes_count; ++mi) {
+            const cgltf_mesh& mesh = data->meshes[mi];
+            for (size_t pi = 0; pi < mesh.primitives_count; ++pi) {
+                const cgltf_primitive& prim = mesh.primitives[pi];
+                const cgltf_accessor* pos = nullptr;
+                const cgltf_accessor* nrm = nullptr;
+                const cgltf_accessor* uv = nullptr;
+                for (size_t ai = 0; ai < prim.attributes_count; ++ai) {
+                    const cgltf_attribute& a = prim.attributes[ai];
+                    if (a.type == cgltf_attribute_type_position) pos = a.data;
+                    if (a.type == cgltf_attribute_type_normal) nrm = a.data;
+                    if (a.type == cgltf_attribute_type_texcoord && !uv)
+                        uv = a.data;
+                }
+                if (!pos || !prim.indices) continue;
+                const unsigned base = static_cast<unsigned>(verts.size() / 8);
+                for (size_t v = 0; v < pos->count; ++v) {
+                    float p[3] = {0, 0, 0}, n[3] = {0, 1, 0}, t[2] = {0, 0};
+                    cgltf_accessor_read_float(pos, v, p, 3);
+                    if (nrm) cgltf_accessor_read_float(nrm, v, n, 3);
+                    if (uv) cgltf_accessor_read_float(uv, v, t, 2);
+                    verts.insert(verts.end(), {p[0], p[1], p[2],
+                                               n[0], n[1], n[2], t[0], t[1]});
+                }
+                for (size_t k = 0; k < prim.indices->count; ++k)
+                    idx.push_back(base + static_cast<unsigned>(
+                                             cgltf_accessor_read_index(
+                                                 prim.indices, k)));
+                // first textured material wins (the island has one)
+                if (!tex && prim.material &&
+                    prim.material->pbr_metallic_roughness.base_color_texture
+                        .texture) {
+                    const cgltf_image* img =
+                        prim.material->pbr_metallic_roughness
+                            .base_color_texture.texture->image;
+                    if (img && img->buffer_view) {
+                        const uint8_t* bytes =
+                            static_cast<const uint8_t*>(
+                                img->buffer_view->buffer->data) +
+                            img->buffer_view->offset;
+                        int w = 0, h = 0, comp = 0;
+                        stbi_uc* px = stbi_load_from_memory(
+                            bytes, static_cast<int>(img->buffer_view->size),
+                            &w, &h, &comp, 4);
+                        if (px) {
+                            glGenTextures(1, &tex);
+                            glBindTexture(GL_TEXTURE_2D, tex);
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                                         GL_RGBA, GL_UNSIGNED_BYTE, px);
+                            glGenerateMipmap(GL_TEXTURE_2D);
+                            glTexParameteri(GL_TEXTURE_2D,
+                                            GL_TEXTURE_MIN_FILTER,
+                                            GL_LINEAR_MIPMAP_LINEAR);
+                            glTexParameteri(GL_TEXTURE_2D,
+                                            GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                            stbi_image_free(px);
+                        }
+                    }
+                }
+            }
+        }
+        cgltf_free(data);
+        if (idx.empty()) return false;
+        index_count = static_cast<GLsizei>(idx.size());
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ebo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                     verts.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(idx.size() * sizeof(unsigned)),
+                     idx.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32,
+                              reinterpret_cast<void*>(12));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32,
+                              reinterpret_cast<void*>(24));
+        glBindVertexArray(0);
+        return true;
+    }
+
+    bool load_memory(const void* bytes, size_t size)
+    {
+        cgltf_options opt = {};
+        cgltf_data* data = nullptr;
+        if (cgltf_parse(&opt, bytes, size, &data) != cgltf_result_success)
+            return false;
+        if (cgltf_load_buffers(&opt, data, nullptr) != cgltf_result_success) {
+            cgltf_free(data);
+            return false;
+        }
+        return load_parsed(data);
+    }
+
+    bool load(const char* path)
+    {
+        cgltf_options opt = {};
+        cgltf_data* data = nullptr;
+        if (cgltf_parse_file(&opt, path, &data) != cgltf_result_success)
+            return false;
+        if (cgltf_load_buffers(&opt, data, path) != cgltf_result_success) {
+            cgltf_free(data);
+            return false;
+        }
+        return load_parsed(data);
+    }
+};
 
 // --- reverb on the mix bus ------------------------------------------------
 // Schroeder: four damped comb filters in parallel into two allpasses. It runs
@@ -244,7 +437,7 @@ void SDLCALL reverb_postmix(void*, const SDL_AudioSpec* spec, float* buffer,
     g_reverb.process(buffer, frames, spec->channels);
 }
 
-constexpr Vec3 kTargetPos{0.0f, 0.35f, 4.0f};  // the lock-on cube
+constexpr Vec3 kTargetPos{0.0f, 4.15f, 4.0f};  // the lock-on cube, on the isle
 constexpr float kTargetHalf = 0.35f;     // the cube's half-extent (bounding size)
 constexpr float kLockMaxOffset = 0.22f;  // lock-on camera's max off-axis angle
 
@@ -468,28 +661,42 @@ void main() {
 }
 )GLSL";
 
-const char* kGridVS = R"GLSL(
+// the test island: textured static mesh, soft toon wrap light, and the
+// same horizon haze as the sea so it sits in the world
+const char* kIslandVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec2 aUV;
 uniform mat4 uViewProj;
+uniform vec3 uOffset;
 out vec3 vWorld;
-void main() { vWorld = aPos; gl_Position = uViewProj * vec4(aPos, 1.0); }
+out vec3 vNrm;
+out vec2 vUV;
+void main() {
+    vWorld = aPos + uOffset;
+    vNrm = aNrm;
+    vUV = aUV;
+    gl_Position = uViewProj * vec4(vWorld, 1.0);
+}
 )GLSL";
 
-const char* kGridFS = R"GLSL(
+const char* kIslandFS = R"GLSL(
 #version 330 core
 in vec3 vWorld;
+in vec3 vNrm;
+in vec2 vUV;
 out vec4 fragColor;
+uniform sampler2D uTex;
 uniform vec3 uEye;
 void main() {
-    // white test plane; faint lines keep motion readable while testing
-    vec2 g = abs(fract(vWorld.xz - 0.5) - 0.5) / fwidth(vWorld.xz);
-    float line = 1.0 - min(min(g.x, g.y), 1.0);
-    vec3 base = vec3(0.94, 0.94, 0.95);
-    vec3 col = mix(base, vec3(0.86, 0.87, 0.90), line);
-    // haze toward the sky's horizon color so the far plane melts away
+    vec3 n = normalize(vNrm);
+    const vec3 L = normalize(vec3(0.45, 0.8, 0.35));
+    float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
+    float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
+    vec3 col = texture(uTex, vUV).rgb * shade;
     float d = length(vWorld - uEye);
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(60.0, 300.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -775,6 +982,12 @@ vec3 water(vec2 uv, vec3 cdir, float t) {
     return ret;
 }
 
+// island shore field baked offline: G = signed distance to the island's
+// waterline silhouette (+ toward open water), in blender coords
+uniform sampler2D uShore;
+uniform vec4 uShoreRect;   // x0, y0, 1/width, 1/height
+uniform float uHasShore;
+
 void main() {
     vec3 cdir = normalize(vWorld - uEye);
     vec3 col = water(vWorld.xz * kTile, cdir, uTime * 2.0);
@@ -782,6 +995,30 @@ void main() {
     // the pattern's hard edges alias at grazing distance: fade detail to a
     // mean water color, then haze into the sky before the mesh edge
     col = mix(col, mix(WATER_COL, FOAM_COL, 0.35), smoothstep(40.0, 160.0, d));
+
+    // WW-style foam ring hugging the island silhouette: a solid rim right
+    // at the shore plus a dashed band breathing outward with the waves
+    if (uHasShore > 0.5) {
+        vec2 buv = vec2((vWorld.x - uShoreRect.x) * uShoreRect.z,
+                        (-vWorld.z - uShoreRect.y) * uShoreRect.w);
+        if (all(greaterThan(buv, vec2(0.0))) &&
+            all(lessThan(buv, vec2(1.0)))) {
+            float sd = texture(uShore, buv).g;
+            // a tight line clinging to the waterline (sd ~ 0). The shore
+            // field is baked from the mesh's cross-section AT water level;
+            // top-down silhouettes drift off the cliff base (overhangs)
+            float rim = 1.0 - smoothstep(0.06, 0.40, abs(sd));
+            float band = sin(sd * 3.4 - uTime * 1.7 +
+                             fbm(vWorld.xz * 0.5) * 2.8);
+            float dashes = smoothstep(0.55, 0.9, band) *
+                           (1.0 - smoothstep(1.0, 3.8, sd)) *
+                           step(0.25, sd);
+            float foam = clamp(rim + dashes * 0.8, 0.0, 1.0);
+            // foam is a shoreline effect: let it fade with distance too
+            foam *= 1.0 - smoothstep(60.0, 200.0, d);
+            col = mix(col, FOAM_COL, foam);
+        }
+    }
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -1361,15 +1598,17 @@ int main(int argc, char** argv)
     app.player.init(app.link);
 
     const GLuint skin_prog = link_program(kSkinVS, kSkinFS);
-    const GLuint grid_prog = link_program(kGridVS, kGridFS);
-    if (!skin_prog || !grid_prog) return 1;
+    const GLuint island_prog = link_program(kIslandVS, kIslandFS);
+    if (!skin_prog || !island_prog) return 1;
     const GLint u_viewproj = glGetUniformLocation(skin_prog, "uViewProj");
     const GLint u_model = glGetUniformLocation(skin_prog, "uModel");
     const GLint u_palette = glGetUniformLocation(skin_prog, "uPalette");
     const GLint u_tex = glGetUniformLocation(skin_prog, "uTex");
     const GLint u_sun = glGetUniformLocation(skin_prog, "uSunDir");
-    const GLint g_viewproj = glGetUniformLocation(grid_prog, "uViewProj");
-    const GLint g_eye = glGetUniformLocation(grid_prog, "uEye");
+    const GLint is_viewproj = glGetUniformLocation(island_prog, "uViewProj");
+    const GLint is_eye = glGetUniformLocation(island_prog, "uEye");
+    const GLint is_offset = glGetUniformLocation(island_prog, "uOffset");
+    const GLint is_tex = glGetUniformLocation(island_prog, "uTex");
 
     const GLuint sky_prog = link_program(kSkyVS, kSkyFS);
     if (!sky_prog) return 1;
@@ -1387,6 +1626,9 @@ int main(int argc, char** argv)
     const GLint wa_time = glGetUniformLocation(water_prog, "uTime");
     const GLint wa_eye = glGetUniformLocation(water_prog, "uEye");
     const GLint wa_center = glGetUniformLocation(water_prog, "uCenter");
+    const GLint wa_shore = glGetUniformLocation(water_prog, "uShore");
+    const GLint wa_shorerect = glGetUniformLocation(water_prog, "uShoreRect");
+    const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
     // water sea: subdivided grid so the vertex waves can roll
     GLuint water_vao = 0, water_vbo = 0, water_ibo = 0;
     GLsizei water_indices = 0;
@@ -1426,20 +1668,52 @@ int main(int argc, char** argv)
         glBindVertexArray(0);
     }
 
-    // ground quad -- matches the solid extent (kGroundHalf): step past the
-    // edge and you fall to the water
-    constexpr float G = kGroundHalf;
-    const float ground[] = {-G, 0, -G, G, 0, -G, G, 0, G,
-                            -G, 0, -G, G, 0, G, -G, 0, G};
-    GLuint grid_vao = 0, grid_vbo = 0;
-    glGenVertexArrays(1, &grid_vao);
-    glBindVertexArray(grid_vao);
-    glGenBuffers(1, &grid_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, grid_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(ground), ground, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
-    glBindVertexArray(0);
+    // the test island: mesh replaces the old white plane, its baked
+    // heightfield is the collision + the water's foam-ring shore field
+    IslandMesh island;
+    GLuint shore_tex = 0;
+    {
+#ifdef EMBED_LINK_GLB
+        const bool mesh_ok = island.load_memory(
+            g_island_glb, static_cast<size_t>(g_island_glb_size));
+        const bool hf_ok = g_hf.load_bytes(
+            g_island_height_bin, static_cast<size_t>(g_island_height_bin_size));
+#else
+        const std::string base = std::string(SDL_GetBasePath());
+        const bool mesh_ok =
+            island.load((base + "..\\..\\assets\\island.glb").c_str()) ||
+            island.load("assets/island.glb");
+        bool hf_ok = false;
+        for (const std::string p : {base + "..\\..\\assets\\island_height.bin",
+                                    std::string("assets/island_height.bin")}) {
+            size_t sz = 0;
+            void* bytes = SDL_LoadFile(p.c_str(), &sz);
+            if (bytes) {
+                hf_ok = g_hf.load_bytes(bytes, sz);
+                SDL_free(bytes);
+                if (hf_ok) break;
+            }
+        }
+#endif
+        if (!mesh_ok) SDL_Log("could not load island.glb");
+        if (!hf_ok) SDL_Log("could not load island_height.bin");
+        if (hf_ok) {
+            // shore field for the water shader (R = height, G = shore dist)
+            glGenTextures(1, &shore_tex);
+            glBindTexture(GL_TEXTURE_2D, shore_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, g_hf.nx, g_hf.ny, 0,
+                         GL_RG, GL_FLOAT, g_hf.data.data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                            GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                            GL_CLAMP_TO_EDGE);
+        }
+        // spawn on the island's grass instead of inside the terrain
+        const float spawn = ground_h(0.0f, 2.0f);
+        if (spawn > -900.0f) app.player.pos.y = spawn;
+    }
 
     // target cube (per-face shade for readability)
     const GLuint cube_prog = link_program(kCubeVS, kCubeFS);
@@ -2719,24 +2993,30 @@ int main(int argc, char** argv)
                     app.player.wants_draw = false;
                     shield_in_hand = true;
                 }
-                // only the grid is solid: step off the edge and you fall
+                // the island terrain is solid: walk the slopes, step off a
+                // cliff and you fall; the sea catches you at the skim height
                 {
-                    const bool on_grid =
-                        std::fabs(app.player.pos.x) <= kGroundHalf &&
-                        std::fabs(app.player.pos.z) <= kGroundHalf;
-                    if (!on_grid || app.player.pos.y > 0.0f) {
+                    const float gh =
+                        ground_h(app.player.pos.x, app.player.pos.z);
+                    const bool on_isle = gh > -900.0f;
+                    const float floor_y = on_isle ? gh : kWaterSkim;
+                    if (app.player.pos.y > floor_y + 0.05f) {
                         app.fall_vel -= 26.0f * static_cast<float>(kFixedDt);
                         app.player.pos.y +=
                             app.fall_vel * static_cast<float>(kFixedDt);
-                        if (on_grid && app.player.pos.y <= 0.0f) {
-                            app.player.pos.y = 0.0f;
+                        if (app.player.pos.y <= floor_y) {
+                            app.player.pos.y = floor_y;
                             app.fall_vel = 0.0f;
                         }
                     } else {
+                        // grounded: follow the terrain up and down slopes
+                        app.player.pos.y = floor_y;
                         app.fall_vel = 0.0f;
                     }
                     if (app.player.pos.y < -25.0f) {  // gone: back to the start
-                        app.player.pos = {0.0f, 0.0f, 2.0f};
+                        const float sy = ground_h(0.0f, 2.0f);
+                        app.player.pos = {0.0f, sy > -900.0f ? sy : 0.0f,
+                                          2.0f};
                         app.fall_vel = 0.0f;
                     }
                 }
@@ -2892,14 +3172,16 @@ int main(int argc, char** argv)
                     away.y = 0;
                     away = normalize(away);
                     const Vec3 land = app.player.pos + away * (2.0f * kBirdScale * kBirdReach);
-                    const Vec3 to{land.x, 0.0f, land.z};
+                    const float land_y = floor_at(land.x, land.z);
+                    const Vec3 to{land.x, land_y, land.z};
                     const Vec3 gap = to - app.bird_pos;
                     // slow up on final approach so touchdown isn't a faceplant
                     const float speed =
                         std::min(9.5f, 2.0f + std::sqrt(dot(gap, gap)) * 0.9f);
                     const float dist = fly_toward(to, speed);
-                    if (dist < 0.35f * kBirdScale * kBirdReach && app.bird_pos.y < 0.15f) {
-                        app.bird_pos.y = 0.0f;
+                    if (dist < 0.35f * kBirdScale * kBirdReach &&
+                        app.bird_pos.y < land_y + 0.15f) {
+                        app.bird_pos.y = land_y;
                         set_clip("Fold");
                         app.bird_state = Bird::FoldDown;
                     }
@@ -3098,9 +3380,11 @@ int main(int argc, char** argv)
                             app.riding = false;
                             const float cy = std::cos(app.bird_yaw);
                             const float sy = std::sin(app.bird_yaw);
-                            app.player.pos = {
-                                app.bird_pos.x + 1.35f * cy - 0.35f * sy, 0.0f,
-                                app.bird_pos.z - 1.35f * sy - 0.35f * cy};
+                            const float dx =
+                                app.bird_pos.x + 1.35f * cy - 0.35f * sy;
+                            const float dz =
+                                app.bird_pos.z - 1.35f * sy - 0.35f * cy;
+                            app.player.pos = {dx, floor_at(dx, dz), dz};
                             app.player.speed = 0.0f;
                             set_clip("Fold");
                             app.bird_state = Bird::FoldDown;
@@ -3117,12 +3401,16 @@ int main(int argc, char** argv)
                             std::max(-2.6f * dtb, std::min(2.6f * dtb, dy));
                         const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                        std::cos(app.bird_yaw)};
-                        app.bird_pos = app.bird_pos + fwd * (3.9f * dtb);
-                        // solid ground ends at the grid edge
-                        app.bird_pos.x =
-                            std::max(-19.0f, std::min(19.0f, app.bird_pos.x));
-                        app.bird_pos.z =
-                            std::max(-19.0f, std::min(19.0f, app.bird_pos.z));
+                        const Vec3 next = app.bird_pos + fwd * (3.9f * dtb);
+                        // taxi stays on the island: no walking off cliffs or
+                        // up walls -- reject steps with a big height change
+                        const float ngh = ground_h(next.x, next.z);
+                        if (ngh > -900.0f &&
+                            std::fabs(ngh - app.bird_pos.y) < 1.2f) {
+                            app.bird_pos.x = next.x;
+                            app.bird_pos.z = next.z;
+                            app.bird_pos.y = ngh;
+                        }
                         set_clip("RideRun");
                     } else {
                         set_clip("RideIdle");
@@ -3256,7 +3544,11 @@ int main(int argc, char** argv)
                         // straight into the soar (no flap hop between)
                         set_clip(app.twirl_t >= 0.0f ? "Soar" : "Flap");
                     }
-                    float speed = app.bird_pos.y < 1.5f ? 5.0f : 8.5f;  // flare
+                    float speed = app.bird_pos.y <
+                                          floor_at(app.bird_pos.x,
+                                                   app.bird_pos.z) + 1.5f
+                                      ? 5.0f
+                                      : 8.5f;  // flare near the ground
                     if (app.dive_freeze) {
                         speed = 0.0f;   // held mid-air for seat tuning
                     } else if (thrust) {
@@ -3292,26 +3584,26 @@ int main(int argc, char** argv)
                         !app.dive_freeze)
                         app.boost_speed =
                             SDL_min(26.0f, app.boost_speed + 24.0f * dtb);
-                    const bool over_grid =
-                        std::fabs(app.bird_pos.x) <= kGroundHalf &&
-                        std::fabs(app.bird_pos.z) <= kGroundHalf;
-                    // over the grid: normal floor (0 when diving to land --
-                    // or under thrust, so the glide can be ridden all the
-                    // way down to touchdown). The clamp only applies above
-                    // the plane so crossing back over the grid from below
-                    // never teleports.
-                    const float floor_y = (diving || thrust) ? 0.0f : 2.5f;
-                    if (over_grid && app.bird_pos.y > -0.5f &&
+                    const float gh =
+                        ground_h(app.bird_pos.x, app.bird_pos.z);
+                    const bool over_isle = gh > -900.0f;
+                    // over the island: normal floor is terrain + 2.5 (or the
+                    // terrain itself when diving to land -- or under thrust,
+                    // so the glide can be ridden all the way to touchdown).
+                    // The clamp only applies just above the ground so
+                    // crossing a cliff face from below never teleports.
+                    const float floor_y =
+                        (diving || thrust) ? gh : gh + 2.5f;
+                    if (over_isle && app.bird_pos.y > gh - 0.5f &&
                         app.bird_pos.y < floor_y)
                         app.bird_pos.y = floor_y;
-                    // the sea is solid to the bird: off the edge it can drop
-                    // no lower than a skim just above the wave crests
-                    constexpr float kWaterSkim = -2.7f;  // kWaterY + waves
+                    // the sea is solid to the bird: off the island it can
+                    // drop no lower than a skim just above the wave crests
                     if (app.bird_pos.y < kWaterSkim)
                         app.bird_pos.y = kWaterSkim;
                     if (app.bird_pos.y > 40.0f) app.bird_pos.y = 40.0f;
-                    if (app.bird_pos.y <= 0.01f && over_grid) {
-                        app.bird_pos.y = 0.0f;   // touchdown
+                    if (over_isle && app.bird_pos.y <= gh + 0.01f) {
+                        app.bird_pos.y = gh;     // touchdown
                         set_clip("RideIdle");
                         app.bird_state = Bird::RideGround;
                     }
@@ -3735,7 +4027,9 @@ int main(int argc, char** argv)
                             0.0f, std::min(1.0f, app.aim_w - tilt * 1.4f * dt_f));
                     // and the whole sky framing still fades with the bird's
                     // ALTITUDE so landings never snap
-                    float alt_t = (app.bird_pos.y - 1.2f) / 2.5f;
+                    float alt_t = (app.bird_pos.y -
+                                   floor_at(app.bird_pos.x, app.bird_pos.z) -
+                                   1.2f) / 2.5f;
                     alt_t = std::max(0.0f, std::min(1.0f, alt_t));
                     const float sky_t =
                         app.player.locked ? alt_t * app.aim_w : 0.0f;
@@ -3809,13 +4103,21 @@ int main(int argc, char** argv)
         last_viewproj = viewproj;
         have_viewproj = true;
 
-        glUseProgram(grid_prog);
-        glUniformMatrix4fv(g_viewproj, 1, GL_FALSE, viewproj.m);
         const Vec3 cam_eye = app.cam.eye();
         const float eye3[3] = {cam_eye.x, cam_eye.y, cam_eye.z};
-        glUniform3fv(g_eye, 1, eye3);
-        glBindVertexArray(grid_vao);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        if (island.index_count) {
+            glUseProgram(island_prog);
+            glUniformMatrix4fv(is_viewproj, 1, GL_FALSE, viewproj.m);
+            glUniform3fv(is_eye, 1, eye3);
+            const float off3[3] = {0.0f, kIslandY, 0.0f};
+            glUniform3fv(is_offset, 1, off3);
+            glUniform1i(is_tex, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, island.tex);
+            glBindVertexArray(island.vao);
+            glDrawElements(GL_TRIANGLES, island.index_count, GL_UNSIGNED_INT,
+                           nullptr);
+        }
 
         // wind waker sea below and around the test plane (opaque). The mesh
         // recenters on the camera each frame -- snapped to the vertex grid
@@ -3830,6 +4132,17 @@ int main(int argc, char** argv)
                 std::floor(cam_eye.x / kQuad) * kQuad,
                 std::floor(cam_eye.z / kQuad) * kQuad};
             glUniform2fv(wa_center, 1, center);
+        }
+        glUniform1f(wa_hasshore, shore_tex ? 1.0f : 0.0f);
+        if (shore_tex) {
+            glUniform1i(wa_shore, 1);
+            const float rect4[4] = {g_hf.x0, g_hf.y0,
+                                    1.0f / (g_hf.x1 - g_hf.x0),
+                                    1.0f / (g_hf.y1 - g_hf.y0)};
+            glUniform4fv(wa_shorerect, 1, rect4);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shore_tex);
+            glActiveTexture(GL_TEXTURE0);
         }
         glBindVertexArray(water_vao);
         glDrawElements(GL_TRIANGLES, water_indices, GL_UNSIGNED_INT, nullptr);
@@ -4119,8 +4432,10 @@ int main(int argc, char** argv)
                 if (aloft) {
                     const float sp = SDL_clamp(
                         (app.boost_speed - 6.0f) / 18.0f, 0.0f, 1.0f);
-                    const float alt =
-                        SDL_clamp(app.bird_pos.y / 12.0f, 0.0f, 1.0f);
+                    const float alt = SDL_clamp(
+                        (app.bird_pos.y -
+                         floor_at(app.bird_pos.x, app.bird_pos.z)) / 12.0f,
+                        0.0f, 1.0f);
                     want = 0.10f + 0.24f * sp + 0.08f * alt;
                 }
                 wind_gain += (want - wind_gain) *

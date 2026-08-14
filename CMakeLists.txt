@@ -52,7 +52,9 @@ foreach(pair
         "twirl2.wav|twirl2_wav"
         "twirl3.wav|twirl3_wav"
         "hud_font.ttf|hud_font"
-        "sheet_frame.png|sheet_frame_png")
+        "sheet_frame.png|sheet_frame_png"
+        "island.glb|island_glb"
+        "island_height.bin|island_height_bin")
     string(REPLACE "|" ";" pair "${pair}")
     list(GET pair 0 asset)
     list(GET pair 1 sym)

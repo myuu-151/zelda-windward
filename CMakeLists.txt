@@ -54,7 +54,8 @@ foreach(pair
         "hud_font.ttf|hud_font"
         "sheet_frame.png|sheet_frame_png"
         "island.glb|island_glb"
-        "island_height.bin|island_height_bin")
+        "island_height.bin|island_height_bin"
+        "props.glb|props_glb")
     string(REPLACE "|" ";" pair "${pair}")
     list(GET pair 0 asset)
     list(GET pair 1 sym)

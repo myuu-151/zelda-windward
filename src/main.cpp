@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -111,6 +113,8 @@ extern unsigned char g_island_glb[];
 extern unsigned long long g_island_glb_size;
 extern unsigned char g_island_height_bin[];
 extern unsigned long long g_island_height_bin_size;
+extern unsigned char g_props_glb[];
+extern unsigned long long g_props_glb_size;
 }
 #endif
 
@@ -189,15 +193,51 @@ Mat4 mat4_ortho(float l, float r, float b, float t, float n, float f)
     return m;
 }
 
-// --- static island mesh (glb) ----------------------------------------------
+// --- static world meshes (glb): the island and its props --------------------
 struct IslandMesh {
-    GLuint vao = 0, vbo = 0, ebo = 0, tex = 0;
+    struct Part {
+        uint32_t first_index = 0;
+        uint32_t index_count = 0;
+        GLuint tex = 0;
+        bool clip = false;       // alpha-cut (leaves, plants)
+        float tint[3] = {1, 1, 1};
+    };
+    GLuint vao = 0, vbo = 0, ebo = 0;
     GLsizei index_count = 0;
+    std::vector<Part> parts;
 
     bool load_parsed(cgltf_data* data)
     {
         std::vector<float> verts;  // pos3 nrm3 uv2
         std::vector<unsigned> idx;
+        std::map<const cgltf_image*, GLuint> tex_cache;
+        auto get_tex = [&](const cgltf_image* img) -> GLuint {
+            if (!img || !img->buffer_view) return 0;
+            auto it = tex_cache.find(img);
+            if (it != tex_cache.end()) return it->second;
+            const uint8_t* bytes =
+                static_cast<const uint8_t*>(img->buffer_view->buffer->data) +
+                img->buffer_view->offset;
+            int w = 0, h = 0, comp = 0;
+            stbi_uc* px = stbi_load_from_memory(
+                bytes, static_cast<int>(img->buffer_view->size), &w, &h,
+                &comp, 4);
+            GLuint t = 0;
+            if (px) {
+                glGenTextures(1, &t);
+                glBindTexture(GL_TEXTURE_2D, t);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, px);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                                GL_LINEAR_MIPMAP_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                                GL_LINEAR);
+                stbi_image_free(px);
+            }
+            tex_cache[img] = t;
+            return t;
+        };
         for (size_t mi = 0; mi < data->meshes_count; ++mi) {
             const cgltf_mesh& mesh = data->meshes[mi];
             for (size_t pi = 0; pi < mesh.primitives_count; ++pi) {
@@ -222,41 +262,40 @@ struct IslandMesh {
                     verts.insert(verts.end(), {p[0], p[1], p[2],
                                                n[0], n[1], n[2], t[0], t[1]});
                 }
+                Part part;
+                part.first_index = static_cast<uint32_t>(idx.size());
                 for (size_t k = 0; k < prim.indices->count; ++k)
                     idx.push_back(base + static_cast<unsigned>(
                                              cgltf_accessor_read_index(
                                                  prim.indices, k)));
-                // first textured material wins (the island has one)
-                if (!tex && prim.material &&
-                    prim.material->pbr_metallic_roughness.base_color_texture
-                        .texture) {
-                    const cgltf_image* img =
-                        prim.material->pbr_metallic_roughness
-                            .base_color_texture.texture->image;
-                    if (img && img->buffer_view) {
-                        const uint8_t* bytes =
-                            static_cast<const uint8_t*>(
-                                img->buffer_view->buffer->data) +
-                            img->buffer_view->offset;
-                        int w = 0, h = 0, comp = 0;
-                        stbi_uc* px = stbi_load_from_memory(
-                            bytes, static_cast<int>(img->buffer_view->size),
-                            &w, &h, &comp, 4);
-                        if (px) {
-                            glGenTextures(1, &tex);
-                            glBindTexture(GL_TEXTURE_2D, tex);
-                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                                         GL_RGBA, GL_UNSIGNED_BYTE, px);
-                            glGenerateMipmap(GL_TEXTURE_2D);
-                            glTexParameteri(GL_TEXTURE_2D,
-                                            GL_TEXTURE_MIN_FILTER,
-                                            GL_LINEAR_MIPMAP_LINEAR);
-                            glTexParameteri(GL_TEXTURE_2D,
-                                            GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                            stbi_image_free(px);
-                        }
-                    }
+                part.index_count =
+                    static_cast<uint32_t>(idx.size()) - part.first_index;
+                std::string mname;
+                if (prim.material) {
+                    if (prim.material->name) mname = prim.material->name;
+                    if (prim.material->pbr_metallic_roughness
+                            .base_color_texture.texture)
+                        part.tex = get_tex(
+                            prim.material->pbr_metallic_roughness
+                                .base_color_texture.texture->image);
                 }
+                for (char& ch : mname) ch = char(tolower(ch));
+                const bool leafy = mname.find("leaves") != std::string::npos ||
+                                   mname.find("folii") != std::string::npos ||
+                                   mname.find("foliage") != std::string::npos;
+                part.clip = leafy ||
+                            mname.find("plant") != std::string::npos ||
+                            mname.find("grass") != std::string::npos ||
+                            mname.find("flower") != std::string::npos ||
+                            mname.find("bush") != std::string::npos;
+                if (leafy) {
+                    // the pack's gradient leaf shading doesn't survive glTF:
+                    // the texture is greyscale, re-tinted here
+                    part.tint[0] = 0.47f;
+                    part.tint[1] = 0.73f;
+                    part.tint[2] = 0.10f;
+                }
+                parts.push_back(part);
             }
         }
         cgltf_free(data);
@@ -507,9 +546,25 @@ void main() {
 const char* kShadowVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
+layout(location=2) in vec2 aUV;
 uniform mat4 uLightVP;
 uniform vec3 uOffset;
-void main() { gl_Position = uLightVP * vec4(aPos + uOffset, 1.0); }
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    gl_Position = uLightVP * vec4(aPos + uOffset, 1.0);
+}
+)GLSL";
+
+// alpha-aware depth: leaf cards punch leafy holes in their shadows
+const char* kShadowClipFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform int uClip;
+void main() {
+    if (uClip == 1 && texture(uTex, vUV).a < 0.5) discard;
+}
 )GLSL";
 
 const char* kShadowSkinVS = R"GLSL(
@@ -799,6 +854,8 @@ out vec4 fragColor;
 uniform sampler2D uTex;
 uniform sampler2DShadow uShadow;
 uniform vec3 uEye;
+uniform vec3 uTint;
+uniform int uClip;
 
 float shadow_factor(vec4 sp) {
     vec3 c = sp.xyz * 0.5 + 0.5;
@@ -817,6 +874,8 @@ float shadow_factor(vec4 sp) {
 }
 
 void main() {
+    vec4 albedo = texture(uTex, vUV);
+    if (uClip == 1 && albedo.a < 0.5) discard;
     vec3 n = normalize(vNrm);
     // lit from the sky's visible sun, so the cast shadows agree with it
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
@@ -824,7 +883,7 @@ void main() {
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
     float sh = shadow_factor(vShadowPos);
     shade *= mix(0.58, 1.0, sh);
-    vec3 col = texture(uTex, vUV).rgb * shade;
+    vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
@@ -1764,13 +1823,17 @@ int main(int argc, char** argv)
     const GLint is_tex = glGetUniformLocation(island_prog, "uTex");
     const GLint is_lightvp = glGetUniformLocation(island_prog, "uLightVP");
     const GLint is_shadowmap = glGetUniformLocation(island_prog, "uShadow");
+    const GLint is_tint = glGetUniformLocation(island_prog, "uTint");
+    const GLint is_clip = glGetUniformLocation(island_prog, "uClip");
 
     // sun shadow map: depth-only pass from the sky's sun direction
-    const GLuint shadow_prog = link_program(kShadowVS, kShadowFS);
+    const GLuint shadow_prog = link_program(kShadowVS, kShadowClipFS);
     const GLuint shadow_skin_prog = link_program(kShadowSkinVS, kShadowFS);
     if (!shadow_prog || !shadow_skin_prog) return 1;
     const GLint sh_lightvp = glGetUniformLocation(shadow_prog, "uLightVP");
     const GLint sh_offset = glGetUniformLocation(shadow_prog, "uOffset");
+    const GLint sh_tex = glGetUniformLocation(shadow_prog, "uTex");
+    const GLint sh_clip = glGetUniformLocation(shadow_prog, "uClip");
     const GLint shs_lightvp = glGetUniformLocation(shadow_skin_prog, "uLightVP");
     const GLint shs_model = glGetUniformLocation(shadow_skin_prog, "uModel");
     const GLint shs_palette = glGetUniformLocation(shadow_skin_prog, "uPalette");
@@ -1928,11 +1991,14 @@ int main(int argc, char** argv)
     // the test island: mesh replaces the old white plane, its baked
     // heightfield is the collision + the water's foam-ring shore field
     IslandMesh island;
+    IslandMesh props;   // trees etc, placed in the island's blender space
     GLuint shore_tex = 0;
     {
 #ifdef EMBED_LINK_GLB
         const bool mesh_ok = island.load_memory(
             g_island_glb, static_cast<size_t>(g_island_glb_size));
+        props.load_memory(g_props_glb,
+                          static_cast<size_t>(g_props_glb_size));
         const bool hf_ok = g_hf.load_bytes(
             g_island_height_bin, static_cast<size_t>(g_island_height_bin_size));
 #else
@@ -1940,6 +2006,8 @@ int main(int argc, char** argv)
         const bool mesh_ok =
             island.load((base + "..\\..\\assets\\island.glb").c_str()) ||
             island.load("assets/island.glb");
+        if (!props.load((base + "..\\..\\assets\\props.glb").c_str()))
+            props.load("assets/props.glb");   // optional: fine if missing
         bool hf_ok = false;
         for (const std::string p : {base + "..\\..\\assets\\island_height.bin",
                                     std::string("assets/island_height.bin")}) {
@@ -4348,14 +4416,27 @@ int main(int argc, char** argv)
             glEnable(GL_DEPTH_TEST);
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(2.0f, 4.0f);
-            if (island.index_count) {
+            if (island.index_count || props.index_count) {
                 glUseProgram(shadow_prog);
                 glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, light_vp.m);
                 const float off3[3] = {0.0f, kIslandY, 0.0f};
                 glUniform3fv(sh_offset, 1, off3);
-                glBindVertexArray(island.vao);
-                glDrawElements(GL_TRIANGLES, island.index_count,
-                               GL_UNSIGNED_INT, nullptr);
+                glUniform1i(sh_tex, 0);
+                glActiveTexture(GL_TEXTURE0);
+                for (const IslandMesh* m : {&island, &props}) {
+                    if (!m->index_count) continue;
+                    glBindVertexArray(m->vao);
+                    for (const IslandMesh::Part& part : m->parts) {
+                        glUniform1i(sh_clip, part.clip ? 1 : 0);
+                        glBindTexture(GL_TEXTURE_2D, part.tex);
+                        glDrawElements(
+                            GL_TRIANGLES,
+                            static_cast<GLsizei>(part.index_count),
+                            GL_UNSIGNED_INT,
+                            reinterpret_cast<void*>(part.first_index *
+                                                    sizeof(uint32_t)));
+                    }
+                }
             }
             glUseProgram(shadow_skin_prog);
             glUniformMatrix4fv(shs_lightvp, 1, GL_FALSE, light_vp.m);
@@ -4433,7 +4514,7 @@ int main(int argc, char** argv)
 
         const Vec3 cam_eye = app.cam.eye();
         const float eye3[3] = {cam_eye.x, cam_eye.y, cam_eye.z};
-        if (island.index_count) {
+        if (island.index_count || props.index_count) {
             glUseProgram(island_prog);
             glUniformMatrix4fv(is_viewproj, 1, GL_FALSE, viewproj.m);
             glUniformMatrix4fv(is_lightvp, 1, GL_FALSE, light_vp.m);
@@ -4443,10 +4524,23 @@ int main(int argc, char** argv)
             glUniform1i(is_tex, 0);
             glUniform1i(is_shadowmap, 2);
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, island.tex);
-            glBindVertexArray(island.vao);
-            glDrawElements(GL_TRIANGLES, island.index_count, GL_UNSIGNED_INT,
-                           nullptr);
+            glDisable(GL_CULL_FACE);   // leaf cards read from both sides
+            for (const IslandMesh* m : {&island, &props}) {
+                if (!m->index_count) continue;
+                glBindVertexArray(m->vao);
+                for (const IslandMesh::Part& part : m->parts) {
+                    glUniform1i(is_clip, part.clip ? 1 : 0);
+                    glUniform3fv(is_tint, 1, part.tint);
+                    glBindTexture(GL_TEXTURE_2D, part.tex);
+                    glDrawElements(
+                        GL_TRIANGLES,
+                        static_cast<GLsizei>(part.index_count),
+                        GL_UNSIGNED_INT,
+                        reinterpret_cast<void*>(part.first_index *
+                                                sizeof(uint32_t)));
+                }
+            }
+            glBindVertexArray(0);
         }
 
         // wind waker sea below and around the test plane (opaque). The mesh

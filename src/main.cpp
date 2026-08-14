@@ -2242,9 +2242,12 @@ int main(int argc, char** argv)
         // around the player
         const float ang = wrand() * 6.2831853f;
         const float rad = wrand() * 30.0f;
-        w.origin = {std::cos(ang) * rad, 0.9f + wrand() * 2.6f, std::sin(ang) * rad};
-        // fixed world wind: everything blows toward -X ("left")
-        w.fwd = {-1.0f, 0.0f, 0.0f};
+        // up in the open sky: the island (and its tree) now owns the old
+        // low band, so streaks ride well above the terrain
+        w.origin = {std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
+                    std::sin(ang) * rad};
+        // fixed world wind, matching the sky's cloud drift and the tree sway
+        w.fwd = normalize({-1.0f, 0.0f, -0.35f});
         w.side = normalize(cross(w.fwd, Vec3{0, 1, 0}));
         w.len = 26.0f + wrand() * 14.0f;
         w.amp = 0.16f + wrand() * 0.14f;

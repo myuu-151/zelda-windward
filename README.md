@@ -34,12 +34,15 @@ no debug keys, everything baked in.
 | shift | guard on foot · boost in flight (+S stoops, +W climbs) |
 | J | attack |
 | I | flute — `1`–`8` play the octave, hold ↑/↓ for sharps and flats |
-| arrows / drag LMB | orbit the camera, wheel zooms |
+| arrow keys | orbit the camera |
 | esc | quit |
 
 Play the Song of Skies (`1 5 8 6 5 3`) and the loftwing comes down.
 Guarding with a target in view locks the camera onto it. Flight speed is
 real momentum — it builds diving, bleeds climbing, and drags off slowly.
+
+Mounted, space launches only while you're **moving** — press it standing
+still and you hop back off instead.
 
 Gamepad: left stick moves, A rolls, X attacks, RB guards. **Switch
 controller support coming soon.**

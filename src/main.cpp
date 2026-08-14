@@ -2598,19 +2598,18 @@ int main(int argc, char** argv)
                         if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_WEST) app.key_attack = true;
                     }
                     break;
+                // the mouse is viewer-mode only: in game the camera is
+                // arrow-key driven and attacking is J, so LMB-attack and
+                // wheel-zoom stay out of the way
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                    // viewer mode keeps mouse orbit; in game the camera is
-                    // arrow-key driven only
                     if (ev.button.button == SDL_BUTTON_RIGHT && app.viewer_mode)
                         app.dragging = true;
-                    if (ev.button.button == SDL_BUTTON_LEFT && !app.viewer_mode)
-                        app.key_attack = true;
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_UP:
                     if (ev.button.button == SDL_BUTTON_RIGHT) app.dragging = false;
                     break;
                 case SDL_EVENT_MOUSE_MOTION:
-                    if (app.dragging) {
+                    if (app.dragging && app.viewer_mode) {
                         app.cam.yaw -= ev.motion.xrel * 0.008f;
                         app.cam.pitch += ev.motion.yrel * 0.006f;
                         if (app.cam.pitch > 1.4f) app.cam.pitch = 1.4f;
@@ -2618,9 +2617,11 @@ int main(int argc, char** argv)
                     }
                     break;
                 case SDL_EVENT_MOUSE_WHEEL:
-                    app.cam.distance -= ev.wheel.y * 0.3f;
-                    if (app.cam.distance < 1.2f) app.cam.distance = 1.2f;
-                    if (app.cam.distance > 12.0f) app.cam.distance = 12.0f;
+                    if (app.viewer_mode) {
+                        app.cam.distance -= ev.wheel.y * 0.3f;
+                        if (app.cam.distance < 1.2f) app.cam.distance = 1.2f;
+                        if (app.cam.distance > 12.0f) app.cam.distance = 12.0f;
+                    }
                     break;
                 default:
                     break;

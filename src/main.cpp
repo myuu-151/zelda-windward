@@ -588,8 +588,7 @@ uniform sampler2D uScene;
 uniform sampler2D uBloom;
 void main() {
     vec3 c = texture(uScene, vUV).rgb;
-    c += texture(uBloom, vUV).rgb * 0.50;   // sky + ocean glow
-    c *= 1.04;                              // brightness lift
+    c *= 1.04;                   // brightness lift
     fragColor = vec4(min(c, vec3(1.0)), 1.0);
 }
 )GLSL";
@@ -1803,22 +1802,15 @@ int main(int argc, char** argv)
             SDL_Log("shadow fbo incomplete");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
-    // post-processing programs + lazily-sized render targets
-    const GLuint bright_prog = link_program(kPostVS, kBrightFS);
-    const GLuint blur_prog = link_program(kPostVS, kBlurFS);
+    // post-processing program + lazily-sized scene target
     const GLuint composite_prog = link_program(kPostVS, kCompositeFS);
-    if (!bright_prog || !blur_prog || !composite_prog) return 1;
-    const GLint br_tex = glGetUniformLocation(bright_prog, "uTex");
-    const GLint bl_tex = glGetUniformLocation(blur_prog, "uTex");
-    const GLint bl_dir = glGetUniformLocation(blur_prog, "uDir");
+    if (!composite_prog) return 1;
     const GLint cp_scene = glGetUniformLocation(composite_prog, "uScene");
-    const GLint cp_bloom = glGetUniformLocation(composite_prog, "uBloom");
     struct RenderTarget {
         GLuint fbo = 0, color = 0, depth = 0;
         int w = 0, h = 0;
     };
-    RenderTarget scene_rt, glow_rt, bloom_a, bloom_b;
-    bool ocean_bloom = true;   // "/" toggles it for quick comparison
+    RenderTarget scene_rt;
     auto make_target = [](RenderTarget& rt, int w, int h, bool with_depth,
                           GLuint share_depth = 0) -> bool {
         if (rt.w == w && rt.h == h) return false;
@@ -2912,10 +2904,6 @@ int main(int argc, char** argv)
                     if (ev.key.key == SDLK_F1 && !ev.key.repeat) {
                         app.viewer_mode = !app.viewer_mode;
                         set_title(app, 0);
-                    }
-                    if (ev.key.key == SDLK_SLASH && !ev.key.repeat) {
-                        ocean_bloom = !ocean_bloom;
-                        SDL_Log("ocean bloom: %s", ocean_bloom ? "ON" : "off");
                     }
 #endif
                     if (!ev.key.repeat && !app.viewer_mode) {
@@ -4418,11 +4406,7 @@ int main(int argc, char** argv)
 
         int fb_w = 0, fb_h = 0;
         SDL_GetWindowSizeInPixels(app.window, &fb_w, &fb_h);
-        if (make_target(scene_rt, fb_w, fb_h, true))
-            glow_rt.w = 0;   // scene depth changed: rebuild the glow target
-        make_target(glow_rt, fb_w, fb_h, false, scene_rt.depth);
-        make_target(bloom_a, fb_w / 2, fb_h / 2, false);
-        make_target(bloom_b, fb_w / 2, fb_h / 2, false);
+        make_target(scene_rt, fb_w, fb_h, true);
         // the world draws offscreen; the bloom composite writes the screen
         glBindFramebuffer(GL_FRAMEBUFFER, scene_rt.fbo);
         glViewport(0, 0, fb_w, fb_h);
@@ -4750,64 +4734,16 @@ int main(int argc, char** argv)
             glDisable(GL_BLEND);
         }
 
-        // --- glow source: the ocean only, tested against the scene's
-        // depth so the island and characters mask their own silhouettes
-        if (ocean_bloom) {
-            glBindFramebuffer(GL_FRAMEBUFFER, glow_rt.fbo);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);   // depth is the scene's, keep it
-            glDepthMask(GL_FALSE);
-            glDepthFunc(GL_LEQUAL);
-            // water re-uses this frame's uniforms (program state persists)
-            glUseProgram(water_prog);
-            glBindVertexArray(water_vao);
-            glDrawElements(GL_TRIANGLES, water_indices, GL_UNSIGNED_INT,
-                           nullptr);
-            glBindVertexArray(0);
-            glDepthMask(GL_TRUE);
-            glDepthFunc(GL_LESS);
-        }
-
-        // --- post: bright pass -> separable blur -> bloom composite -------
+        // --- post: composite the scene to the screen (brightness lift only)
         {
             glDisable(GL_DEPTH_TEST);
             glBindVertexArray(sky_vao);   // attribute-less fullscreen tri
-            glActiveTexture(GL_TEXTURE0);
-
-            glBindFramebuffer(GL_FRAMEBUFFER, bloom_a.fbo);
-            glViewport(0, 0, bloom_a.w, bloom_a.h);
-            if (ocean_bloom) {
-                glUseProgram(bright_prog);
-                glUniform1i(br_tex, 0);
-                glBindTexture(GL_TEXTURE_2D, glow_rt.color);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
-
-                glUseProgram(blur_prog);
-                glUniform1i(bl_tex, 0);
-                const float th[2] = {1.0f / bloom_a.w, 0.0f};
-                const float tv[2] = {0.0f, 1.0f / bloom_a.h};
-                glBindFramebuffer(GL_FRAMEBUFFER, bloom_b.fbo);
-                glUniform2fv(bl_dir, 1, th);
-                glBindTexture(GL_TEXTURE_2D, bloom_a.color);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
-                glBindFramebuffer(GL_FRAMEBUFFER, bloom_a.fbo);
-                glUniform2fv(bl_dir, 1, tv);
-                glBindTexture(GL_TEXTURE_2D, bloom_b.color);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
-            } else {
-                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // no glow this frame
-                glClear(GL_COLOR_BUFFER_BIT);
-            }
-
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, fb_w, fb_h);
             glUseProgram(composite_prog);
             glUniform1i(cp_scene, 0);
-            glUniform1i(cp_bloom, 1);
-            glBindTexture(GL_TEXTURE_2D, scene_rt.color);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, bloom_a.color);
             glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, scene_rt.color);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glBindVertexArray(0);
             glEnable(GL_DEPTH_TEST);

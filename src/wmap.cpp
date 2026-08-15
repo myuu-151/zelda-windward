@@ -663,7 +663,12 @@ static bool load_wmap(const std::string& path)
                            ri.tr[1] * gScale, ri.tr[2] * gScale + gCenter[1],
                            ri.tr[3], ri.tr[4] * gScale });
     }
-    SDL_Log("wmap: %s (%d props)", path.c_str(), (int)gProps.size());
+    SDL_Log("wmap: %s -- %d prop instances from %d saved, library %d meshes",
+            path.c_str(), (int)gProps.size(), (int)raw.size(),
+            (int)gMeshes.size());
+    if (!raw.empty() && gProps.empty())
+        SDL_Log("wmap: no prop ids matched, first saved id was '%s'",
+                raw[0].id.c_str());
     return true;
 }
 
@@ -920,6 +925,11 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
             else if (mapPath.empty() &&
                      sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3) {
                 mapPath = p;
+                // tolerate CRLF and stray trailing spaces in the path
+                while (!mapPath.empty() &&
+                       (mapPath.back() == '\r' || mapPath.back() == '\n' ||
+                        mapPath.back() == ' ' || mapPath.back() == '\t'))
+                    mapPath.pop_back();
                 cellX = x;
                 cellY = y;
             }
@@ -937,6 +947,7 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 gAssetsDir = (d / "terrain" / "assets").string();
                 break;
             }
+
             if (d.parent_path() == d)
                 break;
             d = d.parent_path();
@@ -948,16 +959,19 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
         return false;
     }
     SDL_Log("wmap: assets at %s", gAssetsDir.c_str());
-    load_styles();
-    scan_props();
-    if (!load_wmap(mapPath))
-        return false;
+    // world placement must be known before the island loads: prop
+    // instances are baked into world space as they are read
     gTune.waterline = waterline;
     gYOff = waterSkim - waterline * gScale;
-    // quadrant -> world position, chart centered on the origin
     const float quad = TER_HALF * 2.0f * 2.5f;   // island + open sea
     gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * quad;
     gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * quad;
+    load_styles();
+    scan_props();
+    if (!load_wmap(mapPath)) {
+        SDL_Log("wmap: could not open island '%s'", mapPath.c_str());
+        return false;
+    }
 
     // heightfield for the client: heights (pre-offset, minus kIslandY) and
     // signed shore distance via a two-pass chamfer transform
@@ -1051,6 +1065,13 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
             float dens = (1.0f - mask_at(gKill, x, z) / 255.0f) *
                          gTune.bladeDensity;
             if (fmodf(seed * 9.77f, 1.0f) >= dens)
+                continue;
+            // no blades on cliff faces (the editor culls by slope too)
+            const float e = 0.4f;
+            float hx = height_at(x + e, z) - height_at(x - e, z);
+            float hz = height_at(x, z + e) - height_at(x, z - e);
+            float ny = 2.0f * e / sqrtf(hx * hx + 4.0f * e * e + hz * hz);
+            if (1.0f - ny > 0.20f + fmodf(seed * 4.77f, 1.0f) * 0.08f)
                 continue;
             gBlades.push_back({ x + gCenter[0], height_at(x, z) + gYOff,
                                 z + gCenter[1], rot, seed });
@@ -1255,8 +1276,21 @@ void wmap_init_gl()
     }
 
     // prop meshes used by instances
-    for (const PropInst& pi : gProps)
-        load_prop_mesh(gMeshes[pi.mesh]);
+    int okMeshes = 0, badMeshes = 0;
+    for (const PropInst& pi : gProps) {
+        PropMesh& pm = gMeshes[pi.mesh];
+        if (pm.loaded)
+            continue;
+        if (load_prop_mesh(pm))
+            okMeshes++;
+        else {
+            badMeshes++;
+            if (badMeshes == 1)
+                SDL_Log("wmap: prop mesh failed to load: '%s'",
+                        pm.id.c_str());
+        }
+    }
+    SDL_Log("wmap: prop meshes loaded %d, failed %d", okMeshes, badMeshes);
 
     // shift prop instance Y by yOff once
     for (PropInst& pi : gProps)

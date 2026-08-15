@@ -2044,14 +2044,19 @@ int main(int argc, char** argv)
         return true;
     };
 
-    // static light frustum covering the island; direction = the sky's sun
-    const Mat4 light_vp = [] {
+    // sun frustum, direction = the sky's sun. It follows the player (snapped
+    // to a coarse grid so shadow texels don't shimmer as he walks), which
+    // keeps islands anywhere on the world chart inside the map.
+    auto make_light_vp = [](Vec3 focus) {
         const Vec3 sun_dir = normalize({0.45f, 0.35f, -0.60f});
-        const Vec3 center{0.0f, 0.0f, 0.0f};
+        constexpr float kSnap = 4.0f;
+        const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
+                          std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
             mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
         return mat4_ortho(-48.0f, 48.0f, -48.0f, 48.0f, 20.0f, 180.0f) * view;
-    }();
+    };
+    Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 
     const GLuint sky_prog = link_program(kSkyVS, kSkyFS);
     if (!sky_prog) return 1;
@@ -3204,12 +3209,19 @@ int main(int argc, char** argv)
                         set_title(app, 0);
                     }
 #endif
-                    // '#' (and '3' on layouts without it) toggles a compass
-                    // arrow pointing at the loaded editor island
+                    // Z toggles a compass arrow pointing at the loaded
+                    // editor island
                     if (!ev.key.repeat && wmap_active() &&
-                        (ev.key.key == SDLK_HASH ||
-                         ev.key.key == SDLK_BACKSLASH))
+                        ev.key.scancode == SDL_SCANCODE_Z) {
                         show_island_arrow = !show_island_arrow;
+                        float ix = 0, iz = 0;
+                        wmap_island_center(&ix, &iz);
+                        const float dx = ix - app.player.pos.x;
+                        const float dz = iz - app.player.pos.z;
+                        SDL_Log("island compass %s (island %.0f m away)",
+                                show_island_arrow ? "on" : "off",
+                                std::sqrt(dx * dx + dz * dz));
+                    }
                     if (!ev.key.repeat && !app.viewer_mode) {
                         const bool* ks = SDL_GetKeyboardState(nullptr);
                         const bool guarding_now =
@@ -4671,6 +4683,7 @@ int main(int argc, char** argv)
 
         // render
         // ---- sun shadow pass: island + Link + loftwing into the depth map
+        light_vp = make_light_vp(app.player.pos);
         {
             glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
             glViewport(0, 0, kShadowRes, kShadowRes);

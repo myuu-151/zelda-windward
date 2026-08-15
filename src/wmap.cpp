@@ -977,70 +977,76 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
 
     // heightfield for the client: heights (pre-offset, minus kIslandY) and
     // signed shore distance via a two-pass chamfer transform
-    // the client's heightfield rect is in blender-ish coords (by = -z)
-    gOut.x0 = gCenter[0] - TER_HALF; gOut.x1 = gCenter[0] + TER_HALF;
-    gOut.y0 = -gCenter[1] - TER_HALF; gOut.y1 = -gCenter[1] + TER_HALF;
-    gOut.nx = HN;
-    gOut.ny = HN;
-    gOut.data.assign((size_t)HN * HN * 2, 0.0f);
-    const float cell = 2.0f * TER_HALF / (HN - 1);
-    std::vector<float> dist((size_t)HN * HN, 1e9f);
-    std::vector<char> land((size_t)HN * HN, 0);
-    for (int j = 0; j < HN; j++)
-        for (int i = 0; i < HN; i++) {
+    // Pad the field with open water around the island: the foam ring
+    // breathes several units outward from the shore, and without room to
+    // spread it gets clipped to the island's own rect.
+    const float PAD = 28.0f;
+    const float HALF = TER_HALF + PAD;
+    const int PN = 321;
+    gOut.x0 = gCenter[0] - HALF; gOut.x1 = gCenter[0] + HALF;
+    gOut.y0 = -gCenter[1] - HALF; gOut.y1 = -gCenter[1] + HALF;
+    gOut.nx = PN;
+    gOut.ny = PN;
+    gOut.data.assign((size_t)PN * PN * 2, 0.0f);
+    const float cell = 2.0f * HALF / (PN - 1);
+    std::vector<float> dist((size_t)PN * PN, 1e9f);
+    std::vector<char> land((size_t)PN * PN, 0);
+    for (int j = 0; j < PN; j++)
+        for (int i = 0; i < PN; i++) {
             // heightfield by = -z: row j maps to by, so sample z = -by
-            float by = -TER_HALF + cell * j;
-            float x = -TER_HALF + cell * i;
-            float h = height_at(x, -by) + gYOff;
-            gOut.data[((size_t)j * HN + i) * 2] = h - islandYConst;
-            bool isLand = (i > 0 && i < HN - 1 && j > 0 && j < HN - 1) &&
-                          h > waterSkim - 0.4f;
-            land[(size_t)j * HN + i] = isLand;
-            dist[(size_t)j * HN + i] = isLand ? 1e9f : 0.0f;
+            float by = -HALF + cell * j;
+            float x = -HALF + cell * i;
+            bool inside = fabsf(x) <= TER_HALF && fabsf(by) <= TER_HALF;
+            float h = inside ? height_at(x, -by) + gYOff : -100.0f;
+            gOut.data[((size_t)j * PN + i) * 2] = h - islandYConst;
+            bool isLand = inside && h > waterSkim - 0.4f;
+            land[(size_t)j * PN + i] = isLand;
+            dist[(size_t)j * PN + i] = isLand ? 1e9f : 0.0f;
         }
+    const int HN2 = PN;   // the loops below walk the padded grid
     // chamfer passes give distance-to-water; sign: + on water side
     auto relax = [&](int i, int j, int di, int dj, float w) {
-        int a = j * HN + i, b = (j + dj) * HN + (i + di);
+        int a = j * PN + i, b = (j + dj) * PN + (i + di);
         dist[a] = SDL_min(dist[a], dist[b] + w);
     };
-    for (int j = 0; j < HN; j++)
-        for (int i = 0; i < HN; i++) {
+    for (int j = 0; j < PN; j++)
+        for (int i = 0; i < PN; i++) {
             if (i > 0) relax(i, j, -1, 0, cell);
             if (j > 0) relax(i, j, 0, -1, cell);
             if (i > 0 && j > 0) relax(i, j, -1, -1, cell * 1.414f);
         }
-    for (int j = HN - 1; j >= 0; j--)
-        for (int i = HN - 1; i >= 0; i--) {
-            if (i < HN - 1) relax(i, j, 1, 0, cell);
-            if (j < HN - 1) relax(i, j, 0, 1, cell);
-            if (i < HN - 1 && j < HN - 1) relax(i, j, 1, 1, cell * 1.414f);
+    for (int j = PN - 1; j >= 0; j--)
+        for (int i = PN - 1; i >= 0; i--) {
+            if (i < PN - 1) relax(i, j, 1, 0, cell);
+            if (j < PN - 1) relax(i, j, 0, 1, cell);
+            if (i < PN - 1 && j < PN - 1) relax(i, j, 1, 1, cell * 1.414f);
         }
     // water-side positive distances (distance to land) via mirrored pass
-    std::vector<float> dist2((size_t)HN * HN);
+    std::vector<float> dist2((size_t)PN * PN);
     for (size_t k = 0; k < dist2.size(); k++)
         dist2[k] = land[k] ? 0.0f : 1e9f;
     {
         auto relax2 = [&](int i, int j, int di, int dj, float w) {
-            int a = j * HN + i, b = (j + dj) * HN + (i + di);
+            int a = j * PN + i, b = (j + dj) * PN + (i + di);
             dist2[a] = SDL_min(dist2[a], dist2[b] + w);
         };
-        for (int j = 0; j < HN; j++)
-            for (int i = 0; i < HN; i++) {
+        for (int j = 0; j < PN; j++)
+            for (int i = 0; i < PN; i++) {
                 if (i > 0) relax2(i, j, -1, 0, cell);
                 if (j > 0) relax2(i, j, 0, -1, cell);
                 if (i > 0 && j > 0) relax2(i, j, -1, -1, cell * 1.414f);
             }
-        for (int j = HN - 1; j >= 0; j--)
-            for (int i = HN - 1; i >= 0; i--) {
-                if (i < HN - 1) relax2(i, j, 1, 0, cell);
-                if (j < HN - 1) relax2(i, j, 0, 1, cell);
-                if (i < HN - 1 && j < HN - 1)
+        for (int j = PN - 1; j >= 0; j--)
+            for (int i = PN - 1; i >= 0; i--) {
+                if (i < PN - 1) relax2(i, j, 1, 0, cell);
+                if (j < PN - 1) relax2(i, j, 0, 1, cell);
+                if (i < PN - 1 && j < PN - 1)
                     relax2(i, j, 1, 1, cell * 1.414f);
             }
     }
-    for (int j = 0; j < HN; j++)
-        for (int i = 0; i < HN; i++) {
-            size_t k = (size_t)j * HN + i;
+    for (int j = 0; j < PN; j++)
+        for (int i = 0; i < PN; i++) {
+            size_t k = (size_t)j * PN + i;
             gOut.data[k * 2 + 1] = land[k] ? -dist[k] : dist2[k];
             if (!land[k])
                 gOut.data[k * 2] = -100.0f;   // open water marker

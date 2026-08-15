@@ -2062,8 +2062,8 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 200.0f, center, {0, 1, 0});
-        return mat4_ortho(-150.0f, 150.0f, -150.0f, 150.0f, 20.0f, 420.0f) *
+            mat4_look_at(center + sun_dir * 150.0f, center, {0, 1, 0});
+        return mat4_ortho(-110.0f, 110.0f, -110.0f, 110.0f, 20.0f, 320.0f) *
                view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
@@ -4699,8 +4699,11 @@ int main(int argc, char** argv)
             glViewport(0, 0, kShadowRes, kShadowRes);
             glClear(GL_DEPTH_BUFFER_BIT);
             glEnable(GL_DEPTH_TEST);
+            // gentle: a wide sun frustum means coarse texels, and a heavy
+            // slope-scaled offset there pushes casters so far back their
+            // shadows vanish entirely
             glEnable(GL_POLYGON_OFFSET_FILL);
-            glPolygonOffset(2.0f, 4.0f);
+            glPolygonOffset(1.0f, 1.0f);
             if (wmap_active())
                 wmap_draw_shadow(light_vp);
             if ((island.index_count || props.index_count) && !wmap_active()) {

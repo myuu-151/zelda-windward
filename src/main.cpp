@@ -2062,9 +2062,8 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 150.0f, center, {0, 1, 0});
-        return mat4_ortho(-110.0f, 110.0f, -110.0f, 110.0f, 20.0f, 320.0f) *
-               view;
+            mat4_look_at(center + sun_dir * 140.0f, center, {0, 1, 0});
+        return mat4_ortho(-95.0f, 95.0f, -95.0f, 95.0f, 20.0f, 300.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 
@@ -4697,8 +4696,13 @@ int main(int argc, char** argv)
         {
             glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
             glViewport(0, 0, kShadowRes, kShadowRes);
-            glClear(GL_DEPTH_BUFFER_BIT);
+            // depth writes must be on or the clear is a no-op and the map
+            // keeps last frame's depths -- with a light frustum that moves
+            // with the player, stale depths slide the shadow around
             glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glClear(GL_DEPTH_BUFFER_BIT);
             // gentle: a wide sun frustum means coarse texels, and a heavy
             // slope-scaled offset there pushes casters so far back their
             // shadows vanish entirely

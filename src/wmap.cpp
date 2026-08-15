@@ -1484,4 +1484,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gBladeCount);
     }
     glBindVertexArray(0);
+    // the client keeps the shadow map on unit 2 for the whole frame (the
+    // sea samples it there); our material binds trampled it
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, shadowTex);
+    glActiveTexture(GL_TEXTURE0);
 }

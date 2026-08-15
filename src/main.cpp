@@ -988,7 +988,10 @@ float shadow_factor(vec4 sp) {
     s += texture(uShadow, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
     s += texture(uShadow, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
     s += texture(uShadow, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
-    return s * 0.25;
+    // ease out at the map border so its edge is never a visible line
+    vec2 e = min(c.xy, 1.0 - c.xy);
+    float fade = smoothstep(0.0, 0.06, min(e.x, e.y));
+    return mix(1.0, s * 0.25, fade);
 }
 
 void main() {
@@ -1156,7 +1159,10 @@ float shadow_factor(vec4 sp) {
     s += texture(uShadowMap, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
     s += texture(uShadowMap, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
     s += texture(uShadowMap, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
-    return s * 0.25;
+    // ease out at the map border so its edge is never a visible line
+    vec2 e = min(c.xy, 1.0 - c.xy);
+    float fade = smoothstep(0.0, 0.06, min(e.x, e.y));
+    return mix(1.0, s * 0.25, fade);
 }
 
 const vec3 WATER_COL  = vec3(0.04, 0.38, 0.88);
@@ -2047,14 +2053,18 @@ int main(int argc, char** argv)
     // sun frustum, direction = the sky's sun. It follows the player (snapped
     // to a coarse grid so shadow texels don't shimmer as he walks), which
     // keeps islands anywhere on the world chart inside the map.
+    // wide enough to hold a whole 96-unit editor island plus the sea it
+    // casts onto -- a tight box clipped the island shadow into a hard
+    // rectangle on the water
     auto make_light_vp = [](Vec3 focus) {
         const Vec3 sun_dir = normalize({0.45f, 0.35f, -0.60f});
-        constexpr float kSnap = 4.0f;
+        constexpr float kSnap = 8.0f;
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
-        return mat4_ortho(-48.0f, 48.0f, -48.0f, 48.0f, 20.0f, 180.0f) * view;
+            mat4_look_at(center + sun_dir * 200.0f, center, {0, 1, 0});
+        return mat4_ortho(-150.0f, 150.0f, -150.0f, 150.0f, 20.0f, 420.0f) *
+               view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 

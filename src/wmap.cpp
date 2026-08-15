@@ -117,7 +117,9 @@ float shadow_factor(vec4 sp) {
     s += texture(uShadow, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
     s += texture(uShadow, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
     s += texture(uShadow, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
-    return s * 0.25;
+    vec2 e = min(c.xy, 1.0 - c.xy);
+    float fade = smoothstep(0.0, 0.06, min(e.x, e.y));
+    return mix(1.0, s * 0.25, fade);
 }
 )GLSL";
 

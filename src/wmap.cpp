@@ -1,0 +1,1445 @@
+// .wworld / .wmap loading + rendering for the windward client.
+// Geometry and map content come from the editor export; lighting is the
+// client's own: its sun direction, its 4096 depth-compare shadow map, its
+// horizon haze, so islands sit in the world like everything else.
+#include "wmap.h"
+
+#include <SDL3/SDL.h>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+
+// ---------------------------------------------------------------- data
+
+static const int   HN = 257;        // heightmap samples per side
+static const int   MASK_N = 512;    // splat mask resolution
+// editor terrain is 48 units across; scale it up so an island reads at
+// the client's world scale (override with "scale <s>" in the .wworld)
+static float gScale = 2.0f;
+static float TER_HALF = 24.0f * 2.0f;
+static const int   GRASS_N = 320;   // blade candidates per side
+static const int   AO_N = 1024;
+
+static bool gActive = false;
+static WmapHeights gOut;
+static std::string gAssetsDir;      // <root>/terrain/assets
+
+static std::vector<float> gHeights(HN* HN, 0.0f);   // raw editor heights
+static std::vector<Uint8> gMask(MASK_N* MASK_N, 0);
+static std::vector<Uint8> gMask2(MASK_N* MASK_N, 0);
+static std::vector<Uint8> gKill(MASK_N* MASK_N, 255);
+static float gYOff = 0.0f;          // editor Y -> world Y
+static float gCenter[2] = { 0.0f, 0.0f };   // island center in world xz
+
+// the slice of the editor's tune blob the map content needs
+struct Tune {
+    float bladeDensity = 0.8f;
+    float edgeBreak = 0.5f;
+    float waterline = -3.0f;
+    float grassDensity = 1.0f;      // unused here (baked in kill mask)
+    float groundAO = 0.0f;
+    float aoRadius = 2.5f;
+    float islandDepth = 0.0f;
+    float islandFrill = 0.0f;
+    float islandBulge = 0.0f;
+};
+static Tune gTune;
+
+struct PropMat {
+    GLuint tex = 0;
+    bool gray = false;
+    float kd[3] = { 1, 1, 1 };
+    float ka[3] = { 1, 1, 1 };
+    std::string name, texName;
+};
+struct PropSub {
+    int first = 0, count = 0, mat = 0;
+};
+struct PropMesh {
+    std::string id;                 // "category/label"
+    GLuint vao = 0, vbo = 0;
+    std::vector<PropSub> subs;
+    std::vector<PropMat> mats;
+    float boundH = 1.0f;
+    bool loaded = false;
+};
+struct PropInst {
+    int mesh;
+    float x, y, z, yaw, scale;
+};
+static std::vector<PropMesh> gMeshes;
+static std::vector<PropInst> gProps;
+
+struct StyleOv {
+    std::string tex;
+    float kd[3], ka[3];
+};
+static std::unordered_map<std::string, StyleOv> gStyles;
+
+struct BladeInst {
+    float x, y, z, rot, seed;
+};
+static std::vector<BladeInst> gBlades;
+
+// GL objects
+static GLuint gTerProg = 0, gTerVao = 0, gTerVbo = 0, gTerIbo = 0;
+static GLsizei gTerIdx = 0;
+static GLuint gMaskTex = 0, gMask2Tex = 0;
+static GLuint gGrassTex = 0, gDirtTex = 0, gDirt2Tex = 0, gCliffTex = 0;
+static GLuint gAOTex = 0;
+static GLuint gGrassProg = 0, gGrassVao = 0;
+static GLsizei gBladeCount = 0;
+static GLuint gPropProg = 0, gSkirtProg = 0;
+static GLuint gSkirtVao = 0;
+static GLsizei gSkirtIdx = 0;
+static GLuint gDepthProg = 0, gDepthPropProg = 0;
+
+// ---------------------------------------------------------------- shaders
+// lighting mirrors the client's island shader: same sun, same wrap-toon
+// shade curve, same shadow compare + haze
+
+static const char* kShadowFn = R"GLSL(
+uniform sampler2DShadow uShadow;
+float shadow_factor(vec4 sp) {
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
+        c.z > 1.0)
+        return 1.0;
+    float z = c.z - 0.0007;
+    float s = 0.0;
+    vec2 t = vec2(1.0 / 4096.0);
+    s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2( 0.5, -0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2(-0.5,  0.5) * t, z));
+    s += texture(uShadow, vec3(c.xy + vec2( 0.5,  0.5) * t, z));
+    return s * 0.25;
+}
+)GLSL";
+
+static std::string terFS()
+{
+    std::string s = R"GLSL(#version 330 core
+in vec3 vWorld;
+in vec3 vNrm;
+in vec4 vShadowPos;
+out vec4 fragColor;
+uniform sampler2D uMask;
+uniform sampler2D uMask2;
+uniform sampler2D uGrassTex;
+uniform sampler2D uDirtTex;
+uniform sampler2D uDirt2Tex;
+uniform sampler2D uCliffTex;
+uniform sampler2D uAOMap;
+uniform vec3 uEye;
+uniform vec2 uCenter;
+uniform float uHalf;
+uniform float uEdgeBreak;
+uniform float uGrassAO;
+uniform float uGrassAORad;
+uniform float uScale;
+)GLSL";
+    s += kShadowFn;
+    s += R"GLSL(
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x),
+               mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+    for (int i = 0; i < 4; i++) { v += a * vnoise(p); p = rot * p * 2.03; a *= 0.5; }
+    return v;
+}
+void main() {
+    // sample textures in EDITOR space so scaling the island doesn't
+    // stretch the painted materials
+    vec2 lxz = (vWorld.xz - uCenter) / uScale;
+    vec2 maskUv = (lxz + vec2(24.0)) / 48.0;
+    float m = texture(uMask, maskUv).r;
+    float m2 = texture(uMask2, maskUv).r;
+
+    vec3 grass = texture(uGrassTex, lxz * 0.16).rgb;
+    float tintN = fbm(lxz * 0.10);
+    grass *= mix(vec3(0.92, 0.96, 0.80), vec3(1.06, 1.05, 0.95), tintN);
+
+    vec3 dirtA = texture(uDirtTex, lxz * 0.20).rgb;
+    vec3 dirtB = texture(uDirtTex, lxz.yx * 0.083 + 0.37).rgb;
+    vec3 dirt = mix(dirtA, dirtB, 0.45);
+    dirt *= mix(vec3(0.86, 0.80, 0.68), vec3(1.08, 1.03, 0.92),
+                fbm(lxz * 0.21));
+    vec3 soft = texture(uDirt2Tex, lxz * 0.15).rgb;
+    soft *= mix(vec3(0.96, 0.94, 0.88), vec3(1.05, 1.03, 0.98),
+                fbm(lxz * 0.17 + 5.1));
+
+    float n = fbm(lxz * 1.1) - 0.5;
+    float amp = uEdgeBreak * 0.8;
+    float band = 0.03 + uEdgeBreak * 0.25;
+    float edge = smoothstep(0.5 - band, 0.5 + band, m + n * amp);
+    float edge2 = smoothstep(0.5 - band, 0.5 + band, m2 + n * amp);
+    vec3 col = mix(grass, dirt, edge);
+    col = mix(col, soft, edge2);
+    col *= (1.0 - 0.13 * edge * (1.0 - edge) * 4.0) *
+           (1.0 - 0.05 * edge2 * (1.0 - edge2) * 4.0);
+
+    vec3 nrm = normalize(vNrm);
+    float slope = 1.0 - nrm.y;
+    vec3 cliffX = texture(uCliffTex, vec2(lxz.y, vWorld.y / uScale) * 0.14).rgb;
+    vec3 cliffZ = texture(uCliffTex, vec2(lxz.x, vWorld.y / uScale) * 0.14).rgb;
+    float wx = abs(nrm.x) / max(abs(nrm.x) + abs(nrm.z), 1e-4);
+    vec3 cliff = mix(cliffZ, cliffX, wx);
+    float cliffM = smoothstep(0.22, 0.42, slope + (fbm(lxz * 1.7) - 0.5) * 0.18);
+    col = mix(col, cliff, cliffM);
+
+    float open = textureLod(uAOMap, maskUv, uGrassAORad).r;
+    col *= 1.0 - uGrassAO * (1.0 - open) * (1.0 - cliffM);
+
+    // client toon light + shadow + haze
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    float nl = clamp(dot(nrm, L) * 0.5 + 0.5, 0.0, 1.0);
+    float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
+    shade *= mix(0.58, 1.0, shadow_factor(vShadowPos));
+    col *= shade;
+    float d = length(vWorld - uEye);
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    fragColor = vec4(col, 1.0);
+}
+)GLSL";
+    return s;
+}
+
+static const char* kTerVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+uniform mat4 uViewProj;
+uniform mat4 uLightVP;
+out vec3 vWorld;
+out vec3 vNrm;
+out vec4 vShadowPos;
+void main() {
+    vWorld = aPos;
+    vNrm = aNrm;
+    vShadowPos = uLightVP * vec4(aPos, 1.0);
+    gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kGrassVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aBlade;   // x -1..1, y 0..1, plane 0/1
+layout(location=1) in vec3 aRoot;    // world root
+layout(location=2) in vec2 aRS;      // rot, seed
+uniform mat4 uViewProj;
+uniform mat4 uLightVP;
+uniform float uTime;
+uniform sampler2DShadow uShadow;
+uniform float uScale;
+out float vV;
+out vec2 vLxz;
+out float vSeed;
+out float vShadow;
+uniform vec2 uCenter;
+void main() {
+    float planeRot = aRS.x + aBlade.z * 1.5707963;
+    vec2 dir = vec2(cos(planeRot), sin(planeRot));
+    float hgt = (0.28 + fract(aRS.y * 3.17) * 0.30) * uScale;
+    float wid = (0.035 + fract(aRS.y * 5.71) * 0.02) * uScale;
+    vec3 p = aRoot;
+    p.xz += dir * aBlade.x * wid * (1.0 - aBlade.y * 0.7);
+    p.y  += aBlade.y * hgt;
+    float phase = dot(aRoot.xz, vec2(0.8, 0.6)) * 0.7 + uTime * 1.8;
+    float gust  = sin(phase) * 0.5 + sin(phase * 0.37 + 1.7) * 0.5;
+    float sway  = (gust * 0.10 + sin(uTime * 3.1 + aRS.y * 6.28) * 0.03)
+                  * aBlade.y * aBlade.y;
+    p.xz += vec2(0.85, 0.53) * sway;
+
+    // one shadow probe per blade at the root, via the client shadow map
+    vec4 sp = uLightVP * vec4(aRoot, 1.0);
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    vShadow = 1.0;
+    if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
+        c.z < 1.0)
+        vShadow = mix(0.58, 1.0, texture(uShadow, vec3(c.xy, c.z - 0.0012)));
+
+    vV = aBlade.y;
+    vLxz = (aRoot.xz - uCenter) / uScale;
+    vSeed = fract(aRS.y * 11.13);
+    gl_Position = uViewProj * vec4(p, 1.0);
+}
+)GLSL";
+
+static const char* kGrassFS = R"GLSL(#version 330 core
+in float vV;
+in vec2 vLxz;
+in float vSeed;
+in float vShadow;
+out vec4 fragColor;
+uniform sampler2D uGrassTex;
+void main() {
+    vec3 groundCol = textureLod(uGrassTex, vLxz * 0.16, 4.5).rgb;
+    vec3 root = groundCol * 0.55;
+    vec3 tip  = groundCol * (1.15 + vSeed * 0.15);
+    vec3 col = mix(root, tip, vV * vV) * vShadow;
+    fragColor = vec4(col, 1.0);
+}
+)GLSL";
+
+static std::string propFS()
+{
+    std::string s = R"GLSL(#version 330 core
+in vec3 vNrm;
+in vec2 vUv;
+in float vLocalY;
+in vec3 vWorld;
+in vec3 vVCol;
+in vec4 vShadowPos;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform vec3 uKd;
+uniform vec3 uKa;
+uniform vec3 uEye;
+uniform float uBoundH;
+uniform int uHasTex;
+uniform int uGrayMask;
+)GLSL";
+    s += kShadowFn;
+    s += R"GLSL(
+void main() {
+    vec4 t = uHasTex == 1 ? texture(uTex, vUv) : vec4(1.0);
+    if (uHasTex == 1) {
+        if (uGrayMask == 1) {
+            if (t.r < 0.35 && t.a > 0.99) discard;
+        }
+        if (t.a < 0.5) discard;
+    }
+    vec3 grad = mix(uKa, uKd, clamp(vLocalY / max(uBoundH, 0.001), 0.0, 1.0));
+    vec3 col = uGrayMask == 1 ? grad * (0.55 + 0.9 * t.r) : t.rgb;
+    col *= vVCol;
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    vec3 n = normalize(vNrm);
+    float sf = shadow_factor(vShadowPos);
+    if (uGrayMask == 1) {
+        float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
+        col *= (0.42 + 0.62 * wrap) * mix(0.60, 1.0, sf);
+    } else {
+        float diff = max(dot(n, L), 0.0);
+        diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
+        diff *= mix(1.0, sf, 0.85);
+        col *= 0.68 + 0.42 * diff;
+    }
+    float d = length(vWorld - uEye);
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    fragColor = vec4(col, 1.0);
+}
+)GLSL";
+    return s;
+}
+
+static const char* kPropVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNorm;
+layout(location=2) in vec2 aUv;
+layout(location=3) in vec3 aVCol;
+uniform mat4 uViewProj;
+uniform mat4 uLightVP;
+uniform mat4 uModel;
+out vec3 vNrm;
+out vec2 vUv;
+out float vLocalY;
+out vec3 vWorld;
+out vec3 vVCol;
+out vec4 vShadowPos;
+void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vNrm = mat3(uModel) * aNorm;
+    vUv = aUv;
+    vLocalY = aPos.y;
+    vWorld = world.xyz;
+    vVCol = aVCol;
+    vShadowPos = uLightVP * world;
+    gl_Position = uViewProj * world;
+}
+)GLSL";
+
+static const char* kSkirtVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aData;    // x, z (editor local), t
+uniform mat4 uViewProj;
+uniform vec2 uCenter;
+uniform float uYOff;
+uniform sampler2D uHeight;
+uniform float uHalf;
+uniform float uDepth;
+uniform float uFrill;
+uniform float uBulge;
+uniform float uScale;
+out vec3 vWorld;
+out vec3 vNrm;
+out float vT;
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x),
+               mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+void main() {
+    vec2 xz = aData.xy;
+    float t = aData.z;
+    vec3 pos;
+    if (t < 0.5) {
+        vec2 uv = (xz + vec2(24.0)) / 48.0;
+        pos = vec3(xz.x * uScale,
+                   texture(uHeight, uv).r * uScale + uYOff, xz.y * uScale);
+    } else if (t < 1.5) {
+        float nn = vnoise(xz * 0.35);
+        float f1 = vnoise(xz * 0.45 + 11.0) - 0.5;
+        float f2 = vnoise(xz * 1.3 + 7.0) - 0.5;
+        float taper = mix(0.82, 1.30, uBulge) + (f1 * 0.5 + f2 * 0.2) * uFrill;
+        pos = vec3(xz.x * taper * uScale,
+                   uYOff - uDepth * uScale *
+                       (0.55 + 0.5 * nn + f2 * 0.5 * uFrill),
+                   xz.y * taper * uScale);
+    } else {
+        pos = vec3(0.0, uYOff - uDepth * uScale * 1.25, 0.0);
+    }
+    pos.xz += uCenter;
+    vWorld = pos;
+    vNrm = normalize(vec3(xz.x, uDepth * 0.02 + 6.0, xz.y));
+    if (t > 1.5) vNrm = vec3(0.0, -1.0, 0.0);
+    vT = min(t, 1.5);
+    gl_Position = uViewProj * vec4(pos, 1.0);
+}
+)GLSL";
+
+static const char* kSkirtFS = R"GLSL(#version 330 core
+in vec3 vWorld;
+in vec3 vNrm;
+in float vT;
+out vec4 fragColor;
+uniform sampler2D uCliffTex;
+uniform vec3 uEye;
+void main() {
+    vec3 n = normalize(vNrm);
+    vec3 cx = texture(uCliffTex, vWorld.zy * 0.10).rgb;
+    vec3 cz = texture(uCliffTex, vWorld.xy * 0.10).rgb;
+    float wx = abs(n.x) / max(abs(n.x) + abs(n.z), 1e-4);
+    vec3 col = mix(cz, cx, wx);
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    float diff = max(dot(n, L), 0.0);
+    col *= 0.62 + 0.38 * diff;
+    col *= mix(1.0, 0.45, vT / 1.5);
+    float d = length(vWorld - uEye);
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    fragColor = vec4(col, 1.0);
+}
+)GLSL";
+
+static const char* kDepthVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightVP;
+void main() { gl_Position = uLightVP * vec4(aPos, 1.0); }
+)GLSL";
+static const char* kDepthFS = R"GLSL(#version 330 core
+void main() {}
+)GLSL";
+static const char* kDepthPropVS = R"GLSL(#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=2) in vec2 aUv;
+uniform mat4 uLightVP;
+uniform mat4 uModel;
+out vec2 vUv;
+void main() { vUv = aUv; gl_Position = uLightVP * uModel * vec4(aPos, 1.0); }
+)GLSL";
+static const char* kDepthPropFS = R"GLSL(#version 330 core
+in vec2 vUv;
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform int uGrayMask;
+void main() {
+    if (uHasTex == 1) {
+        vec4 t = texture(uTex, vUv);
+        if (uGrayMask == 1) { if (t.r < 0.35 && t.a > 0.99) discard; }
+        if (t.a < 0.5) discard;
+    }
+}
+)GLSL";
+
+// ---------------------------------------------------------------- helpers
+
+static GLuint compile_prog(const char* vs, const char* fs)
+{
+    auto sh = [](GLenum type, const char* src) {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[2048];
+            glGetShaderInfoLog(s, sizeof log, nullptr, log);
+            SDL_Log("wmap shader error:\n%s", log);
+        }
+        return s;
+    };
+    GLuint p = glCreateProgram();
+    GLuint v = sh(GL_VERTEX_SHADER, vs), f = sh(GL_FRAGMENT_SHADER, fs);
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok)
+        SDL_Log("wmap link failed");
+    glDeleteShader(v);
+    glDeleteShader(f);
+    return p;
+}
+
+static GLuint tex_from_bmp(const std::string& path, bool* gray = nullptr,
+                           bool repeat = true)
+{
+    SDL_Surface* raw = SDL_LoadBMP(path.c_str());
+    if (!raw)
+        return 0;
+    SDL_Surface* s = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(raw);
+    if (!s)
+        return 0;
+    if (gray) {
+        bool g = true;
+        const Uint8* px = (const Uint8*)s->pixels;
+        for (int y = 0; y < s->h && g; y += SDL_max(1, s->h / 32))
+            for (int x = 0; x < s->w && g; x += SDL_max(1, s->w / 32)) {
+                const Uint8* p = px + y * s->pitch + x * 4;
+                if (abs(p[0] - p[1]) > 10 || abs(p[1] - p[2]) > 10)
+                    g = false;
+            }
+        *gray = g;
+    }
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, s->w, s->h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, s->pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                    repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                    repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    SDL_DestroySurface(s);
+    return t;
+}
+
+// x,z in WORLD units; returns the editor height scaled to world
+static float height_at(float x, float z)
+{
+    float u = (x / gScale + 24.0f) / 48.0f * (HN - 1);
+    float v = (z / gScale + 24.0f) / 48.0f * (HN - 1);
+    int i = SDL_clamp((int)u, 0, HN - 2);
+    int j = SDL_clamp((int)v, 0, HN - 2);
+    float fu = SDL_clamp(u - i, 0.0f, 1.0f);
+    float fv = SDL_clamp(v - j, 0.0f, 1.0f);
+    float a = gHeights[j * HN + i], b = gHeights[j * HN + i + 1];
+    float c = gHeights[(j + 1) * HN + i], d = gHeights[(j + 1) * HN + i + 1];
+    float h = (a * (1 - fu) + b * fu) * (1 - fv) +
+              (c * (1 - fu) + d * fu) * fv;
+    return h * gScale;
+}
+
+// x,z in WORLD units
+static Uint8 mask_at(const std::vector<Uint8>& m, float x, float z)
+{
+    int i = SDL_clamp((int)((x / gScale + 24.0f) / 48.0f * MASK_N), 0,
+                      MASK_N - 1);
+    int j = SDL_clamp((int)((z / gScale + 24.0f) / 48.0f * MASK_N), 0,
+                      MASK_N - 1);
+    return m[j * MASK_N + i];
+}
+
+// ---------------------------------------------------------------- loading
+
+static bool load_wmap(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    char magic[8];
+    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "TERMAP0", 7) != 0) {
+        fclose(f);
+        return false;
+    }
+    fread(gHeights.data(), sizeof(float), gHeights.size(), f);
+    fread(gMask.data(), 1, gMask.size(), f);
+    fread(gKill.data(), 1, gKill.size(), f);
+    if (magic[7] >= '3')
+        fread(gMask2.data(), 1, gMask2.size(), f);
+    struct RawInst {
+        std::string id;
+        float tr[5];
+    };
+    std::vector<RawInst> raw;
+    if (magic[7] >= '4') {
+        Uint32 n = 0;
+        if (fread(&n, 4, 1, f) == 1) {
+            for (Uint32 i = 0; i < n; i++) {
+                Uint16 len = 0;
+                if (fread(&len, 2, 1, f) != 1)
+                    break;
+                std::string id(len, '\0');
+                fread(id.data(), 1, len, f);
+                RawInst ri;
+                ri.id = id;
+                if (fread(ri.tr, sizeof(float), 5, f) != 5)
+                    break;
+                raw.push_back(ri);
+            }
+        }
+    }
+    // v5 settings + tune blob: pull only map-content fields
+    float blade = 0.8f, edgeB = 0.5f, cam[5];
+    if (magic[7] >= '5') {
+        if (fread(&blade, 4, 1, f) == 1 && fread(&edgeB, 4, 1, f) == 1 &&
+            fread(cam, 4, 5, f) == 5) {
+            gTune.bladeDensity = blade;
+            gTune.edgeBreak = edgeB;
+        }
+        if (magic[7] >= '7') {
+            Uint32 tsz = 0;
+            if (fread(&tsz, 4, 1, f) == 1 && tsz >= 4) {
+                std::vector<Uint8> blob(tsz);
+                if (fread(blob.data(), 1, tsz, f) == tsz) {
+                    // editor TuneBlob layout (floats then ints; see editor)
+                    const float* fb = (const float*)blob.data();
+                    // [0..11] radius,strength,paintTarget,falloff,
+                    // grassDensity,terrace,propScale,propScaleRand,
+                    // propDensity,propSpacing,propYawFixed,uiScale
+                    size_t nf = tsz / 4;
+                    auto get = [&](size_t idx, float def) {
+                        return idx < nf ? fb[idx] : def;
+                    };
+                    // TuneBlob layout: floats 0..11, ints 12..21,
+                    // floats 22..25, propSelId 26..49 (96 bytes),
+                    // islandDepth 50, waterline 51, showWater 52,
+                    // islandFrill 53, islandBulge 54
+                    gTune.grassDensity = get(4, 1.0f);
+                    gTune.groundAO = get(23, 0.0f);
+                    gTune.aoRadius = get(24, 2.5f);
+                    gTune.islandDepth = get(50, 0.0f);
+                    gTune.waterline = get(51, -3.0f);
+                    gTune.islandFrill = get(53, 0.0f);
+                    gTune.islandBulge = get(54, 0.0f);
+                }
+            }
+        }
+    }
+    fclose(f);
+
+    // resolve prop mesh ids -> library indices
+    std::unordered_map<std::string, int> byId;
+    for (int i = 0; i < (int)gMeshes.size(); i++)
+        byId[gMeshes[i].id] = i;
+    for (const RawInst& ri : raw) {
+        auto it = byId.find(ri.id);
+        if (it == byId.end())
+            continue;
+        gProps.push_back({ it->second, ri.tr[0] * gScale + gCenter[0],
+                           ri.tr[1] * gScale, ri.tr[2] * gScale + gCenter[1],
+                           ri.tr[3], ri.tr[4] * gScale });
+    }
+    SDL_Log("wmap: %s (%d props)", path.c_str(), (int)gProps.size());
+    return true;
+}
+
+static void load_styles()
+{
+    FILE* f = fopen((gAssetsDir + "/props/styles.txt").c_str(), "rb");
+    if (!f)
+        return;
+    char line[512], key[256], tex[256];
+    while (fgets(line, sizeof line, f)) {
+        StyleOv s{};
+        if (sscanf(line, "style %255s %255s %f %f %f %f %f %f", key, tex,
+                   &s.kd[0], &s.kd[1], &s.kd[2],
+                   &s.ka[0], &s.ka[1], &s.ka[2]) == 8) {
+            s.tex = tex;
+            gStyles[key] = s;
+        }
+    }
+    fclose(f);
+}
+
+static void scan_props()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::string dir = gAssetsDir + "/props";
+    std::vector<std::string> cats;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.is_directory() && e.path().filename() != "textures")
+            cats.push_back(e.path().filename().string());
+    std::sort(cats.begin(), cats.end());
+    for (const std::string& c : cats) {
+        std::vector<fs::path> objs;
+        for (const auto& e : fs::directory_iterator(dir + "/" + c, ec))
+            if (e.path().extension() == ".obj")
+                objs.push_back(e.path());
+        std::sort(objs.begin(), objs.end());
+        for (const auto& p : objs) {
+            PropMesh m;
+            m.id = c + "/" + p.stem().string();
+            gMeshes.push_back(m);
+        }
+    }
+}
+
+static int mat_role(const std::string& name)
+{
+    std::string l;
+    for (char c : name)
+        l += (char)tolower((unsigned char)c);
+    if (l.find("leaf") != std::string::npos ||
+        l.find("leaves") != std::string::npos ||
+        l.find("foliage") != std::string::npos ||
+        l.find("frond") != std::string::npos ||
+        l.find("needle") != std::string::npos ||
+        l.find("petal") != std::string::npos)
+        return 1;
+    if (l.find("bark") != std::string::npos ||
+        l.find("trunk") != std::string::npos ||
+        l.find("stem") != std::string::npos ||
+        l.find("branch") != std::string::npos ||
+        l.find("wood") != std::string::npos ||
+        l.find("root") != std::string::npos)
+        return 0;
+    return 2;
+}
+static const char* kRoles[3] = { "Trunk", "Leaves", "Other" };
+
+static std::unordered_map<std::string, std::pair<GLuint, bool>> gTexCache;
+static std::pair<GLuint, bool> prop_texture(const std::string& file)
+{
+    auto it = gTexCache.find(file);
+    if (it != gTexCache.end())
+        return it->second;
+    bool gray = false;
+    GLuint t = tex_from_bmp(gAssetsDir + "/props/" + file, &gray);
+    gTexCache[file] = { t, gray };
+    return { t, gray };
+}
+
+static bool load_prop_mesh(PropMesh& m)
+{
+    if (m.loaded)
+        return true;
+    size_t slash = m.id.find('/');
+    std::string path = gAssetsDir + "/props/" + m.id.substr(0, slash) + "/" +
+                       m.id.substr(slash + 1) + ".obj";
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::vector<float> vs, ns, ts, vcs, data;
+    std::unordered_map<std::string, int> matIndex;
+    int curMat = 0;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        float a, b, c, r, g, bl;
+        char name[256];
+        int vn = sscanf(line, "v %f %f %f %f %f %f", &a, &b, &c, &r, &g, &bl);
+        if (line[0] == 'v' && line[1] == ' ' && vn >= 3) {
+            vs.insert(vs.end(), { a, b, c });
+            if (vn == 6)
+                vcs.insert(vcs.end(), { r, g, bl });
+            else
+                vcs.insert(vcs.end(), { 1, 1, 1 });
+        } else if (sscanf(line, "vn %f %f %f", &a, &b, &c) == 3) {
+            ns.insert(ns.end(), { a, b, c });
+        } else if (sscanf(line, "vt %f %f", &a, &b) == 2) {
+            ts.insert(ts.end(), { a, b });
+        } else if (sscanf(line, "mtllib %255s", name) == 1) {
+            std::string dir = path.substr(0, path.find_last_of("/\\") + 1);
+            FILE* mf = fopen((dir + name).c_str(), "rb");
+            if (mf) {
+                char ml[512], mn[256];
+                float mr, mg, mb;
+                while (fgets(ml, sizeof ml, mf)) {
+                    if (sscanf(ml, "newmtl %255s", mn) == 1) {
+                        matIndex[mn] = (int)m.mats.size();
+                        m.mats.push_back({});
+                        m.mats.back().name = mn;
+                    } else if (!m.mats.empty() &&
+                               sscanf(ml, "Kd %f %f %f", &mr, &mg, &mb) == 3) {
+                        m.mats.back().kd[0] = mr;
+                        m.mats.back().kd[1] = mg;
+                        m.mats.back().kd[2] = mb;
+                    } else if (!m.mats.empty() &&
+                               sscanf(ml, "Ka %f %f %f", &mr, &mg, &mb) == 3) {
+                        m.mats.back().ka[0] = mr;
+                        m.mats.back().ka[1] = mg;
+                        m.mats.back().ka[2] = mb;
+                    } else if (!m.mats.empty() &&
+                               sscanf(ml, "map_Kd %255s", mn) == 1) {
+                        auto pt = prop_texture(mn);
+                        m.mats.back().tex = pt.first;
+                        m.mats.back().gray = pt.second;
+                        m.mats.back().texName = mn;
+                    }
+                }
+                fclose(mf);
+            }
+        } else if (sscanf(line, "usemtl %255s", name) == 1) {
+            auto it = matIndex.find(name);
+            curMat = it != matIndex.end() ? it->second : 0;
+            if (m.subs.empty() || m.subs.back().count > 0)
+                m.subs.push_back({ (int)(data.size() / 11), 0, curMat });
+            else
+                m.subs.back().mat = curMat;
+        } else if (line[0] == 'f' && line[1] == ' ') {
+            int vi[3];
+            if (sscanf(line, "f %d/%*d/%*d %d/%*d/%*d %d/%*d/%*d",
+                       &vi[0], &vi[1], &vi[2]) == 3) {
+                if (m.subs.empty())
+                    m.subs.push_back({ 0, 0, 0 });
+                for (int k = 0; k < 3; k++) {
+                    int i = vi[k] - 1;
+                    data.insert(data.end(),
+                                { vs[i * 3], vs[i * 3 + 1], vs[i * 3 + 2] });
+                    if ((size_t)(i * 3 + 2) < ns.size())
+                        data.insert(data.end(),
+                                    { ns[i * 3], ns[i * 3 + 1], ns[i * 3 + 2] });
+                    else
+                        data.insert(data.end(), { 0, 1, 0 });
+                    if ((size_t)(i * 2 + 1) < ts.size())
+                        data.insert(data.end(), { ts[i * 2], ts[i * 2 + 1] });
+                    else
+                        data.insert(data.end(), { 0, 0 });
+                    data.insert(data.end(),
+                                { vcs[i * 3], vcs[i * 3 + 1], vcs[i * 3 + 2] });
+                    m.boundH = SDL_max(m.boundH, vs[i * 3 + 1]);
+                }
+                m.subs.back().count += 3;
+            }
+        }
+    }
+    fclose(f);
+    if (data.empty())
+        return false;
+    if (m.mats.empty())
+        m.mats.push_back({});
+    // style presets
+    for (PropMat& mat : m.mats) {
+        auto it = gStyles.find(m.id + "|" + kRoles[mat_role(mat.name)]);
+        if (it == gStyles.end())
+            continue;
+        memcpy(mat.kd, it->second.kd, sizeof mat.kd);
+        memcpy(mat.ka, it->second.ka, sizeof mat.ka);
+        if (!it->second.tex.empty() && it->second.tex != "-") {
+            auto pt = prop_texture("textures/" + it->second.tex);
+            if (pt.first) {
+                mat.tex = pt.first;
+                mat.gray = pt.second;
+            }
+        }
+    }
+    glGenVertexArrays(1, &m.vao);
+    glGenBuffers(1, &m.vbo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(),
+                 GL_STATIC_DRAW);
+    for (int a = 0; a < 4; a++)
+        glEnableVertexAttribArray(a);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 44, (void*)0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 44, (void*)12);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 44, (void*)24);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 44, (void*)32);
+    glBindVertexArray(0);
+    m.loaded = true;
+    return true;
+}
+
+// ---------------------------------------------------------------- public
+
+bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
+{
+    // find a .wworld near the exe (build dirs sit under the repo)
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::string worldPath, rootDir;
+    fs::path dir = exeBase;
+    for (int up = 0; up < 6 && worldPath.empty(); up++) {
+        for (const auto& e : fs::directory_iterator(dir, ec))
+            if (e.path().extension() == ".wworld") {
+                worldPath = e.path().string();
+                rootDir = dir.string();
+                break;
+            }
+        dir = dir.parent_path();
+        if (dir.empty())
+            break;
+    }
+    if (worldPath.empty())
+        return false;
+
+    // parse the chart: take the first assigned island, note its quadrant
+    std::string mapPath;
+    float waterline = -3.0f;
+    int chartSize = 7, cellX = 0, cellY = 0;
+    {
+        FILE* f = fopen(worldPath.c_str(), "rb");
+        if (!f)
+            return false;
+        char line[1200], p[1024];
+        int x, y, n;
+        float wl;
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "waterline %f", &wl) == 1)
+                waterline = wl;
+            else if (sscanf(line, "size %d", &n) == 1)
+                chartSize = n;
+            else if (sscanf(line, "scale %f", &wl) == 1) {
+                gScale = SDL_max(0.1f, wl);
+                TER_HALF = 24.0f * gScale;
+            }
+            else if (mapPath.empty() &&
+                     sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3) {
+                mapPath = p;
+                cellX = x;
+                cellY = y;
+            }
+        }
+        fclose(f);
+    }
+    if (mapPath.empty())
+        return false;
+
+    // the editor's asset library: search up from the world file's dir
+    {
+        fs::path d = rootDir;
+        for (int up = 0; up < 6; up++) {
+            if (fs::exists(d / "terrain" / "assets" / "grass.bmp", ec)) {
+                gAssetsDir = (d / "terrain" / "assets").string();
+                break;
+            }
+            if (d.parent_path() == d)
+                break;
+            d = d.parent_path();
+        }
+    }
+    if (gAssetsDir.empty()) {
+        SDL_Log("wmap: could not find terrain/assets near %s",
+                rootDir.c_str());
+        return false;
+    }
+    SDL_Log("wmap: assets at %s", gAssetsDir.c_str());
+    load_styles();
+    scan_props();
+    if (!load_wmap(mapPath))
+        return false;
+    gTune.waterline = waterline;
+    gYOff = waterSkim - waterline * gScale;
+    // quadrant -> world position, chart centered on the origin
+    const float quad = TER_HALF * 2.0f * 2.5f;   // island + open sea
+    gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * quad;
+    gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * quad;
+
+    // heightfield for the client: heights (pre-offset, minus kIslandY) and
+    // signed shore distance via a two-pass chamfer transform
+    // the client's heightfield rect is in blender-ish coords (by = -z)
+    gOut.x0 = gCenter[0] - TER_HALF; gOut.x1 = gCenter[0] + TER_HALF;
+    gOut.y0 = -gCenter[1] - TER_HALF; gOut.y1 = -gCenter[1] + TER_HALF;
+    gOut.nx = HN;
+    gOut.ny = HN;
+    gOut.data.assign((size_t)HN * HN * 2, 0.0f);
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    std::vector<float> dist((size_t)HN * HN, 1e9f);
+    std::vector<char> land((size_t)HN * HN, 0);
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            // heightfield by = -z: row j maps to by, so sample z = -by
+            float by = -TER_HALF + cell * j;
+            float x = -TER_HALF + cell * i;
+            float h = height_at(x, -by) + gYOff;
+            gOut.data[((size_t)j * HN + i) * 2] = h - islandYConst;
+            bool isLand = (i > 0 && i < HN - 1 && j > 0 && j < HN - 1) &&
+                          h > waterSkim - 0.4f;
+            land[(size_t)j * HN + i] = isLand;
+            dist[(size_t)j * HN + i] = isLand ? 1e9f : 0.0f;
+        }
+    // chamfer passes give distance-to-water; sign: + on water side
+    auto relax = [&](int i, int j, int di, int dj, float w) {
+        int a = j * HN + i, b = (j + dj) * HN + (i + di);
+        dist[a] = SDL_min(dist[a], dist[b] + w);
+    };
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            if (i > 0) relax(i, j, -1, 0, cell);
+            if (j > 0) relax(i, j, 0, -1, cell);
+            if (i > 0 && j > 0) relax(i, j, -1, -1, cell * 1.414f);
+        }
+    for (int j = HN - 1; j >= 0; j--)
+        for (int i = HN - 1; i >= 0; i--) {
+            if (i < HN - 1) relax(i, j, 1, 0, cell);
+            if (j < HN - 1) relax(i, j, 0, 1, cell);
+            if (i < HN - 1 && j < HN - 1) relax(i, j, 1, 1, cell * 1.414f);
+        }
+    // water-side positive distances (distance to land) via mirrored pass
+    std::vector<float> dist2((size_t)HN * HN);
+    for (size_t k = 0; k < dist2.size(); k++)
+        dist2[k] = land[k] ? 0.0f : 1e9f;
+    {
+        auto relax2 = [&](int i, int j, int di, int dj, float w) {
+            int a = j * HN + i, b = (j + dj) * HN + (i + di);
+            dist2[a] = SDL_min(dist2[a], dist2[b] + w);
+        };
+        for (int j = 0; j < HN; j++)
+            for (int i = 0; i < HN; i++) {
+                if (i > 0) relax2(i, j, -1, 0, cell);
+                if (j > 0) relax2(i, j, 0, -1, cell);
+                if (i > 0 && j > 0) relax2(i, j, -1, -1, cell * 1.414f);
+            }
+        for (int j = HN - 1; j >= 0; j--)
+            for (int i = HN - 1; i >= 0; i--) {
+                if (i < HN - 1) relax2(i, j, 1, 0, cell);
+                if (j < HN - 1) relax2(i, j, 0, 1, cell);
+                if (i < HN - 1 && j < HN - 1)
+                    relax2(i, j, 1, 1, cell * 1.414f);
+            }
+    }
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            size_t k = (size_t)j * HN + i;
+            gOut.data[k * 2 + 1] = land[k] ? -dist[k] : dist2[k];
+            if (!land[k])
+                gOut.data[k * 2] = -100.0f;   // open water marker
+        }
+
+    // grass blade instances: bake the editor's density rules on CPU
+    unsigned rng = 12345u;
+    auto frand = [&rng]() {
+        rng = rng * 1664525u + 1013904223u;
+        return (rng >> 8) * (1.0f / 16777216.0f);
+    };
+    for (int j = 0; j < GRASS_N; j++)
+        for (int i = 0; i < GRASS_N * 2; i++) {
+            float x = -TER_HALF + 2.0f * TER_HALF * (i + frand()) /
+                      (GRASS_N * 2);
+            float z = -TER_HALF + 2.0f * TER_HALF * (j + frand()) / GRASS_N;
+            float rot = frand() * 6.2831853f;
+            float seed = frand();
+            float m = mask_at(gMask, x, z) / 255.0f;
+            float m2 = mask_at(gMask2, x, z) / 255.0f;
+            float mm = SDL_max(m, m2);
+            if (mm > 0.30f + fmodf(seed * 7.31f, 1.0f) * 0.12f)
+                continue;
+            float dens = (1.0f - mask_at(gKill, x, z) / 255.0f) *
+                         gTune.bladeDensity;
+            if (fmodf(seed * 9.77f, 1.0f) >= dens)
+                continue;
+            gBlades.push_back({ x + gCenter[0], height_at(x, z) + gYOff,
+                                z + gCenter[1], rot, seed });
+        }
+
+    gActive = true;
+    SDL_Log("wmap: world %s, %d blades", worldPath.c_str(),
+            (int)gBlades.size());
+    return true;
+}
+
+bool wmap_active() { return gActive; }
+const WmapHeights& wmap_heights() { return gOut; }
+void wmap_island_center(float* x, float* z)
+{
+    *x = gCenter[0];
+    *z = gCenter[1];
+}
+
+void wmap_init_gl()
+{
+    if (!gActive)
+        return;
+    gTerProg = compile_prog(kTerVS, terFS().c_str());
+    gGrassProg = compile_prog(kGrassVS, kGrassFS);
+    gPropProg = compile_prog(kPropVS, propFS().c_str());
+    gSkirtProg = compile_prog(kSkirtVS, kSkirtFS);
+    gDepthProg = compile_prog(kDepthVS, kDepthFS);
+    gDepthPropProg = compile_prog(kDepthPropVS, kDepthPropFS);
+
+    gGrassTex = tex_from_bmp(gAssetsDir + "/grass.bmp");
+    gDirtTex = tex_from_bmp(gAssetsDir + "/dirt.bmp");
+    gDirt2Tex = tex_from_bmp(gAssetsDir + "/dirt2.bmp");
+    gCliffTex = tex_from_bmp(gAssetsDir + "/cliff.bmp");
+
+    auto mask_tex = [](const std::vector<Uint8>& m) {
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, MASK_N, MASK_N, 0, GL_RED,
+                     GL_UNSIGNED_BYTE, m.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        return t;
+    };
+    gMaskTex = mask_tex(gMask);
+    gMask2Tex = mask_tex(gMask2);
+
+    // baked ground-AO image from blade roots (mip level = radius)
+    {
+        std::vector<Uint8> ao((size_t)AO_N * AO_N, 255);
+        for (const BladeInst& b : gBlades) {
+            int cx = (int)((b.x - gCenter[0] + TER_HALF) /
+                           (2 * TER_HALF) * AO_N);
+            int cy = (int)((b.z - gCenter[1] + TER_HALF) /
+                           (2 * TER_HALF) * AO_N);
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int px = cx + dx, py = cy + dy;
+                    if (px < 0 || py < 0 || px >= AO_N || py >= AO_N)
+                        continue;
+                    ao[(size_t)py * AO_N + px] = 0;
+                }
+        }
+        glGenTextures(1, &gAOTex);
+        glBindTexture(GL_TEXTURE_2D, gAOTex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, AO_N, AO_N, 0, GL_RED,
+                     GL_UNSIGNED_BYTE, ao.data());
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // terrain mesh: positions + normals in world space (yOff applied)
+    {
+        std::vector<float> v;
+        v.reserve((size_t)HN * HN * 6);
+        const float cell = 2.0f * TER_HALF / (HN - 1);
+        for (int j = 0; j < HN; j++)
+            for (int i = 0; i < HN; i++) {
+                float x = -TER_HALF + cell * i + gCenter[0];
+                float z = -TER_HALF + cell * j + gCenter[1];
+                float h = gHeights[j * HN + i] * gScale + gYOff;
+                float hx1 = gHeights[j * HN + SDL_min(i + 1, HN - 1)] * gScale;
+                float hx0 = gHeights[j * HN + SDL_max(i - 1, 0)] * gScale;
+                float hz1 = gHeights[SDL_min(j + 1, HN - 1) * HN + i] * gScale;
+                float hz0 = gHeights[SDL_max(j - 1, 0) * HN + i] * gScale;
+                float nx = hx0 - hx1, nz = hz0 - hz1, ny = 2.0f * cell;
+                float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+                v.insert(v.end(), { x, h, z, nx / nl, ny / nl, nz / nl });
+            }
+        std::vector<unsigned> idx;
+        idx.reserve((size_t)(HN - 1) * (HN - 1) * 6);
+        for (int j = 0; j < HN - 1; j++)
+            for (int i = 0; i < HN - 1; i++) {
+                unsigned a = j * HN + i, b = a + 1, c = a + HN, d = c + 1;
+                idx.insert(idx.end(), { a, c, b, b, c, d });
+            }
+        gTerIdx = (GLsizei)idx.size();
+        glGenVertexArrays(1, &gTerVao);
+        glGenBuffers(1, &gTerVbo);
+        glGenBuffers(1, &gTerIbo);
+        glBindVertexArray(gTerVao);
+        glBindBuffer(GL_ARRAY_BUFFER, gTerVbo);
+        glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gTerIbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned),
+                     idx.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, (void*)12);
+        glBindVertexArray(0);
+    }
+
+    // grass: blade template + instance buffer
+    {
+        const float blade[12][3] = {
+            { -1, 0, 0 }, { 1, 0, 0 }, { -1, 1, 0 },
+            { 1, 0, 0 }, { 1, 1, 0 }, { -1, 1, 0 },
+            { -1, 0, 1 }, { 1, 0, 1 }, { -1, 1, 1 },
+            { 1, 0, 1 }, { 1, 1, 1 }, { -1, 1, 1 },
+        };
+        std::vector<float> inst;
+        inst.reserve(gBlades.size() * 5);
+        for (const BladeInst& b : gBlades)
+            inst.insert(inst.end(), { b.x, b.y, b.z, b.rot, b.seed });
+        gBladeCount = (GLsizei)gBlades.size();
+        GLuint bladeVbo = 0, instVbo = 0;
+        glGenVertexArrays(1, &gGrassVao);
+        glGenBuffers(1, &bladeVbo);
+        glGenBuffers(1, &instVbo);
+        glBindVertexArray(gGrassVao);
+        glBindBuffer(GL_ARRAY_BUFFER, bladeVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof blade, blade, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+        glBufferData(GL_ARRAY_BUFFER, inst.size() * sizeof(float),
+                     inst.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 20, (void*)0);
+        glVertexAttribDivisor(1, 1);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 20, (void*)12);
+        glVertexAttribDivisor(2, 1);
+        glBindVertexArray(0);
+    }
+
+    // skirt ring
+    {
+        // ring in EDITOR space; the shader multiplies by uScale
+        const int N = 128;
+        const float E = 24.0f;
+        std::vector<float> ring;
+        for (int i = 0; i < N; i++)
+            ring.insert(ring.end(), { -E + 2.0f * E * i / N, -E });
+        for (int j = 0; j < N; j++)
+            ring.insert(ring.end(), { E, -E + 2.0f * E * j / N });
+        for (int i = N; i > 0; i--)
+            ring.insert(ring.end(), { -E + 2.0f * E * i / N, E });
+        for (int j = N; j > 0; j--)
+            ring.insert(ring.end(), { -E, -E + 2.0f * E * j / N });
+        int P = (int)ring.size() / 2;
+        std::vector<float> sv;
+        for (int p = 0; p < P; p++) {
+            sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 0.0f });
+            sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 1.0f });
+        }
+        int centerIdx = P * 2;
+        sv.insert(sv.end(), { 0.0f, 0.0f, 2.0f });
+        std::vector<unsigned> si;
+        for (int p = 0; p < P; p++) {
+            unsigned a = p * 2, b = a + 1;
+            unsigned c = ((p + 1) % P) * 2, d = c + 1;
+            si.insert(si.end(), { a, b, c, c, b, d });
+            si.insert(si.end(), { b, (unsigned)centerIdx, d });
+        }
+        gSkirtIdx = (GLsizei)si.size();
+        GLuint vbo = 0, ibo = 0;
+        glGenVertexArrays(1, &gSkirtVao);
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ibo);
+        glBindVertexArray(gSkirtVao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sv.size() * sizeof(float), sv.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, si.size() * sizeof(unsigned),
+                     si.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(0);
+    }
+
+    // prop meshes used by instances
+    for (const PropInst& pi : gProps)
+        load_prop_mesh(gMeshes[pi.mesh]);
+
+    // shift prop instance Y by yOff once
+    for (PropInst& pi : gProps)
+        pi.y += gYOff;
+}
+
+// height texture for the skirt shader (lazy, created on first draw)
+static GLuint gSkirtHeightTex = 0;
+
+void wmap_draw_shadow(const Mat4& lightVP)
+{
+    if (!gActive)
+        return;
+    glUseProgram(gDepthProg);
+    glUniformMatrix4fv(glGetUniformLocation(gDepthProg, "uLightVP"), 1,
+                       GL_FALSE, lightVP.m);
+    glBindVertexArray(gTerVao);
+    glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+    if (!gProps.empty()) {
+        glUseProgram(gDepthPropProg);
+        glUniformMatrix4fv(glGetUniformLocation(gDepthPropProg, "uLightVP"),
+                           1, GL_FALSE, lightVP.m);
+        glUniform1i(glGetUniformLocation(gDepthPropProg, "uTex"), 0);
+        GLint dModel = glGetUniformLocation(gDepthPropProg, "uModel");
+        GLint dHas = glGetUniformLocation(gDepthPropProg, "uHasTex");
+        GLint dGray = glGetUniformLocation(gDepthPropProg, "uGrayMask");
+        glActiveTexture(GL_TEXTURE0);
+        for (const PropInst& inst : gProps) {
+            PropMesh& pm = gMeshes[inst.mesh];
+            if (!pm.loaded)
+                continue;
+            float c = cosf(inst.yaw), s = sinf(inst.yaw), sc = inst.scale;
+            Mat4 mdl{};
+            mdl.m[0] = c * sc;  mdl.m[2] = -s * sc;
+            mdl.m[5] = sc;
+            mdl.m[8] = s * sc;  mdl.m[10] = c * sc;
+            mdl.m[12] = inst.x; mdl.m[13] = inst.y; mdl.m[14] = inst.z;
+            mdl.m[15] = 1.0f;
+            glUniformMatrix4fv(dModel, 1, GL_FALSE, mdl.m);
+            glBindVertexArray(pm.vao);
+            for (const PropSub& sub : pm.subs) {
+                const PropMat& mat = pm.mats[sub.mat];
+                glUniform1i(dHas, mat.tex ? 1 : 0);
+                glUniform1i(dGray, mat.gray ? 1 : 0);
+                if (mat.tex)
+                    glBindTexture(GL_TEXTURE_2D, mat.tex);
+                glDrawArrays(GL_TRIANGLES, sub.first, sub.count);
+            }
+        }
+    }
+}
+
+void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
+               GLuint shadowTex, float timeSec)
+{
+    if (!gActive)
+        return;
+    // lazy: skirt height texture on first draw
+    if (!gSkirtHeightTex) {
+        glGenTextures(1, &gSkirtHeightTex);
+        glBindTexture(GL_TEXTURE_2D, gSkirtHeightTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, HN, HN, 0, GL_RED, GL_FLOAT,
+                     gHeights.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    const float eyeA[3] = { eye.x, eye.y, eye.z };
+    const float center[2] = { gCenter[0], gCenter[1] };
+
+    // terrain
+    glUseProgram(gTerProg);
+    glUniformMatrix4fv(glGetUniformLocation(gTerProg, "uViewProj"), 1,
+                       GL_FALSE, viewProj.m);
+    glUniformMatrix4fv(glGetUniformLocation(gTerProg, "uLightVP"), 1,
+                       GL_FALSE, lightVP.m);
+    glUniform3fv(glGetUniformLocation(gTerProg, "uEye"), 1, eyeA);
+    glUniform2fv(glGetUniformLocation(gTerProg, "uCenter"), 1, center);
+    glUniform1f(glGetUniformLocation(gTerProg, "uHalf"), TER_HALF);
+    glUniform1f(glGetUniformLocation(gTerProg, "uEdgeBreak"), gTune.edgeBreak);
+    glUniform1f(glGetUniformLocation(gTerProg, "uScale"), gScale);
+    glUniform1f(glGetUniformLocation(gTerProg, "uGrassAO"), gTune.groundAO);
+    glUniform1f(glGetUniformLocation(gTerProg, "uGrassAORad"), gTune.aoRadius);
+    auto bindT = [&](GLuint prog, const char* name, int unit, GLuint tex) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform1i(glGetUniformLocation(prog, name), unit);
+    };
+    bindT(gTerProg, "uMask", 0, gMaskTex);
+    bindT(gTerProg, "uMask2", 1, gMask2Tex);
+    bindT(gTerProg, "uGrassTex", 2, gGrassTex);
+    bindT(gTerProg, "uDirtTex", 3, gDirtTex);
+    bindT(gTerProg, "uDirt2Tex", 4, gDirt2Tex);
+    bindT(gTerProg, "uCliffTex", 5, gCliffTex);
+    bindT(gTerProg, "uAOMap", 6, gAOTex);
+    bindT(gTerProg, "uShadow", 7, shadowTex);
+    glBindVertexArray(gTerVao);
+    glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+
+    // skirt
+    if (gTune.islandDepth > 0.05f) {
+        glUseProgram(gSkirtProg);
+        glUniformMatrix4fv(glGetUniformLocation(gSkirtProg, "uViewProj"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniform2fv(glGetUniformLocation(gSkirtProg, "uCenter"), 1, center);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uYOff"), gYOff);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uHalf"), TER_HALF);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uScale"), gScale);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uDepth"),
+                    gTune.islandDepth);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uFrill"),
+                    gTune.islandFrill);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uBulge"),
+                    gTune.islandBulge);
+        glUniform3fv(glGetUniformLocation(gSkirtProg, "uEye"), 1, eyeA);
+        bindT(gSkirtProg, "uHeight", 0, gSkirtHeightTex);
+        bindT(gSkirtProg, "uCliffTex", 1, gCliffTex);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(gSkirtVao);
+        glDrawElements(GL_TRIANGLES, gSkirtIdx, GL_UNSIGNED_INT, nullptr);
+    }
+
+    // props
+    if (!gProps.empty()) {
+        glUseProgram(gPropProg);
+        glUniformMatrix4fv(glGetUniformLocation(gPropProg, "uViewProj"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniformMatrix4fv(glGetUniformLocation(gPropProg, "uLightVP"), 1,
+                           GL_FALSE, lightVP.m);
+        glUniform3fv(glGetUniformLocation(gPropProg, "uEye"), 1, eyeA);
+        bindT(gPropProg, "uShadow", 5, shadowTex);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(glGetUniformLocation(gPropProg, "uTex"), 0);
+        GLint locModel = glGetUniformLocation(gPropProg, "uModel");
+        GLint locKd = glGetUniformLocation(gPropProg, "uKd");
+        GLint locKa = glGetUniformLocation(gPropProg, "uKa");
+        GLint locBH = glGetUniformLocation(gPropProg, "uBoundH");
+        GLint locHas = glGetUniformLocation(gPropProg, "uHasTex");
+        GLint locGray = glGetUniformLocation(gPropProg, "uGrayMask");
+        glDisable(GL_CULL_FACE);
+        for (const PropInst& inst : gProps) {
+            PropMesh& pm = gMeshes[inst.mesh];
+            if (!pm.loaded)
+                continue;
+            float c = cosf(inst.yaw), s = sinf(inst.yaw), sc = inst.scale;
+            Mat4 mdl{};
+            mdl.m[0] = c * sc;  mdl.m[2] = -s * sc;
+            mdl.m[5] = sc;
+            mdl.m[8] = s * sc;  mdl.m[10] = c * sc;
+            mdl.m[12] = inst.x; mdl.m[13] = inst.y; mdl.m[14] = inst.z;
+            mdl.m[15] = 1.0f;
+            glUniformMatrix4fv(locModel, 1, GL_FALSE, mdl.m);
+            glUniform1f(locBH, pm.boundH);
+            glBindVertexArray(pm.vao);
+            for (const PropSub& sub : pm.subs) {
+                const PropMat& mat = pm.mats[sub.mat];
+                glUniform3fv(locKd, 1, mat.kd);
+                glUniform3fv(locKa, 1, mat.ka);
+                glUniform1i(locHas, mat.tex ? 1 : 0);
+                glUniform1i(locGray, mat.gray ? 1 : 0);
+                if (mat.tex)
+                    glBindTexture(GL_TEXTURE_2D, mat.tex);
+                glDrawArrays(GL_TRIANGLES, sub.first, sub.count);
+            }
+        }
+    }
+
+    // grass
+    if (gBladeCount > 0) {
+        glUseProgram(gGrassProg);
+        glUniformMatrix4fv(glGetUniformLocation(gGrassProg, "uViewProj"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniformMatrix4fv(glGetUniformLocation(gGrassProg, "uLightVP"), 1,
+                           GL_FALSE, lightVP.m);
+        glUniform1f(glGetUniformLocation(gGrassProg, "uTime"), timeSec);
+        glUniform2fv(glGetUniformLocation(gGrassProg, "uCenter"), 1, center);
+        glUniform1f(glGetUniformLocation(gGrassProg, "uScale"), gScale);
+        bindT(gGrassProg, "uGrassTex", 0, gGrassTex);
+        bindT(gGrassProg, "uShadow", 1, shadowTex);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(gGrassVao);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gBladeCount);
+    }
+    glBindVertexArray(0);
+}

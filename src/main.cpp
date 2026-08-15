@@ -34,6 +34,7 @@
 #endif
 #include "stb_image.h"  // implementation lives in model.cpp
 #include "cgltf.h"      // implementation lives in model.cpp
+#include "wmap.h"       // .wworld / .wmap islands from the level editor
 
 namespace {
 
@@ -1924,6 +1925,7 @@ int main(int argc, char** argv)
         app.viewer_mode = true;  // screenshots use the plain clip viewer
     }
     bool want_shot = false;
+    bool show_island_arrow = false;   // '#': compass to the editor island
     app.player.init(app.link);
 
     const GLuint skin_prog = link_program(kSkinVS, kSkinFS);
@@ -2144,7 +2146,18 @@ int main(int argc, char** argv)
         if (!props.load((base + "..\\..\\assets\\props.glb").c_str()))
             props.load("assets/props.glb");   // optional: fine if missing
 #endif
-        if (!mesh_ok) SDL_Log("could not load island.glb");
+        // an exported .wworld island takes over the world when present:
+        // its heightfield replaces the baked one (collision + foam ring)
+        if (wmap_load(SDL_GetBasePath(), kIslandY, kWaterSkim)) {
+            const WmapHeights& wh = wmap_heights();
+            g_hf.x0 = wh.x0; g_hf.y0 = wh.y0;
+            g_hf.x1 = wh.x1; g_hf.y1 = wh.y1;
+            g_hf.nx = wh.nx; g_hf.ny = wh.ny;
+            g_hf.data = wh.data;
+            hf_ok = true;
+            wmap_init_gl();
+        }
+        if (!mesh_ok && !wmap_active()) SDL_Log("could not load island.glb");
         if (!hf_ok) SDL_Log("could not load island_height.bin");
         if (hf_ok) {
             // shore field for the water shader (R = height, G = shore dist)
@@ -2159,8 +2172,15 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
                             GL_CLAMP_TO_EDGE);
         }
-        // spawn on the island's grass instead of inside the terrain
-        const float spawn = ground_h(0.0f, 2.0f);
+        // spawn on the island's grass instead of inside the terrain; an
+        // editor island spawns the player on its own quadrant
+        float sx = 0.0f, sz = 2.0f;
+        if (wmap_active()) {
+            wmap_island_center(&sx, &sz);
+            app.player.pos.x = sx;
+            app.player.pos.z = sz;
+        }
+        const float spawn = ground_h(sx, sz);
         if (spawn > -900.0f) app.player.pos.y = spawn;
     }
 
@@ -2252,6 +2272,34 @@ int main(int argc, char** argv)
     glBindBuffer(GL_ARRAY_BUFFER, reticle_vbo);
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(reticle.size() * sizeof(float)),
                  reticle.data(), GL_STATIC_DRAW);
+
+    // island compass: a flat arrow drawn with the reticle program, spun
+    // toward the island ('#' toggles it)
+    GLuint arrow_vao = 0, arrow_vbo = 0;
+    GLsizei arrow_verts = 0;
+    {
+        // +x is "forward" so uSpin can aim it with atan2
+        const float head = 1.0f, neck = 0.25f, tail = -0.9f, w = 0.22f;
+        const float tri[3][3] = {{head, 0, 0}, {neck, 0, -w * 2.0f},
+                                 {neck, 0, w * 2.0f}};
+        const float shaft[4][3] = {{neck, 0, -w}, {tail, 0, -w},
+                                   {neck, 0, w}, {tail, 0, w}};
+        std::vector<float> a;
+        for (const auto& v : tri) a.insert(a.end(), v, v + 3);
+        const int sq[6] = {0, 1, 2, 2, 1, 3};
+        for (const int i : sq) a.insert(a.end(), shaft[i], shaft[i] + 3);
+        arrow_verts = static_cast<GLsizei>(a.size() / 3);
+        glGenVertexArrays(1, &arrow_vao);
+        glBindVertexArray(arrow_vao);
+        glGenBuffers(1, &arrow_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, arrow_vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(a.size() * sizeof(float)),
+                     a.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(0);
+    }
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, nullptr);
     glBindVertexArray(0);
@@ -3156,6 +3204,12 @@ int main(int argc, char** argv)
                         set_title(app, 0);
                     }
 #endif
+                    // '#' (and '3' on layouts without it) toggles a compass
+                    // arrow pointing at the loaded editor island
+                    if (!ev.key.repeat && wmap_active() &&
+                        (ev.key.key == SDLK_HASH ||
+                         ev.key.key == SDLK_BACKSLASH))
+                        show_island_arrow = !show_island_arrow;
                     if (!ev.key.repeat && !app.viewer_mode) {
                         const bool* ks = SDL_GetKeyboardState(nullptr);
                         const bool guarding_now =
@@ -4624,7 +4678,9 @@ int main(int argc, char** argv)
             glEnable(GL_DEPTH_TEST);
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(2.0f, 4.0f);
-            if (island.index_count || props.index_count) {
+            if (wmap_active())
+                wmap_draw_shadow(light_vp);
+            if ((island.index_count || props.index_count) && !wmap_active()) {
                 glUseProgram(shadow_prog);
                 glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, light_vp.m);
                 const float off3[3] = {0.0f, kIslandY, 0.0f};
@@ -4724,7 +4780,14 @@ int main(int argc, char** argv)
 
         const Vec3 cam_eye = app.cam.eye();
         const float eye3[3] = {cam_eye.x, cam_eye.y, cam_eye.z};
-        if (island.index_count || props.index_count) {
+        if (wmap_active()) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, shadow_tex);
+            wmap_draw(viewproj, cam_eye, light_vp, shadow_tex,
+                      static_cast<float>(app.sim_time));
+        }
+        // an editor island replaces the baked test island entirely
+        if ((island.index_count || props.index_count) && !wmap_active()) {
             glUseProgram(island_prog);
             glUniformMatrix4fv(is_viewproj, 1, GL_FALSE, viewproj.m);
             glUniformMatrix4fv(is_lightvp, 1, GL_FALSE, light_vp.m);
@@ -4816,6 +4879,32 @@ int main(int argc, char** argv)
             glUniform1f(r_alpha, 0.85f * app.lock_blend);
             glBindVertexArray(reticle_vao);
             glDrawArrays(GL_TRIANGLES, 0, reticle_verts);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+
+        // island compass arrow, floating above the player and aimed at
+        // the loaded editor island
+        if (show_island_arrow && wmap_active()) {
+            float ix = 0.0f, iz = 0.0f;
+            wmap_island_center(&ix, &iz);
+            const Vec3 pp = app.player.pos;
+            const float dx = ix - pp.x, dz = iz - pp.z;
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_DEPTH_TEST);
+            glUseProgram(reticle_prog);
+            glUniformMatrix4fv(r_viewproj, 1, GL_FALSE, viewproj.m);
+            const float ac[3] = {pp.x, pp.y + 2.6f, pp.z};
+            glUniform3fv(r_center, 1, ac);
+            // uSpin rotates about Y; atan2(dz,dx) points +x at the island
+            glUniform1f(r_spin, -std::atan2(dz, dx));
+            glUniform1f(r_alpha, 0.9f);
+            glUniform1f(r_scale, 0.9f);
+            glBindVertexArray(arrow_vao);
+            glDrawArrays(GL_TRIANGLES, 0, arrow_verts);
+            glEnable(GL_DEPTH_TEST);
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
         }

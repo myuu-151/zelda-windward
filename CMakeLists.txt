@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+﻿cmake_minimum_required(VERSION 3.24)
 project(zelda_client LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -20,6 +20,7 @@ add_executable(zelda
     src/main.cpp
     src/gl_loader.cpp
     src/model.cpp
+    src/wmap.cpp
     src/player.cpp
 )
 target_include_directories(zelda PRIVATE third_party/cgltf third_party/stb)
@@ -89,6 +90,7 @@ add_executable(zelda_packed
     src/main.cpp
     src/gl_loader.cpp
     src/model.cpp
+    src/wmap.cpp
     src/player.cpp
     ${EMBED_SRCS}
 )

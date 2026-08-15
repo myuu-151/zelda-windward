@@ -23,6 +23,8 @@ extern PFNGLDELETEVERTEXARRAYSPROC glDeleteVertexArrays;
 extern PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray;
 extern PFNGLVERTEXATTRIBPOINTERPROC glVertexAttribPointer;
 extern PFNGLVERTEXATTRIBIPOINTERPROC glVertexAttribIPointer;
+extern PFNGLVERTEXATTRIBDIVISORPROC glVertexAttribDivisor;
+extern PFNGLDRAWARRAYSINSTANCEDPROC glDrawArraysInstanced;
 
 // shaders / programs
 extern PFNGLCREATESHADERPROC glCreateShader;

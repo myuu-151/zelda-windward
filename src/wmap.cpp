@@ -1545,7 +1545,10 @@ static void bake_silhouette(const ChartIsle& c, ProxyIsle& pr)
     if (got != h.size())
         return;
 
-    const int G = 28;
+    // Resolution follows the island: a 463-unit island needs far more
+    // than a 48-unit one to read as itself. Still tiny next to the real
+    // terrain -- a few thousand triangles against hundreds of thousands.
+    const int G = (int)SDL_clamp(half * 2.0f * gScale / 5.0f, 48.0f, 192.0f);
     std::vector<float> g((size_t)G * G, 0.0f);
     for (int j = 0; j < G; j++)
         for (int i = 0; i < G; i++) {

@@ -5087,7 +5087,9 @@ int main(int argc, char** argv)
         // near, and the bird's layered feathers z-fight (flicker) at
         // distance on the old value. 0.25 buys 5x precision everywhere and
         // the camera never sits closer than ~1.5 units from geometry.
-        const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.25f, 600.0f);
+        // Far enough to see a few quadrants out: islands sit 600+ units apart,
+        // so a 600-unit far plane clipped the next one exactly as it appeared
+        const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.25f, 2600.0f);
         // Camera collision, solved once per frame right before we use it:
         // ease to the longest clear boom along the current angle, snapping
         // in fast when a wall arrives and drifting out slowly after.

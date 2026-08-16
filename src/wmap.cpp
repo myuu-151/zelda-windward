@@ -1606,8 +1606,21 @@ bool wmap_stream(float px, float pz)
     const ChartIsle& c = gChart[best];
     if (c.cx == gLoadedCell[0] && c.cy == gLoadedCell[1])
         return false;
-    if (bestD2 > (gQuadSize * 0.75f) * (gQuadSize * 0.75f))
+    // Reach most of the way to the next quadrant. Held at 0.75 the real
+    // island only appeared once you were nearly on top of it, so an
+    // island you were flying straight at stayed a silhouette far longer
+    // than it should have.
+    if (bestD2 > (gQuadSize * 1.25f) * (gQuadSize * 1.25f))
         return false;              // still out at sea between islands
+    // ...but do not swap for a marginal gain: midway between two islands
+    // the nearest flips back and forth, and each swap is a full reload
+    if (gLoadedCell[0] > -50) {
+        float lx, lz;
+        wmap_cell_center(gLoadedCell[0], gLoadedCell[1], &lx, &lz);
+        const float ldx = lx - px, ldz = lz - pz;
+        if (bestD2 > (ldx * ldx + ldz * ldz) * 0.7f)
+            return false;
+    }
     SDL_Log("wmap: streaming in %c%d", 'A' + c.cx, c.cy + 1);
     free_island_gl();
     if (!load_island_at(c.cx, c.cy, c.path))

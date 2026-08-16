@@ -26,6 +26,8 @@ const WmapHeights& wmap_heights();
 void wmap_island_center(float* x, float* z);
 // world-space centre of any chart quadrant
 void wmap_cell_center(int cx, int cy, float* x, float* z);
+// centre of the quadrant containing a world position
+void wmap_quadrant_center(float wx, float wz, float* x, float* z);
 // the built-in test island's quadrant ("testisland <x> <y>" in the
 // .wworld); false when the chart does not place it
 bool wmap_test_island(float* x, float* z);

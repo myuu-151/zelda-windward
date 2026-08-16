@@ -1190,6 +1190,15 @@ void wmap_cell_center(int cx, int cy, float* x, float* z)
     *z = (cy - (gChartSize - 1) * 0.5f) * quad;
 }
 
+void wmap_quadrant_center(float wx, float wz, float* x, float* z)
+{
+    const float quad = TER_HALF * 2.0f * 2.5f;
+    const float off = (gChartSize - 1) * 0.5f * quad;
+    // chart cells are laid out on a fixed grid: snap to the nearest one
+    *x = roundf((wx + off) / quad) * quad - off;
+    *z = roundf((wz + off) / quad) * quad - off;
+}
+
 bool wmap_test_island(float* x, float* z)
 {
     if (!gActive || gTestCell[0] < 0)

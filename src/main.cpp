@@ -2340,9 +2340,14 @@ int main(int argc, char** argv)
         const float ang = wrand() * 6.2831853f;
         const float rad = wrand() * 30.0f;
         // up in the open sky: the island (and its tree) now owns the old
-        // low band, so streaks ride well above the terrain
-        w.origin = {std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
-                    std::sin(ang) * rad};
+        // low band, so streaks ride well above the terrain. The region
+        // follows whichever chart quadrant we are in, not world zero.
+        float wx = 0.0f, wz = 0.0f;
+        if (wmap_active())
+            wmap_quadrant_center(app.player.pos.x, app.player.pos.z,
+                                 &wx, &wz);
+        w.origin = {wx + std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
+                    wz + std::sin(ang) * rad};
         // fixed world wind, matching the sky's cloud drift and the tree sway
         w.fwd = normalize({-1.0f, 0.0f, -0.35f});
         w.side = normalize(cross(w.fwd, Vec3{0, 1, 0}));
@@ -3759,13 +3764,23 @@ int main(int argc, char** argv)
                 return dist;
             };
 
+            // the ring hangs over whichever chart quadrant the bird is in,
+            // so it follows us from island to island
+            Vec3 bird_ring{0.0f, 0.0f, 0.0f};
+            if (wmap_active())
+                wmap_quadrant_center(app.bird_pos.x, app.bird_pos.z,
+                                     &bird_ring.x, &bird_ring.z);
+
             switch (app.bird_state) {
                 case Bird::Circle: {
                     // chase a point a little ahead on the ring: banking falls
-                    // out of the steering instead of being posed by hand
+                    // out of the steering instead of being posed by hand.
+                    // The ring hangs over our island, not world zero.
                     const float az =
-                        std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.45f;
-                    fly_toward({std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                        std::atan2(app.bird_pos.x - bird_ring.x,
+                                   app.bird_pos.z - bird_ring.z) + 0.45f;
+                    fly_toward({bird_ring.x + std::sin(az) * 26.0f, 14.0f,
+                                bird_ring.z + std::cos(az) * 26.0f},
                                6.5f);
                     if (app.bird_summon) {
                         app.bird_summon = false;
@@ -3939,9 +3954,11 @@ int main(int argc, char** argv)
                     } else {
                         // climb back out to the ring, then resume circling
                         const float az =
-                            std::atan2(app.bird_pos.x, app.bird_pos.z) + 0.35f;
+                            std::atan2(app.bird_pos.x - bird_ring.x,
+                                       app.bird_pos.z - bird_ring.z) + 0.35f;
                         const float dist = fly_toward(
-                            {std::sin(az) * 26.0f, 14.0f, std::cos(az) * 26.0f},
+                            {bird_ring.x + std::sin(az) * 26.0f, 14.0f,
+                             bird_ring.z + std::cos(az) * 26.0f},
                             7.0f);
                         if (dist < 2.5f) app.bird_state = Bird::Circle;
                     }

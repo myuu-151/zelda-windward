@@ -1463,7 +1463,7 @@ struct OrbitCamera {
     Vec3 dir_at(float extra) const
     {
         float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f) + extra;
-        p = std::min(p, 1.30f);          // stop short of straight down
+        p = std::min(p, 1.48f);          // just short of straight down
         const float cp = std::cos(p);
         return Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
     }
@@ -1506,8 +1506,12 @@ struct OrbitCamera {
         const float want = want_dist();
         float bestD = clear_dist_at(0.0f);
         float bestLift = 0.0f;
+        // A tall face is not cleared by a shallow climb: the boom has to
+        // come almost overhead before it misses the rock, so keep raising
+        // until the full length fits rather than settling for a crowded
+        // shot at the original angle.
         if (bestD < want * 0.9f) {
-            for (int s = 1; s <= 7; ++s) {
+            for (int s = 1; s <= 11; ++s) {
                 const float extra = static_cast<float>(s) * 0.13f;
                 const float d = clear_dist_at(extra);
                 if (d > bestD + 0.05f) { bestD = d; bestLift = extra; }

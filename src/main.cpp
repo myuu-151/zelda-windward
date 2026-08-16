@@ -1453,12 +1453,6 @@ void main() {
         f2 *= 1.0 - smoothstep(60.0, 200.0, d);
         col = mix(col, FOAM_COL, f2);
     }
-    // any remaining chart island rings itself from its disc
-    {
-        float df = island_disc_foam(vWorld, uTime);
-        df *= 1.0 - smoothstep(120.0, 420.0, d);
-        col = mix(col, FOAM_COL, df);
-    }
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
     // the disc is a stand-in for range the depth map cannot cover, so it

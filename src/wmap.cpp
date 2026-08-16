@@ -61,6 +61,7 @@ struct Tune {
     float islandDepth = 0.0f;
     float islandFrill = 0.0f;
     float islandBulge = 0.0f;
+    bool  trimSkirt = false;   // underside follows the coastline
 };
 static Tune gTune;
 
@@ -110,6 +111,7 @@ static GLuint gGrassProg = 0, gGrassVao = 0;
 static GLsizei gBladeCount = 0;
 static GLuint gPropProg = 0, gSkirtProg = 0;
 static GLuint gSkirtVao = 0;
+static float  gSkirtPivot[2] = { 0.0f, 0.0f };   // island centroid, editor space
 static GLsizei gSkirtIdx = 0;
 static GLuint gDepthProg = 0, gDepthPropProg = 0;
 // distant island silhouettes, one per chart quadrant
@@ -529,6 +531,8 @@ uniform float uFrill;
 uniform float uBulge;
 uniform float uScale;
 uniform float uEditorHalf;
+uniform vec2  uPivot;   // island centroid in editor space: a trimmed
+                        // underside must not taper about the map origin
 out vec3 vWorld;
 out vec3 vNrm;
 out float vT;
@@ -556,16 +560,19 @@ void main() {
         float f1 = vnoise(xz * 0.45 + 11.0) - 0.5;
         float f2 = vnoise(xz * 1.3 + 7.0) - 0.5;
         float taper = mix(0.82, 1.30, uBulge) + (f1 * 0.5 + f2 * 0.2) * uFrill;
-        pos = vec3(xz.x * taper * uScale,
+        vec2 d = xz - uPivot;
+        pos = vec3((uPivot.x + d.x * taper) * uScale,
                    uYOff - uDepth * uScale *
                        (0.55 + 0.5 * nn + f2 * 0.5 * uFrill),
-                   xz.y * taper * uScale);
+                   (uPivot.y + d.y * taper) * uScale);
     } else {
-        pos = vec3(0.0, uYOff - uDepth * uScale * 1.25, 0.0);
+        pos = vec3(uPivot.x * uScale, uYOff - uDepth * uScale * 1.25,
+                   uPivot.y * uScale);
     }
     pos.xz += uCenter;
     vWorld = pos;
-    vNrm = normalize(vec3(xz.x, uDepth * 0.02 + 6.0, xz.y));
+    vNrm = normalize(vec3(xz.x - uPivot.x, uDepth * 0.02 + 6.0,
+                          xz.y - uPivot.y));
     if (t > 1.5) vNrm = vec3(0.0, -1.0, 0.0);
     vT = min(t, 1.5);
     gl_Position = uViewProj * vec4(pos, 1.0);
@@ -854,6 +861,9 @@ static bool load_wmap(const std::string& path)
                     gTune.waterline = get(51, -3.0f);
                     gTune.islandFrill = get(53, 0.0f);
                     gTune.islandBulge = get(54, 0.0f);
+                    // int at 75: trim the underside to the coastline
+                    const int* ib = (const int*)blob.data();
+                    gTune.trimSkirt = (75 < (int)nf && ib[75] != 0);
                 }
             }
         }
@@ -1295,7 +1305,11 @@ static void build_heightfield()
             // the terrain surface happens to cross the water. Without
             // this a tapered rim pulls the foam ring inland, under the
             // overhang, instead of leaving it at the cliff base.
-            const bool skirt = gTune.islandDepth > 0.05f;
+            // A full-map skirt makes the whole footprint solid rock, so
+            // the shore field has to treat it all as land. A TRIMMED
+            // skirt follows the coastline instead, so the heightfield
+            // is the silhouette again.
+            const bool skirt = gTune.islandDepth > 0.05f && !gTune.trimSkirt;
             bool isLand = inside && (skirt || h > gWaterSkimK - 0.4f);
             // The skirt flares out past the terrain rim, so the silhouette
             // at the waterline is the skirt's, not the heightfield's. Count
@@ -1700,14 +1714,69 @@ void build_island_gl()
         const int N = 128;
         const float E = gEditorHalf;
         std::vector<float> ring;
-        for (int i = 0; i < N; i++)
-            ring.insert(ring.end(), { -E + 2.0f * E * i / N, -E });
-        for (int j = 0; j < N; j++)
-            ring.insert(ring.end(), { E, -E + 2.0f * E * j / N });
-        for (int i = N; i > 0; i--)
-            ring.insert(ring.end(), { -E + 2.0f * E * i / N, E });
-        for (int j = N; j > 0; j--)
-            ring.insert(ring.end(), { -E, -E + 2.0f * E * j / N });
+        gSkirtPivot[0] = gSkirtPivot[1] = 0.0f;
+        bool trimmed = false;
+        if (gTune.trimSkirt) {
+            // Same radial contour the editor traces: hang the underside
+            // off the island's coastline so its shape below the water
+            // matches the shape above it.
+            const float cell = 2.0f * E / (HN - 1);
+            const float sea = gTune.waterline + 0.05f;
+            double cx = 0, cz = 0;
+            int n = 0;
+            for (int j = 0; j < HN; j++)
+                for (int i = 0; i < HN; i++)
+                    if (gHeights[(size_t)j * HN + i] > sea) {
+                        cx += -E + i * cell;
+                        cz += -E + j * cell;
+                        n++;
+                    }
+            if (n > 32) {
+                cx /= n; cz /= n;
+                const int P2 = 256;
+                std::vector<float> rad((size_t)P2, 0.0f);
+                for (int p = 0; p < P2; p++) {
+                    float a = 6.2831853f * p / P2;
+                    float dx = cosf(a), dz = sinf(a);
+                    float found = 0.0f;
+                    for (float r = 0.0f; r < E * 2.2f; r += cell * 0.75f) {
+                        float x = (float)cx + dx * r, z = (float)cz + dz * r;
+                        if (fabsf(x) > E || fabsf(z) > E)
+                            break;
+                        // height_at takes world units and returns world
+                        if (height_at(x * gScale, z * gScale) / gScale > sea)
+                            found = r;
+                    }
+                    rad[p] = found;
+                }
+                for (int pass = 0; pass < 2; pass++) {
+                    std::vector<float> t = rad;
+                    for (int p = 0; p < P2; p++)
+                        rad[p] = (t[(p + P2 - 1) % P2] + 2.0f * t[p] +
+                                  t[(p + 1) % P2]) * 0.25f;
+                }
+                for (int p = 0; p < P2; p++) {
+                    float a = 6.2831853f * p / P2;
+                    float r = rad[p] + cell * 1.5f;
+                    ring.insert(ring.end(), {
+                        SDL_clamp((float)cx + cosf(a) * r, -E, E),
+                        SDL_clamp((float)cz + sinf(a) * r, -E, E) });
+                }
+                gSkirtPivot[0] = (float)cx;
+                gSkirtPivot[1] = (float)cz;
+                trimmed = true;
+            }
+        }
+        if (!trimmed) {
+            for (int i = 0; i < N; i++)
+                ring.insert(ring.end(), { -E + 2.0f * E * i / N, -E });
+            for (int j = 0; j < N; j++)
+                ring.insert(ring.end(), { E, -E + 2.0f * E * j / N });
+            for (int i = N; i > 0; i--)
+                ring.insert(ring.end(), { -E + 2.0f * E * i / N, E });
+            for (int j = N; j > 0; j--)
+                ring.insert(ring.end(), { -E, -E + 2.0f * E * j / N });
+        }
         int P = (int)ring.size() / 2;
         std::vector<float> sv;
         for (int p = 0; p < P; p++) {
@@ -1715,7 +1784,7 @@ void build_island_gl()
             sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 1.0f });
         }
         int centerIdx = P * 2;
-        sv.insert(sv.end(), { 0.0f, 0.0f, 2.0f });
+        sv.insert(sv.end(), { gSkirtPivot[0], gSkirtPivot[1], 2.0f });
         std::vector<unsigned> si;
         for (int p = 0; p < P; p++) {
             unsigned a = p * 2, b = a + 1;
@@ -1938,6 +2007,8 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
                     gTune.islandFrill);
         glUniform1f(glGetUniformLocation(gSkirtProg, "uBulge"),
                     gTune.islandBulge);
+        glUniform2f(glGetUniformLocation(gSkirtProg, "uPivot"),
+                    gSkirtPivot[0], gSkirtPivot[1]);
         glUniform3fv(glGetUniformLocation(gSkirtProg, "uEye"), 1, eyeA);
         bindT(gSkirtProg, "uHeight", 0, gSkirtHeightTex);
         bindT(gSkirtProg, "uCliffTex", 1, gCliffTex);

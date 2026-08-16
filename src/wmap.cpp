@@ -1612,13 +1612,22 @@ bool wmap_stream(float px, float pz)
     // than it should have.
     if (bestD2 > (gQuadSize * 1.25f) * (gQuadSize * 1.25f))
         return false;              // still out at sea between islands
-    // ...but do not swap for a marginal gain: midway between two islands
-    // the nearest flips back and forth, and each swap is a full reload
+    // Hold on to the island being left until it is genuinely far off.
+    // Only one island can be resident, so a swap replaces the real
+    // terrain behind you with its silhouette -- do that while it still
+    // fills the screen and it reads as the island changing shape. Kept
+    // until it is a quadrant away, it has already hazed down to a
+    // smudge on the horizon by the time the stand-in takes over.
     if (gLoadedCell[0] > -50) {
         float lx, lz;
         wmap_cell_center(gLoadedCell[0], gLoadedCell[1], &lx, &lz);
         const float ldx = lx - px, ldz = lz - pz;
-        if (bestD2 > (ldx * ldx + ldz * ldz) * 0.7f)
+        const float curD2 = ldx * ldx + ldz * ldz;
+        if (curD2 < gQuadSize * gQuadSize)
+            return false;          // still close enough to be worth drawing
+        // and never swap for a marginal gain: midway between two islands
+        // the nearest flips back and forth, and each flip is a full reload
+        if (bestD2 > curD2 * 0.7f)
             return false;
     }
     SDL_Log("wmap: streaming in %c%d", 'A' + c.cx, c.cy + 1);

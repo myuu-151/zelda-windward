@@ -31,6 +31,10 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z);
 // a flight ring that clears the loaded island: radius past its shore and
 // height above its peaks. False when the position is not over the island.
 bool wmap_flight_ring(float wx, float wz, float* radius, float* height);
+// Height of solid island at a world position for camera collision: unlike
+// the terrain heightfield this also covers the overhanging skirt just off
+// the shore, so the camera cannot slip underneath the rim. -1000 = clear.
+float wmap_block_height(float wx, float wz);
 // the built-in test island's quadrant ("testisland <x> <y>" in the
 // .wworld); false when the chart does not place it
 bool wmap_test_island(float* x, float* z);

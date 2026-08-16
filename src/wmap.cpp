@@ -1226,6 +1226,21 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z)
     *z = roundf((wz + off) / quad) * quad - off;
 }
 
+float wmap_block_height(float wx, float wz)
+{
+    if (!gActive)
+        return -1000.0f;
+    const float lx = wx - gCenter[0], lz = wz - gCenter[1];
+    // the skirt flares outward from the rim: treat a margin past the shore
+    // as solid so a camera dropping below the rim is pushed back in
+    const float margin = TER_HALF * 0.30f;
+    if (fabsf(lx) > TER_HALF + margin || fabsf(lz) > TER_HALF + margin)
+        return -1000.0f;
+    const float cx = SDL_clamp(lx, -TER_HALF, TER_HALF);
+    const float cz = SDL_clamp(lz, -TER_HALF, TER_HALF);
+    return height_at(cx, cz) + gYOff;
+}
+
 bool wmap_flight_ring(float wx, float wz, float* radius, float* height)
 {
     if (!gActive)

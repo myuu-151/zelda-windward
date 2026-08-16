@@ -1439,28 +1439,28 @@ struct OrbitCamera {
         // inside of the island.
         constexpr float kSkin = 0.55f;   // clearance kept off the surface
         constexpr float kMinDist = 1.1f; // never end up inside his head
-        constexpr int kSteps = 20;
+        constexpr int kSteps = 24;
+        // solid = terrain, plus the island's overhanging skirt just off
+        // the shore, which the heightfield alone calls open water
+        auto solid_at = [](float x, float z) {
+            const float g = ground_h(x, z);
+            const float b = wmap_active() ? wmap_block_height(x, z) : -1000.0f;
+            return std::max(g, b);
+        };
+        // Keep the player's angle and simply come in closer, the way a
+        // DCC viewport does -- never hoist the camera over the obstacle,
+        // which throws the framing away.
         float safe = want;
-        float ridge = -1e9f;             // highest ground the view crosses
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
             const Vec3 s = target + dir * t;
-            const float gh = ground_h(s.x, s.z);
-            if (gh <= -900.0f) continue;         // open water, nothing to hit
-            ridge = std::max(ridge, gh);
-            if (s.y < gh + kSkin && safe == want)
+            const float sh = solid_at(s.x, s.z);
+            if (sh > -900.0f && s.y < sh + kSkin) {
                 safe = std::max(kMinDist, t - want / kSteps);
+                break;
+            }
         }
-        Vec3 e = target + dir * safe;
-        // Sitting off a cliff, over water, the boom hits nothing yet the
-        // sight line still passes through the headland. Lift the eye clear
-        // of the tallest ground between us and the character.
-        if (ridge > -900.0f)
-            e.y = std::max(e.y, ridge + kSkin);
-        const float gh = ground_h(e.x, e.z);
-        if (gh > -900.0f && e.y < gh + kSkin)
-            e.y = gh + kSkin;
-        return e;
+        return target + dir * safe;
     }
 };
 

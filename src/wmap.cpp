@@ -1172,6 +1172,8 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     gOut.ny = PN;
     gOut.data.assign((size_t)PN * PN * 2, 0.0f);
     const float cell = 2.0f * HALF / (PN - 1);
+    // how far the island skirt reaches past the rim
+    const float flare = 0.82f + (1.30f - 0.82f) * gTune.islandBulge;
     std::vector<float> dist((size_t)PN * PN, 1e9f);
     std::vector<char> land((size_t)PN * PN, 0);
     for (int j = 0; j < PN; j++)
@@ -1183,6 +1185,16 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
             float h = inside ? height_at(x, -by) + gYOff : -100.0f;
             gOut.data[((size_t)j * PN + i) * 2] = h - islandYConst;
             bool isLand = inside && h > waterSkim - 0.4f;
+            // The skirt flares out past the terrain rim, so the silhouette
+            // at the waterline is the skirt's, not the heightfield's. Count
+            // that flare as land or the foam ring hides under the overhang.
+            if (!isLand && flare > 1.0f &&
+                fabsf(x) <= TER_HALF * flare && fabsf(by) <= TER_HALF * flare) {
+                const float rimX = SDL_clamp(x, -TER_HALF, TER_HALF);
+                const float rimZ = SDL_clamp(-by, -TER_HALF, TER_HALF);
+                if (height_at(rimX, rimZ) + gYOff > waterSkim - 0.4f)
+                    isLand = true;
+            }
             land[(size_t)j * PN + i] = isLand;
             dist[(size_t)j * PN + i] = isLand ? 1e9f : 0.0f;
         }

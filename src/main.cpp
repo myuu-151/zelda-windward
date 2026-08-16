@@ -1406,12 +1406,14 @@ void main() {
             // a tight line clinging to the waterline (sd ~ 0). The shore
             // field is baked from the mesh's cross-section AT water level;
             // top-down silhouettes drift off the cliff base (overhangs)
-            float rim = 1.0 - smoothstep(0.06, 0.40, abs(sd));
-            float band = sin(sd * 3.4 - uTime * 1.7 +
+            // a hairline reads as nothing on a big island: widen the
+            // solid rim and let the dashes breathe further out
+            float rim = 1.0 - smoothstep(0.10, 1.30, abs(sd));
+            float band = sin(sd * 1.5 - uTime * 1.7 +
                              fbm(vWorld.xz * 0.5) * 2.8);
-            float dashes = smoothstep(0.55, 0.9, band) *
-                           (1.0 - smoothstep(1.0, 3.8, sd)) *
-                           step(0.25, sd);
+            float dashes = smoothstep(0.5, 0.9, band) *
+                           (1.0 - smoothstep(2.0, 9.0, sd)) *
+                           step(0.6, sd);
             float foam = clamp(rim + dashes * 0.8, 0.0, 1.0);
             // foam is a shoreline effect: let it fade with distance too
             foam *= 1.0 - smoothstep(60.0, 200.0, d);

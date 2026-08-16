@@ -4794,17 +4794,6 @@ int main(int argc, char** argv)
             free_target.y += app.cam.pull * 0.10f;
             app.cam.target = lerp(free_target, lock_target, app.lock_blend);
 
-            // Ease the boom to the longest clear length along the angle we
-            // are rotated to: snap in quickly when a wall arrives, drift
-            // back out slowly so the camera never pops.
-            {
-                const float target_boom = app.cam.clear_dist();
-                if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
-                const float rate = target_boom < app.cam.boom ? 14.0f : 2.5f;
-                const float k = 1.0f - std::exp(-rate *
-                                    static_cast<float>(frame_dt));
-                app.cam.boom += (target_boom - app.cam.boom) * k;
-            }
             app.cam_aim = lerp(free_target, aim_target, app.lock_blend);
         }
 
@@ -4923,6 +4912,28 @@ int main(int argc, char** argv)
         // distance on the old value. 0.25 buys 5x precision everywhere and
         // the camera never sits closer than ~1.5 units from geometry.
         const Mat4 proj = mat4_perspective(50.0f * 3.14159265f / 180.0f, aspect, 0.25f, 600.0f);
+        // Camera collision, solved once per frame right before we use it:
+        // ease to the longest clear boom along the current angle, snapping
+        // in fast when a wall arrives and drifting out slowly after.
+        {
+            const float target_boom = app.cam.clear_dist();
+            if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
+            const float rate = target_boom < app.cam.boom ? 18.0f : 2.5f;
+            const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
+            app.cam.boom += (target_boom - app.cam.boom) * k;
+            // Backstop: easing takes frames, and a frame spent inside the
+            // rock is a frame of grey screen. Close the boom immediately
+            // while the eye is buried.
+            for (int i = 0; i < 10; ++i) {
+                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
+                const float g = ground_h(e.x, e.z);
+                const float b = wmap_active() ? wmap_block_height(e.x, e.z)
+                                              : -1000.0f;
+                const float sh = std::max(g, b);
+                if (sh <= -900.0f || e.y > sh + 0.6f) break;
+                app.cam.boom = std::max(0.35f, app.cam.boom * 0.7f);
+            }
+        }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;
         const Mat4 view = mat4_look_at(app.cam.eye(), aim, {0, 1, 0});
         // (viewproj is stored below for next frame's on-screen target test)

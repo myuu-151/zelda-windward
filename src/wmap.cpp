@@ -2312,8 +2312,10 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glDrawElements(GL_TRIANGLES, gSkirtIdx, GL_UNSIGNED_INT, nullptr);
     }
 
-    // props
-    if (!gProps.empty()) {
+    // props -- the retained island's count too, since the island just
+    // streamed in may have none of its own and the whole block would be
+    // skipped, taking the retained island's trees with it
+    if (!gProps.empty() || (gPrev.vao && !gPrev.props.empty())) {
         glUseProgram(gPropProg);
         glUniformMatrix4fv(glGetUniformLocation(gPropProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
@@ -2358,8 +2360,8 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         }
     }
 
-    // grass
-    if (gBladeCount > 0) {
+    // grass -- likewise gated on either island having any
+    if (gBladeCount > 0 || (gPrev.grassVao && gPrev.blades > 0)) {
         glUseProgram(gGrassProg);
         glUniformMatrix4fv(glGetUniformLocation(gGrassProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
@@ -2373,8 +2375,10 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         bindT(gGrassProg, "uGrassTex", 0, gGrassTex);
         bindT(gGrassProg, "uShadow", 1, shadowTex);
         glDisable(GL_CULL_FACE);
-        glBindVertexArray(gGrassVao);
-        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gBladeCount);
+        if (gGrassVao && gBladeCount > 0) {
+            glBindVertexArray(gGrassVao);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gBladeCount);
+        }
         if (gPrev.grassVao && gPrev.blades > 0) {
             glUniform2fv(glGetUniformLocation(gGrassProg, "uCenter"), 1,
                          gPrev.center);

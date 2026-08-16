@@ -1409,7 +1409,7 @@ void main() {
     // the disc is a stand-in for range the depth map cannot cover, so it
     // has to be absent up close or it doubles the shadow already there
     float disc = mix(1.0, island_disc_shadow(vWorld),
-                     smoothstep(150.0, 320.0, d));
+                     smoothstep(120.0, 200.0, d));
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs
@@ -2192,8 +2192,8 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 230.0f, center, {0, 1, 0});
-        return mat4_ortho(-165.0f, 165.0f, -165.0f, 165.0f, 20.0f, 470.0f) * view;
+            mat4_look_at(center + sun_dir * 280.0f, center, {0, 1, 0});
+        return mat4_ortho(-205.0f, 205.0f, -205.0f, 205.0f, 20.0f, 560.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 

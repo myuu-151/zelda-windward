@@ -38,6 +38,8 @@ float wmap_block_height(float wx, float wz);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);
+// world units per editor unit for the loaded island
+float wmap_scale();
 // the built-in test island's quadrant ("testisland <x> <y>" in the
 // .wworld); false when the chart does not place it
 bool wmap_test_island(float* x, float* z);

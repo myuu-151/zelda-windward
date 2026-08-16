@@ -1324,6 +1324,7 @@ vec3 water(vec2 uv, vec3 cdir, float t) {
 uniform sampler2D uShore;
 uniform vec4 uShoreRect;   // x0, y0, 1/width, 1/height
 uniform float uHasShore;
+uniform float uShoreScale;   // island world units per editor unit
 uniform float uIslandY;    // shore field heights are stored relative to it
 uniform int uDiscCount;
 uniform vec4 uDiscs[16];   // x, z, radius, top height
@@ -1332,6 +1333,24 @@ uniform vec4 uDiscs[16];   // x, z, radius, top height
 // only covers water near the player and the marched field only knows the
 // loaded island, so this is what keeps shadows under every island however
 // far away you fly.
+// Foam for islands that are not the loaded one: they have no shore field,
+// so ring their disc instead -- a solid rim at the waterline plus dashes
+// breathing outward, matching the real shoreline's look.
+float island_disc_foam(vec3 world, float t)
+{
+    float f = 0.0;
+    for (int i = 1; i < uDiscCount; ++i) {
+        vec4 I = uDiscs[i];
+        float sd = length(world.xz - I.xy) - I.z;   // + = open water
+        float rim = 1.0 - smoothstep(0.0, 2.6, abs(sd));
+        float band = sin(sd * 0.5 - t * 1.7);
+        float dashes = smoothstep(0.55, 0.9, band) *
+                       (1.0 - smoothstep(3.0, 16.0, sd)) * step(1.5, sd);
+        f = max(f, clamp(rim + dashes * 0.75, 0.0, 1.0));
+    }
+    return f;
+}
+
 float island_disc_shadow(vec3 world)
 {
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
@@ -1383,7 +1402,9 @@ void main() {
                         (-vWorld.z - uShoreRect.y) * uShoreRect.w);
         if (all(greaterThan(buv, vec2(0.0))) &&
             all(lessThan(buv, vec2(1.0)))) {
-            float sd = texture(uShore, buv).g;
+            // the field is in world units but this ring was tuned on a
+            // smaller island, so read it at the island's own scale
+            float sd = texture(uShore, buv).g / uShoreScale;
             // a tight line clinging to the waterline (sd ~ 0). The shore
             // field is baked from the mesh's cross-section AT water level;
             // top-down silhouettes drift off the cliff base (overhangs)
@@ -1404,6 +1425,12 @@ void main() {
     // Two shadow sources would stack into a stepped double image, so hand
     // over with distance: the depth map is exact up close, the marched
     // island shadow carries on past its reach.
+    // every other island on the chart rings itself
+    {
+        float df = island_disc_foam(vWorld, uTime);
+        df *= 1.0 - smoothstep(120.0, 420.0, d);
+        col = mix(col, FOAM_COL, df);
+    }
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
     // the disc is a stand-in for range the depth map cannot cover, so it
@@ -2217,6 +2244,7 @@ int main(int argc, char** argv)
     const GLint wa_shorerect = glGetUniformLocation(water_prog, "uShoreRect");
     const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
     const GLint wa_islandy = glGetUniformLocation(water_prog, "uIslandY");
+    const GLint wa_shorescale = glGetUniformLocation(water_prog, "uShoreScale");
     const GLint wa_disccount = glGetUniformLocation(water_prog, "uDiscCount");
     const GLint wa_discs = glGetUniformLocation(water_prog, "uDiscs");
     const GLint wa_lightvp = glGetUniformLocation(water_prog, "uLightVP");
@@ -5089,6 +5117,8 @@ int main(int argc, char** argv)
         }
         glUniform1f(wa_hasshore, shore_tex ? 1.0f : 0.0f);
         glUniform1f(wa_islandy, kIslandY);
+        glUniform1f(wa_shorescale,
+                    wmap_active() ? wmap_scale() : 1.0f);
         {
             float discs[16 * 4];
             const int nd = wmap_active()

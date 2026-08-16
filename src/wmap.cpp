@@ -1282,6 +1282,8 @@ void wmap_set_player(float x, float y, float z)
     gPlayer[0] = x; gPlayer[1] = y; gPlayer[2] = z;
 }
 
+float wmap_scale() { return gScale; }
+
 bool wmap_active() { return gActive; }
 const WmapHeights& wmap_heights() { return gOut; }
 void wmap_island_center(float* x, float* z)

@@ -4924,14 +4924,23 @@ int main(int argc, char** argv)
             // Backstop: easing takes frames, and a frame spent inside the
             // rock is a frame of grey screen. Close the boom immediately
             // while the eye is buried.
-            for (int i = 0; i < 10; ++i) {
+            for (int i = 0; i < 12; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
-                const float g = ground_h(e.x, e.z);
-                const float b = wmap_active() ? wmap_block_height(e.x, e.z)
-                                              : -1000.0f;
-                const float sh = std::max(g, b);
-                if (sh <= -900.0f || e.y > sh + 0.6f) break;
-                app.cam.boom = std::max(0.35f, app.cam.boom * 0.7f);
+                // Sample a small volume, not just the eye point: a wall
+                // beside the lens never crosses the boom line, yet the
+                // near plane happily slices into it.
+                constexpr float kR = 0.85f;
+                const float ox[5] = {0.0f, kR, -kR, 0.0f, 0.0f};
+                const float oz[5] = {0.0f, 0.0f, 0.0f, kR, -kR};
+                float sh = -1000.0f;
+                for (int k = 0; k < 5; ++k) {
+                    const float x = e.x + ox[k], z = e.z + oz[k];
+                    sh = std::max(sh, ground_h(x, z));
+                    if (wmap_active())
+                        sh = std::max(sh, wmap_block_height(x, z));
+                }
+                if (sh <= -900.0f || e.y > sh + 0.7f) break;
+                app.cam.boom = std::max(0.35f, app.cam.boom * 0.72f);
             }
         }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;

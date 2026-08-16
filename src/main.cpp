@@ -1429,7 +1429,32 @@ struct OrbitCamera {
         // pulling out is a pure dolly; the low end couples downward tilt
         const float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f);
         const float cp = std::cos(p);
-        return target + Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)} * (distance + pull);
+        const Vec3 dir{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
+        const float want = distance + pull;
+
+        // Terrain collision: walk out from the character and stop short of
+        // any ground the boom would pass through, so orbiting around a
+        // cliff or terrace pulls the camera in instead of showing the
+        // inside of the island.
+        constexpr float kSkin = 0.55f;   // clearance kept off the surface
+        constexpr float kMinDist = 1.1f; // never end up inside his head
+        constexpr int kSteps = 14;
+        float safe = want;
+        for (int i = 1; i <= kSteps; ++i) {
+            const float t = want * static_cast<float>(i) / kSteps;
+            const Vec3 s = target + dir * t;
+            const float gh = ground_h(s.x, s.z);
+            if (gh > -900.0f && s.y < gh + kSkin) {
+                safe = std::max(kMinDist, t - want / kSteps);
+                break;
+            }
+        }
+        Vec3 e = target + dir * safe;
+        // and never sit below the surface it ended up over
+        const float gh = ground_h(e.x, e.z);
+        if (gh > -900.0f && e.y < gh + kSkin)
+            e.y = gh + kSkin;
+        return e;
     }
 };
 

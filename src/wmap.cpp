@@ -119,7 +119,17 @@ static GLuint gProxyProg = 0, gProxyVao = 0;
 static GLsizei gProxyIdx = 0;
 struct ProxyIsle {
     float x, z, seed, radius, height;
+    int first = 0, count = 0;   // its slice of the baked silhouette mesh
 };
+// One buffer holding a coarse mesh of every charted island, in world
+// space. A distant island used to be a cone invented from a hash of its
+// cell coordinates, so it looked nothing like the island that streamed in
+// when you got close -- flying away turned your island into a stranger.
+static GLuint gSilVao = 0, gSilVbo = 0;
+static std::vector<float> gSilVerts;   // x,y,z,up
+struct ChartIsle;
+static void bake_silhouette(const ChartIsle& c, ProxyIsle& pr);
+static void upload_silhouettes();
 static std::vector<ProxyIsle> gProxies;
 static float gSeaLevel = -2.7f;
 static float gPlayer[3] = { 0.0f, -1000.0f, 0.0f };
@@ -483,31 +493,15 @@ void main() {
 // proxy on the horizon, the Wind Waker trick that turns open sea into a
 // navigable map. Shape varies per cell from its seed.
 static const char* kProxyVS = R"GLSL(#version 330 core
-layout(location=0) in vec2 aRT;    // ring t, angle
+layout(location=0) in vec3 aPos;   // baked from the island's own heightmap
+layout(location=1) in float aUp;
 uniform mat4 uViewProj;
-uniform vec2 uCell;                // island centre in world xz
-uniform float uSeed;
-uniform float uRadius;
-uniform float uHeight;
-uniform float uBase;               // sea level
 out vec3 vWorld;
 out float vUp;
 void main() {
-    float t = aRT.x;               // 0 centre .. 1 shore
-    float a = aRT.y;
-    // ragged outline: a few harmonics keyed off the cell seed
-    float wob = 0.78
-        + 0.16 * sin(a * 2.0 + uSeed * 6.28)
-        + 0.10 * sin(a * 3.0 - uSeed * 11.3)
-        + 0.07 * sin(a * 5.0 + uSeed * 3.1);
-    float r = t * uRadius * wob;
-    // domed profile with a couple of peaks
-    float peak = 0.55 + 0.45 * sin(a * 2.0 + uSeed * 4.7);
-    float h = uBase + uHeight * peak * pow(max(0.0, 1.0 - t), 1.6);
-    vec3 p = vec3(uCell.x + cos(a) * r, h, uCell.y + sin(a) * r);
-    vUp = 1.0 - t;
-    vWorld = p;
-    gl_Position = uViewProj * vec4(p, 1.0);
+    vWorld = aPos;
+    vUp = aUp;
+    gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )GLSL";
 
@@ -1258,10 +1252,16 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
         float r1 = ((s >> 18) & 1023) / 1023.0f;
         float wx, wz;
         wmap_cell_center(c.first, c.second, &wx, &wz);
-        gProxies.push_back({ wx, wz, r0 * 6.2831853f,
-                             34.0f + r1 * 30.0f,
-                             12.0f + r0 * 16.0f });
+        ProxyIsle pr{ wx, wz, r0 * 6.2831853f,
+                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0 };
+        for (const ChartIsle& ci : gChart)
+            if (ci.cx == c.first && ci.cy == c.second) {
+                bake_silhouette(ci, pr);
+                break;
+            }
+        gProxies.push_back(pr);
     }
+    upload_silhouettes();
     load_styles();
     scan_props();
     if (!load_wmap(mapPath)) {
@@ -1477,6 +1477,7 @@ static bool load_island_at(int cx, int cy, const std::string& path)
     build_blades();
     // the island we are standing on should not also be a silhouette
     gProxies.clear();
+    gSilVerts.clear();
     for (const ChartIsle& c : gChart) {
         if ((c.cx == cx && c.cy == cy) ||
             (c.cx == gTestCell[0] && c.cy == gTestCell[1]))
@@ -1486,10 +1487,101 @@ static bool load_island_at(int cx, int cy, const std::string& path)
         float r1 = ((sd >> 18) & 1023) / 1023.0f;
         float wx, wz;
         wmap_cell_center(c.cx, c.cy, &wx, &wz);
-        gProxies.push_back({ wx, wz, r0 * 6.2831853f,
-                             34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f });
+        ProxyIsle pr{ wx, wz, r0 * 6.2831853f,
+                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0 };
+        bake_silhouette(c, pr);
+        gProxies.push_back(pr);
     }
+    upload_silhouettes();
     return true;
+}
+
+static void upload_silhouettes()
+{
+    if (gSilVerts.empty())
+        return;
+    if (!gSilVao) {
+        glGenVertexArrays(1, &gSilVao);
+        glGenBuffers(1, &gSilVbo);
+    }
+    glBindVertexArray(gSilVao);
+    glBindBuffer(GL_ARRAY_BUFFER, gSilVbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(gSilVerts.size() * sizeof(float)),
+                 gSilVerts.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 16, (void*)12);
+    glBindVertexArray(0);
+}
+
+// Read an island's heightmap and lay down a coarse mesh of it at its
+// place on the chart. Cheap: a 28x28 grid regardless of how detailed the
+// island really is, which is plenty at the range these are seen from.
+static void bake_silhouette(const ChartIsle& c, ProxyIsle& pr)
+{
+    FILE* f = fopen(c.path.c_str(), "rb");
+    if (!f)
+        return;
+    char mg[8];
+    float half = 24.0f;
+    Uint32 res[3] = { 257, 512, 256 };
+    if (fread(mg, 1, 8, f) != 8 || memcmp(mg, "TERMAP0", 7) != 0) {
+        fclose(f);
+        return;
+    }
+    int hn = 257;
+    if (mg[7] >= '8') {
+        if (fread(&half, 4, 1, f) != 1 || fread(res, 4, 3, f) != 3) {
+            fclose(f);
+            return;
+        }
+        hn = (int)res[0];
+    }
+    std::vector<float> h((size_t)hn * hn, 0.0f);
+    const size_t got = fread(h.data(), sizeof(float), h.size(), f);
+    fclose(f);
+    if (got != h.size())
+        return;
+
+    const int G = 28;
+    std::vector<float> g((size_t)G * G, 0.0f);
+    for (int j = 0; j < G; j++)
+        for (int i = 0; i < G; i++) {
+            // take the max of each patch: a silhouette should keep peaks
+            int i0 = i * (hn - 1) / G, i1 = (i + 1) * (hn - 1) / G;
+            int j0 = j * (hn - 1) / G, j1 = (j + 1) * (hn - 1) / G;
+            float m = -1e9f;
+            for (int jj = j0; jj <= j1; jj++)
+                for (int ii = i0; ii <= i1; ii++)
+                    m = SDL_max(m, h[(size_t)jj * hn + ii]);
+            g[(size_t)j * G + i] = m;
+        }
+
+    float top = 0.0f;
+    for (float v : g)
+        top = SDL_max(top, v);
+    pr.height = SDL_max(1.0f, top * gScale);
+    pr.radius = half * gScale;
+
+    const float cell = 2.0f * half / (G - 1);
+    auto put = [&](int i, int j) {
+        const float lx = -half + i * cell, lz = -half + j * cell;
+        float y = g[(size_t)j * G + i] * gScale + gYOff;
+        if (y < gSeaLevel)
+            y = gSeaLevel;          // land meets water, never below it
+        const float up = SDL_clamp((y - gSeaLevel) / pr.height, 0.0f, 1.0f);
+        gSilVerts.insert(gSilVerts.end(),
+                         { pr.x + lx * gScale, y, pr.z + lz * gScale, up });
+    };
+    pr.first = (int)(gSilVerts.size() / 4);
+    for (int j = 0; j < G - 1; j++)
+        for (int i = 0; i < G - 1; i++) {
+            put(i, j); put(i + 1, j); put(i, j + 1);
+            put(i + 1, j); put(i + 1, j + 1); put(i, j + 1);
+        }
+    pr.count = (int)(gSilVerts.size() / 4) - pr.first;
 }
 
 bool wmap_stream(float px, float pz)
@@ -2029,33 +2121,27 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     const float center[2] = { gCenter[0], gCenter[1] };
 
     // distant island silhouettes on the horizon
-    if (gProxyProg && !gProxies.empty()) {
+    if (gProxyProg && gSilVao && !gProxies.empty()) {
         glUseProgram(gProxyProg);
         glUniformMatrix4fv(glGetUniformLocation(gProxyProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
         glUniform3fv(glGetUniformLocation(gProxyProg, "uEye"), 1, eyeA);
-        glUniform1f(glGetUniformLocation(gProxyProg, "uBase"), gSeaLevel);
-        GLint lCell = glGetUniformLocation(gProxyProg, "uCell");
-        GLint lSeed = glGetUniformLocation(gProxyProg, "uSeed");
-        GLint lRad = glGetUniformLocation(gProxyProg, "uRadius");
-        GLint lHgt = glGetUniformLocation(gProxyProg, "uHeight");
         glDisable(GL_CULL_FACE);
-        glBindVertexArray(gProxyVao);
+        glBindVertexArray(gSilVao);
         for (const ProxyIsle& pr : gProxies) {
-            float dx = pr.x - eye.x, dz = pr.z - eye.z;
-            float d2 = dx * dx + dz * dz;
-            if (d2 > 620.0f * 620.0f)
-                continue;             // past the camera's far plane
-            // they are silhouettes, not places: drop them before the
-            // player can fly into one
-            if (d2 < 200.0f * 200.0f)
+            if (pr.count <= 0)
                 continue;
-            glUniform2f(lCell, pr.x, pr.z);
-            glUniform1f(lSeed, pr.seed);
-            glUniform1f(lRad, pr.radius);
-            glUniform1f(lHgt, pr.height);
-            glDrawElements(GL_TRIANGLES, gProxyIdx, GL_UNSIGNED_INT, nullptr);
+            const float dx = pr.x - eye.x, dz = pr.z - eye.z;
+            const float d2 = dx * dx + dz * dz;
+            if (d2 > 1600.0f * 1600.0f)
+                continue;
+            // the streamed island takes over well before this
+            if (d2 < (pr.radius * 1.5f) * (pr.radius * 1.5f))
+                continue;
+            glDrawArrays(GL_TRIANGLES, pr.first, pr.count);
         }
+        glBindVertexArray(0);
+        glEnable(GL_CULL_FACE);
     }
 
     // terrain

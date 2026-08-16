@@ -1406,7 +1406,10 @@ void main() {
     // island shadow carries on past its reach.
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
-    float disc = island_disc_shadow(vWorld);
+    // the disc is a stand-in for range the depth map cannot cover, so it
+    // has to be absent up close or it doubles the shadow already there
+    float disc = mix(1.0, island_disc_shadow(vWorld),
+                     smoothstep(150.0, 320.0, d));
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs

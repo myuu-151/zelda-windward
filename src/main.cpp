@@ -2196,6 +2196,8 @@ int main(int argc, char** argv)
         }
         const float spawn = ground_h(sx, sz);
         if (spawn > -900.0f) app.player.pos.y = spawn;
+        // keep the loftwing overhead rather than a chart away
+        app.bird_pos = Vec3{sx, 14.0f, sz + 26.0f};
     }
 
     // target cube (per-face shade for readability)

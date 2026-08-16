@@ -2330,7 +2330,8 @@ int main(int argc, char** argv)
     {
 #ifdef EMBED_LINK_GLB
         // heightfield FIRST: mesh loading bakes wind-sway weights from it
-        const bool hf_ok = g_hf.load_bytes(
+        // not const: a chart island replaces this heightfield below
+        bool hf_ok = g_hf.load_bytes(
             g_island_height_bin, static_cast<size_t>(g_island_height_bin_size));
         const bool mesh_ok = island.load_memory(
             g_island_glb, static_cast<size_t>(g_island_glb_size));

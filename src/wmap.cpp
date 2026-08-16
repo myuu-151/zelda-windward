@@ -23,8 +23,21 @@ static int         MASK_N = 512;    // splat mask resolution
 static float gScale = 2.0f;
 static float gEditorHalf = 24.0f;   // the map's own half-extent
 static float TER_HALF = 24.0f * 2.0f;
-static const int   GRASS_N = 320;   // blade candidates per side
-static const int   AO_N = 1024;
+// Blade candidates and AO texels per side. Both scale with the island's
+// own size so grass stays as dense, and contact AO as sharp, on a big
+// island as on a small one -- fixed counts thinned out as maps grew.
+static int         GRASS_N = 320;
+static int         AO_N = 1024;
+
+// match the editor's density scaling for an island of this half-extent
+static void resolutions_for_island(float half)
+{
+    float mult = half / 24.0f;
+    int g = (int)(320.0f * mult / 32.0f + 0.5f) * 32;
+    GRASS_N = g < 320 ? 320 : (g > 800 ? 800 : g);
+    int a = (int)(1024.0f * mult / 256.0f + 0.5f) * 256;
+    AO_N = a < 1024 ? 1024 : (a > 4096 ? 4096 : a);
+}
 
 static bool gActive = false;
 static WmapHeights gOut;
@@ -776,6 +789,7 @@ static bool load_wmap(const std::string& path)
         MASK_N = 512;
         TER_HALF = gEditorHalf * gScale;
     }
+    resolutions_for_island(gEditorHalf);
     gHeights.assign((size_t)HN * HN, 0.0f);
     gMask.assign((size_t)MASK_N * MASK_N, 0);
     gMask2.assign((size_t)MASK_N * MASK_N, 0);

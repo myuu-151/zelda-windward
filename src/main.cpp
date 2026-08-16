@@ -4926,21 +4926,29 @@ int main(int argc, char** argv)
             // while the eye is buried.
             for (int i = 0; i < 12; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
-                // Sample a small volume, not just the eye point: a wall
-                // beside the lens never crosses the boom line, yet the
-                // near plane happily slices into it.
-                constexpr float kR = 0.85f;
-                const float ox[5] = {0.0f, kR, -kR, 0.0f, 0.0f};
-                const float oz[5] = {0.0f, 0.0f, 0.0f, kR, -kR};
-                float sh = -1000.0f;
-                for (int k = 0; k < 5; ++k) {
-                    const float x = e.x + ox[k], z = e.z + oz[k];
-                    sh = std::max(sh, ground_h(x, z));
-                    if (wmap_active())
-                        sh = std::max(sh, wmap_block_height(x, z));
+                auto solid = [](float x, float z) {
+                    const float g = ground_h(x, z);
+                    return wmap_active()
+                               ? std::max(g, wmap_block_height(x, z)) : g;
+                };
+                // buried: the eye is under the surface it sits over
+                const float here = solid(e.x, e.z);
+                bool bad = here > -900.0f && e.y < here + 0.5f;
+                // grazing: a face rises past the lens beside us. Ground
+                // *below* the camera is not a collision -- treating it as
+                // one walks the boom all the way onto his face.
+                if (!bad) {
+                    constexpr float kR = 0.6f;
+                    const float ox[4] = {kR, -kR, 0.0f, 0.0f};
+                    const float oz[4] = {0.0f, 0.0f, kR, -kR};
+                    for (int k = 0; k < 4 && !bad; ++k) {
+                        const float s = solid(e.x + ox[k], e.z + oz[k]);
+                        bad = s > -900.0f && s > e.y + 0.8f;
+                    }
                 }
-                if (sh <= -900.0f || e.y > sh + 0.7f) break;
-                app.cam.boom = std::max(0.35f, app.cam.boom * 0.72f);
+                if (!bad) break;
+                app.cam.boom = std::max(1.6f, app.cam.boom * 0.75f);
+                if (app.cam.boom <= 1.6f) break;
             }
         }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;

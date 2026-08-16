@@ -2340,12 +2340,17 @@ int main(int argc, char** argv)
         const float ang = wrand() * 6.2831853f;
         const float rad = wrand() * 30.0f;
         // up in the open sky: the island (and its tree) now owns the old
-        // low band, so streaks ride well above the terrain. The region
-        // follows whichever chart quadrant we are in, not world zero.
+        // low band, so streaks ride well above the terrain. Each streak
+        // picks a quadrant from the 3x3 around us, so neighbouring
+        // segments carry wind too instead of only the one we stand in.
         float wx = 0.0f, wz = 0.0f;
-        if (wmap_active())
+        if (wmap_active()) {
             wmap_quadrant_center(app.player.pos.x, app.player.pos.z,
                                  &wx, &wz);
+            const float quad = 240.0f;
+            wx += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
+            wz += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
+        }
         w.origin = {wx + std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
                     wz + std::sin(ang) * rad};
         // fixed world wind, matching the sky's cloud drift and the tree sway

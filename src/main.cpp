@@ -1479,7 +1479,7 @@ struct OrbitCamera {
         const Vec3 d = dir_at(extra);
         const float want = want_dist();
         constexpr float kSkin = 0.6f;
-        constexpr float kMinDist = 1.6f;
+        constexpr float kMinDist = 0.3f;   // last resort: right at his head
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
         auto solid_at = [](float x, float z) {
@@ -4982,8 +4982,8 @@ int main(int argc, char** argv)
                     }
                 }
                 if (!bad) break;
-                app.cam.boom = std::max(1.6f, app.cam.boom * 0.75f);
-                if (app.cam.boom <= 1.6f) break;
+                app.cam.boom = std::max(0.3f, app.cam.boom * 0.75f);
+                if (app.cam.boom <= 0.3f) break;
             }
         }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;
@@ -5254,6 +5254,10 @@ int main(int argc, char** argv)
         }
 
 
+        // With the boom closed onto him -- the fallback when terrain
+        // blocks every angle -- drawing him just shows the inside of
+        // his head, so let the view pass through instead.
+        const bool hide_link = !app.viewer_mode && app.cam.boom < 1.25f;
         glUseProgram(skin_prog);
         glUniformMatrix4fv(u_viewproj, 1, GL_FALSE, viewproj.m);
         const Mat4 model_mtx = app.viewer_mode ? Mat4{}
@@ -5272,7 +5276,7 @@ int main(int argc, char** argv)
 
         glBindVertexArray(app.link.vao);
         // opaque first, then alpha decals (eyes/brows/mouth)
-        for (int pass = 0; pass < 2; ++pass) {
+        for (int pass = 0; pass < 2 && !hide_link; ++pass) {
             const bool alpha_pass = pass == 1;
             if (alpha_pass) {
                 glEnable(GL_BLEND);

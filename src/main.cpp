@@ -1455,23 +1455,31 @@ struct OrbitCamera {
     // camera onto the character's face
     float boom = -1.0f;
 
-    Vec3 dir() const
+    // extra pitch the collision borrowed, eased: when no clear boom exists
+    // at the angle you rotated to, the camera climbs rather than sitting
+    // inside the rock
+    float pitch_lift = 0.0f;
+
+    Vec3 dir_at(float extra) const
     {
-        const float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f);
+        float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f) + extra;
+        p = std::min(p, 1.30f);          // stop short of straight down
         const float cp = std::cos(p);
         return Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
     }
 
+    Vec3 dir() const { return dir_at(pitch_lift); }
+
     // how far back the boom would like to sit, ignoring the world
     float want_dist() const { return distance + pull; }
 
-    // longest clear boom along the current angle
-    float clear_dist() const
+    // longest clear boom at a given extra pitch
+    float clear_dist_at(float extra) const
     {
-        const Vec3 d = dir();
+        const Vec3 d = dir_at(extra);
         const float want = want_dist();
         constexpr float kSkin = 0.6f;
-        constexpr float kMinDist = 1.7f;   // never closer than this
+        constexpr float kMinDist = 1.6f;
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
         auto solid_at = [](float x, float z) {
@@ -1488,6 +1496,26 @@ struct OrbitCamera {
                 return std::max(kMinDist, t - want / kSteps);
         }
         return want;
+    }
+
+    // Pick the boom: keep the angle you rotated to when it is clear, and
+    // only borrow pitch -- climbing over the obstruction -- when that
+    // angle has nowhere to stand. Returns the distance, sets the lift.
+    float solve_boom(float* outLift) const
+    {
+        const float want = want_dist();
+        float bestD = clear_dist_at(0.0f);
+        float bestLift = 0.0f;
+        if (bestD < want * 0.9f) {
+            for (int s = 1; s <= 7; ++s) {
+                const float extra = static_cast<float>(s) * 0.13f;
+                const float d = clear_dist_at(extra);
+                if (d > bestD + 0.05f) { bestD = d; bestLift = extra; }
+                if (bestD >= want * 0.9f) break;
+            }
+        }
+        *outLift = bestLift;
+        return bestD;
     }
 
     Vec3 eye() const
@@ -4916,11 +4944,18 @@ int main(int argc, char** argv)
         // ease to the longest clear boom along the current angle, snapping
         // in fast when a wall arrives and drifting out slowly after.
         {
-            const float target_boom = app.cam.clear_dist();
+            float want_lift = 0.0f;
+            const float target_boom = app.cam.solve_boom(&want_lift);
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             const float rate = target_boom < app.cam.boom ? 18.0f : 2.5f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
             app.cam.boom += (target_boom - app.cam.boom) * k;
+            // the climb eases in quickly and settles back slowly, so it
+            // reads as the camera riding over the rock, not teleporting
+            const float lk = 1.0f - std::exp(
+                (want_lift > app.cam.pitch_lift ? -9.0f : -2.0f) *
+                static_cast<float>(frame_dt));
+            app.cam.pitch_lift += (want_lift - app.cam.pitch_lift) * lk;
             // Backstop: easing takes frames, and a frame spent inside the
             // rock is a frame of grey screen. Close the boom immediately
             // while the eye is buried.

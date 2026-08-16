@@ -120,6 +120,7 @@ static GLsizei gProxyIdx = 0;
 struct ProxyIsle {
     float x, z, seed, radius, height;
     int first = 0, count = 0;   // its slice of the baked silhouette mesh
+    int cx = -99, cy = -99;
 };
 // One buffer holding a coarse mesh of every charted island, in world
 // space. A distant island used to be a cone invented from a hash of its
@@ -1253,7 +1254,8 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
         float wx, wz;
         wmap_cell_center(c.first, c.second, &wx, &wz);
         ProxyIsle pr{ wx, wz, r0 * 6.2831853f,
-                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0 };
+                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0,
+                      c.first, c.second };
         for (const ChartIsle& ci : gChart)
             if (ci.cx == c.first && ci.cy == c.second) {
                 bake_silhouette(ci, pr);
@@ -1279,14 +1281,53 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
 
 void build_island_gl();
 
+// The island most recently streamed out. Its terrain is kept and still
+// drawn, so leaving an island does not replace it with a stand-in while
+// it still fills the screen -- the real thing stays until it has hazed
+// down to the horizon, and only then does the silhouette take over.
+// Grass, props and its shadow go, since none of them read at that range.
+struct RetainedIsle {
+    GLuint vao = 0, vbo = 0, ibo = 0;
+    GLsizei idx = 0;
+    GLuint maskTex = 0, mask2Tex = 0, aoTex = 0;
+    float center[2] = { 0.0f, 0.0f };
+    float terHalf = 0.0f, editorHalf = 24.0f;
+    int cx = -99, cy = -99;
+};
+static RetainedIsle gPrev;
+
+static void release_retained()
+{
+    if (gPrev.vao) {
+        glDeleteVertexArrays(1, &gPrev.vao);
+        glDeleteBuffers(1, &gPrev.vbo);
+        glDeleteBuffers(1, &gPrev.ibo);
+    }
+    if (gPrev.maskTex)  glDeleteTextures(1, &gPrev.maskTex);
+    if (gPrev.mask2Tex) glDeleteTextures(1, &gPrev.mask2Tex);
+    if (gPrev.aoTex)    glDeleteTextures(1, &gPrev.aoTex);
+    gPrev = RetainedIsle();
+}
+
 // Release the resident island's buffers before another takes its place.
 static void free_island_gl()
 {
+    // hand the terrain over to the retained slot rather than deleting it
+    release_retained();
     if (gTerVao) {
-        glDeleteVertexArrays(1, &gTerVao);
-        glDeleteBuffers(1, &gTerVbo);
-        glDeleteBuffers(1, &gTerIbo);
+        gPrev.vao = gTerVao; gPrev.vbo = gTerVbo; gPrev.ibo = gTerIbo;
+        gPrev.idx = gTerIdx;
+        gPrev.maskTex = gMaskTex;
+        gPrev.mask2Tex = gMask2Tex;
+        gPrev.aoTex = gAOTex;
+        gPrev.center[0] = gCenter[0];
+        gPrev.center[1] = gCenter[1];
+        gPrev.terHalf = TER_HALF;
+        gPrev.editorHalf = gEditorHalf;
+        gPrev.cx = gLoadedCell[0];
+        gPrev.cy = gLoadedCell[1];
         gTerVao = gTerVbo = gTerIbo = 0;
+        gMaskTex = gMask2Tex = gAOTex = 0;
     }
     if (gGrassVao) { glDeleteVertexArrays(1, &gGrassVao); gGrassVao = 0; }
     if (gMaskTex)  { glDeleteTextures(1, &gMaskTex);  gMaskTex = 0; }
@@ -1488,7 +1529,8 @@ static bool load_island_at(int cx, int cy, const std::string& path)
         float wx, wz;
         wmap_cell_center(c.cx, c.cy, &wx, &wz);
         ProxyIsle pr{ wx, wz, r0 * 6.2831853f,
-                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0 };
+                      34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f, 0, 0,
+                      c.cx, c.cy };
         bake_silhouette(c, pr);
         gProxies.push_back(pr);
     }
@@ -1623,9 +1665,7 @@ bool wmap_stream(float px, float pz)
         wmap_cell_center(gLoadedCell[0], gLoadedCell[1], &lx, &lz);
         const float ldx = lx - px, ldz = lz - pz;
         const float curD2 = ldx * ldx + ldz * ldz;
-        if (curD2 < gQuadSize * gQuadSize)
-            return false;          // still close enough to be worth drawing
-        // and never swap for a marginal gain: midway between two islands
+        // never swap for a marginal gain: midway between two islands
         // the nearest flips back and forth, and each flip is a full reload
         if (bestD2 > curD2 * 0.7f)
             return false;
@@ -2163,6 +2203,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
             // the streamed island takes over well before this
             if (d2 < (pr.radius * 1.5f) * (pr.radius * 1.5f))
                 continue;
+            // the island we just left is still being drawn for real
+            if (gPrev.vao && gPrev.cx == pr.cx && gPrev.cy == pr.cy)
+                continue;
             glDrawArrays(GL_TRIANGLES, pr.first, pr.count);
         }
         glBindVertexArray(0);
@@ -2198,6 +2241,36 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     bindT(gTerProg, "uShadow", 7, shadowTex);
     glBindVertexArray(gTerVao);
     glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+
+    // the island last streamed out, still the real terrain, until it is
+    // far enough that its silhouette can take over unnoticed
+    if (gPrev.vao) {
+        const float pdx = gPrev.center[0] - eye.x;
+        const float pdz = gPrev.center[1] - eye.z;
+        if (pdx * pdx + pdz * pdz > 2200.0f * 2200.0f) {
+            release_retained();
+        } else {
+            glUniform2fv(glGetUniformLocation(gTerProg, "uCenter"), 1,
+                         gPrev.center);
+            glUniform1f(glGetUniformLocation(gTerProg, "uHalf"),
+                        gPrev.terHalf);
+            glUniform1f(glGetUniformLocation(gTerProg, "uEditorHalf"),
+                        gPrev.editorHalf);
+            bindT(gTerProg, "uMask", 0, gPrev.maskTex);
+            bindT(gTerProg, "uMask2", 1, gPrev.mask2Tex);
+            bindT(gTerProg, "uAOMap", 6, gPrev.aoTex);
+            glBindVertexArray(gPrev.vao);
+            glDrawElements(GL_TRIANGLES, gPrev.idx, GL_UNSIGNED_INT, nullptr);
+            // put the resident island's own bindings back
+            glUniform2fv(glGetUniformLocation(gTerProg, "uCenter"), 1, center);
+            glUniform1f(glGetUniformLocation(gTerProg, "uHalf"), TER_HALF);
+            glUniform1f(glGetUniformLocation(gTerProg, "uEditorHalf"),
+                        gEditorHalf);
+            bindT(gTerProg, "uMask", 0, gMaskTex);
+            bindT(gTerProg, "uMask2", 1, gMask2Tex);
+            bindT(gTerProg, "uAOMap", 6, gAOTex);
+        }
+    }
 
     // skirt
     if (gTune.islandDepth > 0.05f) {

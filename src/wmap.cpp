@@ -1175,6 +1175,16 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     }
     if (mapPath.empty())
         return false;
+    if (gSpawnCell[0] >= 0)
+        SDL_Log("wmap: chart starts at %c%d", 'A' + gSpawnCell[0],
+                gSpawnCell[1] + 1);
+    else
+        SDL_Log("wmap: chart names no start cell, using the first island");
+    if (gSpawnCell[0] >= 0)
+        SDL_Log("wmap: chart starts at %c%d", 'A' + gSpawnCell[0],
+                gSpawnCell[1] + 1);
+    else
+        SDL_Log("wmap: chart names no start cell, using the first island");
 
     // the editor's asset library: search up from the world file's dir
     {

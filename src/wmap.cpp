@@ -1290,6 +1290,9 @@ struct RetainedIsle {
     GLuint vao = 0, vbo = 0, ibo = 0;
     GLsizei idx = 0;
     GLuint maskTex = 0, mask2Tex = 0, aoTex = 0;
+    GLuint grassVao = 0;
+    GLsizei blades = 0;
+    std::vector<PropInst> props;   // world-space already, so they just draw
     float center[2] = { 0.0f, 0.0f };
     float terHalf = 0.0f, editorHalf = 24.0f;
     int cx = -99, cy = -99;
@@ -1303,6 +1306,7 @@ static void release_retained()
         glDeleteBuffers(1, &gPrev.vbo);
         glDeleteBuffers(1, &gPrev.ibo);
     }
+    if (gPrev.grassVao) glDeleteVertexArrays(1, &gPrev.grassVao);
     if (gPrev.maskTex)  glDeleteTextures(1, &gPrev.maskTex);
     if (gPrev.mask2Tex) glDeleteTextures(1, &gPrev.mask2Tex);
     if (gPrev.aoTex)    glDeleteTextures(1, &gPrev.aoTex);
@@ -1326,6 +1330,12 @@ static void free_island_gl()
         gPrev.editorHalf = gEditorHalf;
         gPrev.cx = gLoadedCell[0];
         gPrev.cy = gLoadedCell[1];
+        // its foliage comes along: trees and grass are most of what an
+        // island looks like, and dropping them left bare rock behind
+        gPrev.grassVao = gGrassVao;
+        gPrev.blades = gBladeCount;
+        gPrev.props = gProps;
+        gGrassVao = 0;
         gTerVao = gTerVbo = gTerIbo = 0;
         gMaskTex = gMask2Tex = gAOTex = 0;
     }
@@ -2098,7 +2108,11 @@ void build_island_gl()
 
     // prop meshes used by instances
     int okMeshes = 0, badMeshes = 0;
-    for (const PropInst& pi : gProps) {
+    std::vector<PropInst> drawProps = gProps;
+    if (gPrev.vao)
+        drawProps.insert(drawProps.end(), gPrev.props.begin(),
+                         gPrev.props.end());
+    for (const PropInst& pi : drawProps) {
         PropMesh& pm = gMeshes[pi.mesh];
         if (pm.loaded)
             continue;
@@ -2361,6 +2375,12 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glDisable(GL_CULL_FACE);
         glBindVertexArray(gGrassVao);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gBladeCount);
+        if (gPrev.grassVao && gPrev.blades > 0) {
+            glUniform2fv(glGetUniformLocation(gGrassProg, "uCenter"), 1,
+                         gPrev.center);
+            glBindVertexArray(gPrev.grassVao);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 12, gPrev.blades);
+        }
     }
     glBindVertexArray(0);
     // the client keeps the shadow map on unit 2 for the whole frame (the

@@ -1184,7 +1184,13 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
             bool inside = fabsf(x) <= TER_HALF && fabsf(by) <= TER_HALF;
             float h = inside ? height_at(x, -by) + gYOff : -100.0f;
             gOut.data[((size_t)j * PN + i) * 2] = h - islandYConst;
-            bool isLand = inside && h > waterSkim - 0.4f;
+            // The skirt is solid rock filling the whole footprint, so at
+            // sea level the island's silhouette is its rect -- not where
+            // the terrain surface happens to cross the water. Without
+            // this a tapered rim pulls the foam ring inland, under the
+            // overhang, instead of leaving it at the cliff base.
+            const bool skirt = gTune.islandDepth > 0.05f;
+            bool isLand = inside && (skirt || h > waterSkim - 0.4f);
             // The skirt flares out past the terrain rim, so the silhouette
             // at the waterline is the skirt's, not the heightfield's. Count
             // that flare as land or the foam ring hides under the overhang.

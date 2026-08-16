@@ -1387,6 +1387,28 @@ float island_sun_shadow(vec3 world)
     return 1.0;
 }
 
+uniform sampler2D uShore2;    // the built-in test island's own field
+uniform vec4 uShoreRect2;
+uniform float uHasShore2;
+
+// foam for one shore field: solid rim at the waterline plus dashes
+// breathing outward. Two fields so a chart island and the test island
+// both ring properly instead of one borrowing the other's data.
+float shore_foam(sampler2D fld, vec4 rect, float has, vec3 world, float t)
+{
+    if (has < 0.5) return 0.0;
+    vec2 buv = vec2((world.x - rect.x) * rect.z,
+                    (-world.z - rect.y) * rect.w);
+    if (any(lessThan(buv, vec2(0.0))) || any(greaterThan(buv, vec2(1.0))))
+        return 0.0;
+    float sd = texture(fld, buv).g;
+    float rim = 1.0 - smoothstep(0.10, 1.30, abs(sd));
+    float band = sin(sd * 1.5 - t * 1.7 + fbm(world.xz * 0.5) * 2.8);
+    float dashes = smoothstep(0.5, 0.9, band) *
+                   (1.0 - smoothstep(2.0, 9.0, sd)) * step(0.6, sd);
+    return clamp(rim + dashes * 0.8, 0.0, 1.0);
+}
+
 void main() {
     vec3 cdir = normalize(vWorld - uEye);
     vec3 col = water(vWorld.xz * kTile, cdir, uTime * 2.0);
@@ -1425,7 +1447,13 @@ void main() {
     // Two shadow sources would stack into a stepped double image, so hand
     // over with distance: the depth map is exact up close, the marched
     // island shadow carries on past its reach.
-    // every other island on the chart rings itself
+    // the test island carries its own baked field
+    {
+        float f2 = shore_foam(uShore2, uShoreRect2, uHasShore2, vWorld, uTime);
+        f2 *= 1.0 - smoothstep(60.0, 200.0, d);
+        col = mix(col, FOAM_COL, f2);
+    }
+    // any remaining chart island rings itself from its disc
     {
         float df = island_disc_foam(vWorld, uTime);
         df *= 1.0 - smoothstep(120.0, 420.0, d);
@@ -2245,6 +2273,9 @@ int main(int argc, char** argv)
     const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
     const GLint wa_islandy = glGetUniformLocation(water_prog, "uIslandY");
     const GLint wa_shorescale = glGetUniformLocation(water_prog, "uShoreScale");
+    const GLint wa_shore2 = glGetUniformLocation(water_prog, "uShore2");
+    const GLint wa_shorerect2 = glGetUniformLocation(water_prog, "uShoreRect2");
+    const GLint wa_hasshore2 = glGetUniformLocation(water_prog, "uHasShore2");
     const GLint wa_disccount = glGetUniformLocation(water_prog, "uDiscCount");
     const GLint wa_discs = glGetUniformLocation(water_prog, "uDiscs");
     const GLint wa_lightvp = glGetUniformLocation(water_prog, "uLightVP");
@@ -2292,7 +2323,8 @@ int main(int argc, char** argv)
     // heightfield is the collision + the water's foam-ring shore field
     IslandMesh island;
     IslandMesh props;   // trees etc, placed in the island's blender space
-    GLuint shore_tex = 0;
+    GLuint shore_tex = 0, shore2_tex = 0;
+    float shore2_rect[4] = {0, 0, 1, 1};
     {
 #ifdef EMBED_LINK_GLB
         // heightfield FIRST: mesh loading bakes wind-sway weights from it
@@ -2340,6 +2372,8 @@ int main(int argc, char** argv)
                     test_top = std::max(test_top, h);
                 }
         }
+        HeightField test_hf;
+        if (hf_ok) test_hf = g_hf;      // its own shore data, kept aside
         if (wmap_load(SDL_GetBasePath(), kIslandY, kWaterSkim)) {
             wmap_set_test_island_size(test_r, test_top);
             const WmapHeights& wh = wmap_heights();
@@ -2365,6 +2399,29 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
                             GL_CLAMP_TO_EDGE);
         }
+        // the test island keeps its own shore field so it rings properly
+        // even though the chart island owns the main one
+        if (wmap_active() && test_hf.nx > 1) {
+            float tix2 = 0.0f, tiz2 = 0.0f;
+            if (wmap_test_island(&tix2, &tiz2)) {
+                glGenTextures(1, &shore2_tex);
+                glBindTexture(GL_TEXTURE_2D, shore2_tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, test_hf.nx,
+                             test_hf.ny, 0, GL_RG, GL_FLOAT,
+                             test_hf.data.data());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                // its field was baked around the origin; shift it to the
+                // quadrant the chart placed it in (heightfield by = -z)
+                shore2_rect[0] = test_hf.x0 + tix2;
+                shore2_rect[1] = test_hf.y0 - tiz2;
+                shore2_rect[2] = 1.0f / (test_hf.x1 - test_hf.x0);
+                shore2_rect[3] = 1.0f / (test_hf.y1 - test_hf.y0);
+            }
+        }
+
         // spawn on the island's grass instead of inside the terrain; an
         // editor island spawns the player on its own quadrant
         float sx = 0.0f, sz = 2.0f;
@@ -5137,6 +5194,14 @@ int main(int argc, char** argv)
         glUniform1f(wa_islandy, kIslandY);
         glUniform1f(wa_shorescale,
                     wmap_active() ? wmap_scale() : 1.0f);
+        glUniform1f(wa_hasshore2, shore2_tex ? 1.0f : 0.0f);
+        if (shore2_tex) {
+            glUniform1i(wa_shore2, 4);
+            glUniform4fv(wa_shorerect2, 1, shore2_rect);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, shore2_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
         {
             float discs[16 * 4];
             const int nd = wmap_active()

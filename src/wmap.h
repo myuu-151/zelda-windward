@@ -40,6 +40,9 @@ float wmap_block_height(float wx, float wz);
 int wmap_shadow_discs(float* out4, int maxCount);
 // world units per editor unit for the loaded island
 float wmap_scale();
+// measured size of the built-in test island, so its ring and shadow match
+// the mesh instead of a guessed radius
+void wmap_set_test_island_size(float radius, float top);
 // the built-in test island's quadrant ("testisland <x> <y>" in the
 // .wworld); false when the chart does not place it
 bool wmap_test_island(float* x, float* z);

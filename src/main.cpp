@@ -1402,9 +1402,7 @@ void main() {
                         (-vWorld.z - uShoreRect.y) * uShoreRect.w);
         if (all(greaterThan(buv, vec2(0.0))) &&
             all(lessThan(buv, vec2(1.0)))) {
-            // the field is in world units but this ring was tuned on a
-            // smaller island, so read it at the island's own scale
-            float sd = texture(uShore, buv).g / uShoreScale;
+            float sd = texture(uShore, buv).g;
             // a tight line clinging to the waterline (sd ~ 0). The shore
             // field is baked from the mesh's cross-section AT water level;
             // top-down silhouettes drift off the cliff base (overhangs)
@@ -2323,7 +2321,25 @@ int main(int argc, char** argv)
 #endif
         // an exported .wworld island takes over the world when present:
         // its heightfield replaces the baked one (collision + foam ring)
+        // measure the test island while its own heightfield is still
+        // loaded: a guessed radius gave it a foam ring the wrong size
+        float test_r = 0.0f, test_top = kWaterSkim;
+        if (hf_ok && g_hf.nx > 1) {
+            for (int j = 0; j < g_hf.ny; ++j)
+                for (int i = 0; i < g_hf.nx; ++i) {
+                    const float h =
+                        g_hf.data[(size_t(j) * g_hf.nx + i) * 2] + kIslandY;
+                    if (h <= kWaterSkim) continue;
+                    const float x = g_hf.x0 + (g_hf.x1 - g_hf.x0) *
+                                    (float(i) / (g_hf.nx - 1));
+                    const float by = g_hf.y0 + (g_hf.y1 - g_hf.y0) *
+                                     (float(j) / (g_hf.ny - 1));
+                    test_r = std::max(test_r, std::sqrt(x * x + by * by));
+                    test_top = std::max(test_top, h);
+                }
+        }
         if (wmap_load(SDL_GetBasePath(), kIslandY, kWaterSkim)) {
+            wmap_set_test_island_size(test_r, test_top);
             const WmapHeights& wh = wmap_heights();
             g_hf.x0 = wh.x0; g_hf.y0 = wh.y0;
             g_hf.x1 = wh.x1; g_hf.y1 = wh.y1;

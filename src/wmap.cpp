@@ -111,6 +111,7 @@ static float gTime = 0.0f;
 static int gChartSize = 7;
 static int gTestCell[2] = { -1, -1 };
 static float gIslandTop = 0.0f;   // highest terrain point, world units
+static float gTestRadius = 26.0f, gTestTop = 6.0f;
 
 // ---------------------------------------------------------------- shaders
 // lighting mirrors the client's island shader: same sun, same wrap-toon
@@ -1284,6 +1285,12 @@ void wmap_set_player(float x, float y, float z)
 
 float wmap_scale() { return gScale; }
 
+void wmap_set_test_island_size(float radius, float top)
+{
+    if (radius > 1.0f) gTestRadius = radius;
+    gTestTop = top;
+}
+
 bool wmap_active() { return gActive; }
 const WmapHeights& wmap_heights() { return gOut; }
 void wmap_island_center(float* x, float* z)
@@ -1342,7 +1349,7 @@ int wmap_shadow_discs(float* out4, int maxCount)
     if (gTestCell[0] >= 0) {
         float tx, tz;
         wmap_cell_center(gTestCell[0], gTestCell[1], &tx, &tz);
-        add(tx, tz, 26.0f, gSeaLevel + 9.0f);
+        add(tx, tz, gTestRadius, gTestTop);
     }
     for (const ProxyIsle& pr : gProxies)
         add(pr.x, pr.z, pr.radius * 0.85f, gSeaLevel + pr.height);

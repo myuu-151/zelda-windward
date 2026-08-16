@@ -1006,7 +1006,10 @@ void main() {
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    // Wind Waker distance read: darken to a silhouette first, then let
+    // the horizon haze take it
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -2062,8 +2065,8 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 140.0f, center, {0, 1, 0});
-        return mat4_ortho(-95.0f, 95.0f, -95.0f, 95.0f, 20.0f, 300.0f) * view;
+            mat4_look_at(center + sun_dir * 230.0f, center, {0, 1, 0});
+        return mat4_ortho(-165.0f, 165.0f, -165.0f, 165.0f, 20.0f, 470.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 
@@ -2347,9 +2350,13 @@ int main(int argc, char** argv)
         if (wmap_active()) {
             wmap_quadrant_center(app.player.pos.x, app.player.pos.z,
                                  &wx, &wz);
-            const float quad = 240.0f;
-            wx += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
-            wz += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
+            // mostly our own segment so the island always has wind, with
+            // the rest scattered over the neighbours for the open sea
+            if (wrand() > 0.65f) {
+                const float quad = 240.0f;
+                wx += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
+                wz += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
+            }
         }
         w.origin = {wx + std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
                     wz + std::sin(ang) * rad};
@@ -3772,9 +3779,15 @@ int main(int argc, char** argv)
             // the ring hangs over whichever chart quadrant the bird is in,
             // so it follows us from island to island
             Vec3 bird_ring{0.0f, 0.0f, 0.0f};
-            if (wmap_active())
+            float ring_r = 26.0f, ring_y = 14.0f;
+            if (wmap_active()) {
                 wmap_quadrant_center(app.bird_pos.x, app.bird_pos.z,
                                      &bird_ring.x, &bird_ring.z);
+                // over our island the ring widens and lifts so the bird
+                // does not fly through the terrain
+                wmap_flight_ring(app.bird_pos.x, app.bird_pos.z,
+                                 &ring_r, &ring_y);
+            }
 
             switch (app.bird_state) {
                 case Bird::Circle: {
@@ -3784,8 +3797,8 @@ int main(int argc, char** argv)
                     const float az =
                         std::atan2(app.bird_pos.x - bird_ring.x,
                                    app.bird_pos.z - bird_ring.z) + 0.45f;
-                    fly_toward({bird_ring.x + std::sin(az) * 26.0f, 14.0f,
-                                bird_ring.z + std::cos(az) * 26.0f},
+                    fly_toward({bird_ring.x + std::sin(az) * ring_r, ring_y,
+                                bird_ring.z + std::cos(az) * ring_r},
                                6.5f);
                     if (app.bird_summon) {
                         app.bird_summon = false;
@@ -3962,8 +3975,8 @@ int main(int argc, char** argv)
                             std::atan2(app.bird_pos.x - bird_ring.x,
                                        app.bird_pos.z - bird_ring.z) + 0.35f;
                         const float dist = fly_toward(
-                            {bird_ring.x + std::sin(az) * 26.0f, 14.0f,
-                             bird_ring.z + std::cos(az) * 26.0f},
+                            {bird_ring.x + std::sin(az) * ring_r, ring_y,
+                             bird_ring.z + std::cos(az) * ring_r},
                             7.0f);
                         if (dist < 2.5f) app.bird_state = Bird::Circle;
                     }

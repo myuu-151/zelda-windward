@@ -108,6 +108,7 @@ static std::vector<ProxyIsle> gProxies;
 static float gSeaLevel = -2.7f;
 static int gChartSize = 7;
 static int gTestCell[2] = { -1, -1 };
+static float gIslandTop = 0.0f;   // highest terrain point, world units
 
 // ---------------------------------------------------------------- shaders
 // lighting mirrors the client's island shader: same sun, same wrap-toon
@@ -224,7 +225,10 @@ void main() {
     shade *= mix(0.58, 1.0, shadow_factor(vShadowPos));
     col *= shade;
     float d = length(vWorld - uEye);
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    // Wind Waker distance read: darken to a silhouette first, then let
+    // the horizon haze take it
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -350,7 +354,10 @@ void main() {
         col *= 0.68 + 0.42 * diff;
     }
     float d = length(vWorld - uEye);
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    // Wind Waker distance read: darken to a silhouette first, then let
+    // the horizon haze take it
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -502,7 +509,10 @@ void main() {
     col *= 0.62 + 0.38 * diff;
     col *= mix(1.0, 0.45, vT / 1.5);
     float d = length(vWorld - uEye);
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(120.0, 380.0, d));
+    // Wind Waker distance read: darken to a silhouette first, then let
+    // the horizon haze take it
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -1036,22 +1046,22 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     const float quad = TER_HALF * 2.0f * 2.5f;   // island + open sea
     gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * quad;
     gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * quad;
-    // every other quadrant becomes a distant silhouette landmark
-    for (int cy = 0; cy < chartSize; cy++)
-        for (int cx = 0; cx < chartSize; cx++) {
-            if (cx == cellX && cy == cellY)
-                continue;               // the real island lives here
-            if (cx == testX && cy == testY)
-                continue;               // the test island is drawn for real
-            unsigned s = (unsigned)(cx * 73856093 ^ cy * 19349663);
-            float r0 = ((s >> 8) & 1023) / 1023.0f;
-            float r1 = ((s >> 18) & 1023) / 1023.0f;
-            float wx, wz;
-            wmap_cell_center(cx, cy, &wx, &wz);
-            gProxies.push_back({ wx, wz, r0 * 6.2831853f,
-                                 34.0f + r1 * 30.0f,
-                                 12.0f + r0 * 16.0f });
-        }
+    // silhouettes stand in for islands the chart really has but that are
+    // not loaded -- never invent land the player cannot sail to
+    for (const auto& c : assigned) {
+        if (c.first == cellX && c.second == cellY)
+            continue;                   // this one is loaded for real
+        if (c.first == testX && c.second == testY)
+            continue;                   // the test island draws for real
+        unsigned s = (unsigned)(c.first * 73856093 ^ c.second * 19349663);
+        float r0 = ((s >> 8) & 1023) / 1023.0f;
+        float r1 = ((s >> 18) & 1023) / 1023.0f;
+        float wx, wz;
+        wmap_cell_center(c.first, c.second, &wx, &wz);
+        gProxies.push_back({ wx, wz, r0 * 6.2831853f,
+                             34.0f + r1 * 30.0f,
+                             12.0f + r0 * 16.0f });
+    }
     load_styles();
     scan_props();
     if (!load_wmap(mapPath)) {
@@ -1136,6 +1146,10 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 gOut.data[k * 2] = -100.0f;   // open water marker
         }
 
+    gIslandTop = -1e9f;
+    for (float h : gHeights)
+        gIslandTop = SDL_max(gIslandTop, h * gScale + gYOff);
+
     // grass blade instances: bake the editor's density rules on CPU
     unsigned rng = 12345u;
     auto frand = [&rng]() {
@@ -1197,6 +1211,19 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z)
     // chart cells are laid out on a fixed grid: snap to the nearest one
     *x = roundf((wx + off) / quad) * quad - off;
     *z = roundf((wz + off) / quad) * quad - off;
+}
+
+bool wmap_flight_ring(float wx, float wz, float* radius, float* height)
+{
+    if (!gActive)
+        return false;
+    float qx = 0.0f, qz = 0.0f;
+    wmap_quadrant_center(wx, wz, &qx, &qz);
+    if (fabsf(qx - gCenter[0]) > 1.0f || fabsf(qz - gCenter[1]) > 1.0f)
+        return false;               // not the island's quadrant
+    *radius = TER_HALF * 1.35f;     // outside the shore
+    *height = gIslandTop + 14.0f;   // above the peaks and their trees
+    return true;
 }
 
 bool wmap_test_island(float* x, float* z)

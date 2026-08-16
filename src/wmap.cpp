@@ -225,10 +225,11 @@ void main() {
     shade *= mix(0.58, 1.0, shadow_factor(vShadowPos));
     col *= shade;
     float d = length(vWorld - uEye);
-    // Wind Waker distance read: darken to a silhouette first, then let
-    // the horizon haze take it
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
+    // Wind Waker distance read: atmospheric haze washes it out first,
+    // then it settles into a dark silhouette, then dissolves at the rim
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -264,6 +265,7 @@ out float vV;
 out vec2 vLxz;
 out float vSeed;
 out float vShadow;
+out vec3 vWorldPos;
 uniform vec2 uCenter;
 void main() {
     float planeRot = aRS.x + aBlade.z * 1.5707963;
@@ -290,6 +292,7 @@ void main() {
     vV = aBlade.y;
     vLxz = (aRoot.xz - uCenter) / uScale;
     vSeed = fract(aRS.y * 11.13);
+    vWorldPos = p;
     gl_Position = uViewProj * vec4(p, 1.0);
 }
 )GLSL";
@@ -299,13 +302,21 @@ in float vV;
 in vec2 vLxz;
 in float vSeed;
 in float vShadow;
+in vec3 vWorldPos;
 out vec4 fragColor;
 uniform sampler2D uGrassTex;
+uniform vec3 uEye;
 void main() {
     vec3 groundCol = textureLod(uGrassTex, vLxz * 0.16, 4.5).rgb;
     vec3 root = groundCol * 0.55;
     vec3 tip  = groundCol * (1.15 + vSeed * 0.15);
     vec3 col = mix(root, tip, vV * vV) * vShadow;
+    // same distance read as the land it grows on, or the field stays
+    // vivid green while the island behind it turns to silhouette
+    float d = length(vWorldPos - uEye);
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -354,10 +365,11 @@ void main() {
         col *= 0.68 + 0.42 * diff;
     }
     float d = length(vWorld - uEye);
-    // Wind Waker distance read: darken to a silhouette first, then let
-    // the horizon haze take it
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
+    // Wind Waker distance read: atmospheric haze washes it out first,
+    // then it settles into a dark silhouette, then dissolves at the rim
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -509,10 +521,11 @@ void main() {
     col *= 0.62 + 0.38 * diff;
     col *= mix(1.0, 0.45, vT / 1.5);
     float d = length(vWorld - uEye);
-    // Wind Waker distance read: darken to a silhouette first, then let
-    // the horizon haze take it
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
+    // Wind Waker distance read: atmospheric haze washes it out first,
+    // then it settles into a dark silhouette, then dissolves at the rim
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -1675,6 +1688,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniform1f(glGetUniformLocation(gGrassProg, "uTime"), timeSec);
         glUniform2fv(glGetUniformLocation(gGrassProg, "uCenter"), 1, center);
         glUniform1f(glGetUniformLocation(gGrassProg, "uScale"), gScale);
+        glUniform3fv(glGetUniformLocation(gGrassProg, "uEye"), 1, eyeA);
         bindT(gGrassProg, "uGrassTex", 0, gGrassTex);
         bindT(gGrassProg, "uShadow", 1, shadowTex);
         glDisable(GL_CULL_FACE);

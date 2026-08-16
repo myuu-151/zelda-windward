@@ -1006,10 +1006,11 @@ void main() {
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);
-    // Wind Waker distance read: darken to a silhouette first, then let
-    // the horizon haze take it
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(150.0, 330.0, d));
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(330.0, 700.0, d));
+    // Wind Waker distance read: atmospheric haze washes it out first,
+    // then it settles into a dark silhouette, then dissolves at the rim
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -1438,19 +1439,24 @@ struct OrbitCamera {
         // inside of the island.
         constexpr float kSkin = 0.55f;   // clearance kept off the surface
         constexpr float kMinDist = 1.1f; // never end up inside his head
-        constexpr int kSteps = 14;
+        constexpr int kSteps = 20;
         float safe = want;
+        float ridge = -1e9f;             // highest ground the view crosses
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
             const Vec3 s = target + dir * t;
             const float gh = ground_h(s.x, s.z);
-            if (gh > -900.0f && s.y < gh + kSkin) {
+            if (gh <= -900.0f) continue;         // open water, nothing to hit
+            ridge = std::max(ridge, gh);
+            if (s.y < gh + kSkin && safe == want)
                 safe = std::max(kMinDist, t - want / kSteps);
-                break;
-            }
         }
         Vec3 e = target + dir * safe;
-        // and never sit below the surface it ended up over
+        // Sitting off a cliff, over water, the boom hits nothing yet the
+        // sight line still passes through the headland. Lift the eye clear
+        // of the tallest ground between us and the character.
+        if (ridge > -900.0f)
+            e.y = std::max(e.y, ridge + kSkin);
         const float gh = ground_h(e.x, e.z);
         if (gh > -900.0f && e.y < gh + kSkin)
             e.y = gh + kSkin;

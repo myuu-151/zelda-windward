@@ -1596,6 +1596,38 @@ bool wmap_flight_ring(float wx, float wz, float* radius, float* height)
     return true;
 }
 
+// ---- chart readout, for the on-screen map
+int wmap_chart_size() { return gChartSize; }
+float wmap_quad_size() { return gQuadSize; }
+
+int wmap_chart_cells(int* out2, int maxCount)
+{
+    int n = 0;
+    for (const ChartIsle& c : gChart) {
+        if (n >= maxCount)
+            break;
+        out2[n * 2 + 0] = c.cx;
+        out2[n * 2 + 1] = c.cy;
+        ++n;
+    }
+    return n;
+}
+
+bool wmap_spawn_cell(int* cx, int* cy)
+{
+    if (gSpawnCell[0] < 0)
+        return false;
+    *cx = gSpawnCell[0];
+    *cy = gSpawnCell[1];
+    return true;
+}
+
+void wmap_loaded_cell(int* cx, int* cy)
+{
+    *cx = gLoadedCell[0];
+    *cy = gLoadedCell[1];
+}
+
 // where the chart says the game should start, if it says at all
 bool wmap_spawn_center(float* x, float* z)
 {

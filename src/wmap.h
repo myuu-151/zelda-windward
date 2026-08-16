@@ -49,6 +49,13 @@ bool wmap_test_island(float* x, float* z);
 // the quadrant the chart starts the player in ("spawn <x> <y>"); false
 // when the chart does not say, and the loaded island is used instead
 bool wmap_spawn_center(float* x, float* z);
+// chart readout for the on-screen map: grid size, quadrant spacing in
+// world units, which cells hold an island, and which cell is which
+int wmap_chart_size();
+float wmap_quad_size();
+int wmap_chart_cells(int* out2, int maxCount);
+bool wmap_spawn_cell(int* cx, int* cy);
+void wmap_loaded_cell(int* cx, int* cy);
 
 void wmap_init_gl();   // after the GL context + loader are ready
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,

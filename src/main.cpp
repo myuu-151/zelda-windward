@@ -2676,6 +2676,7 @@ int main(int argc, char** argv)
     glBindVertexArray(0);
     std::vector<float> hud_verts;
     float hud_fade = 0.0f;
+    bool show_chart = false;      // M: the sea chart
 
     // the clef glyph, expanded to RGBA so we only need core GL 1.1 formats
     const GLuint clef_prog = link_program(kHudTexVS, kHudTexFS);
@@ -3436,6 +3437,8 @@ int main(int argc, char** argv)
                     break;
                 case SDL_EVENT_KEY_DOWN:
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
+                    if (ev.key.key == SDLK_M && !ev.key.repeat)
+                        show_chart = !show_chart;
 #ifndef ZELDA_RETAIL
                     if (ev.key.key == SDLK_F2) want_shot = true;
                     if (ev.key.key == SDLK_F4 && !ev.key.repeat && app.riding) {
@@ -5906,6 +5909,101 @@ int main(int argc, char** argv)
                 glDisable(GL_BLEND);
                 glEnable(GL_DEPTH_TEST);
             }
+        }
+
+        // --- sea chart (M): the quadrant grid, the islands on it, and
+        // where you are, live. Drawn with the ocarina HUD's flat-colour
+        // shader in the same virtual 1280x720 space.
+        if (show_chart && wmap_active()) {
+            constexpr float VW = 1280.0f, VH = 720.0f;
+            const int N = wmap_chart_size();
+            const float quad = wmap_quad_size();
+            const float PANEL = 460.0f;
+            const float cellPx = PANEL / N;
+            const float x0 = VW - PANEL - 28.0f, y0 = 28.0f;
+
+            std::vector<float> cv;
+            auto vtx = [&](float x, float y, const float* c) {
+                cv.insert(cv.end(), {x, y, c[0], c[1], c[2], c[3]});
+            };
+            auto tri = [&](float ax, float ay, float bx, float by, float cx2,
+                           float cy2, const float* c) {
+                vtx(ax, ay, c); vtx(bx, by, c); vtx(cx2, cy2, c);
+            };
+            auto rect = [&](float x, float y, float w, float h, const float* c) {
+                tri(x, y, x + w, y, x, y + h, c);
+                tri(x + w, y, x + w, y + h, x, y + h, c);
+            };
+
+            const float sea[4] = {0.09f, 0.24f, 0.42f, 0.86f};
+            const float grid[4] = {0.55f, 0.72f, 0.86f, 0.45f};
+            const float isle[4] = {0.42f, 0.66f, 0.32f, 0.95f};
+            const float here[4] = {0.55f, 0.78f, 0.42f, 1.0f};
+            const float start[4] = {0.95f, 0.78f, 0.26f, 1.0f};
+            const float you[4] = {1.0f, 0.98f, 0.92f, 1.0f};
+
+            const float frame[4] = {0.05f, 0.09f, 0.16f, 0.9f};
+            rect(x0 - 6.0f, y0 - 6.0f, PANEL + 12.0f, PANEL + 12.0f, frame);
+            rect(x0, y0, PANEL, PANEL, sea);
+
+            int cells[64 * 2];
+            const int nc = wmap_chart_cells(cells, 64);
+            int lx = -99, ly = -99, sx2 = -99, sy2 = -99;
+            wmap_loaded_cell(&lx, &ly);
+            const bool hasStart = wmap_spawn_cell(&sx2, &sy2);
+            for (int i = 0; i < nc; i++) {
+                const int cx2 = cells[i * 2], cy2 = cells[i * 2 + 1];
+                const float px = x0 + cx2 * cellPx, py = y0 + cy2 * cellPx;
+                const bool isHere = (cx2 == lx && cy2 == ly);
+                rect(px + 3.0f, py + 3.0f, cellPx - 6.0f, cellPx - 6.0f,
+                     isHere ? here : isle);
+                if (hasStart && cx2 == sx2 && cy2 == sy2)
+                    rect(px + 3.0f, py + 3.0f, cellPx - 6.0f, 5.0f, start);
+            }
+            // grid lines last, so they read over the islands
+            for (int i = 0; i <= N; i++) {
+                rect(x0 + i * cellPx - 1.0f, y0, 2.0f, PANEL, grid);
+                rect(x0, y0 + i * cellPx - 1.0f, PANEL, 2.0f, grid);
+            }
+
+            // you: an arrow, pointing where you are facing
+            {
+                const float fx = app.player.pos.x / quad + (N - 1) * 0.5f;
+                const float fy = app.player.pos.z / quad + (N - 1) * 0.5f;
+                const float px = x0 + (fx + 0.5f) * cellPx;
+                const float py = y0 + (fy + 0.5f) * cellPx;
+                if (px > x0 - cellPx && px < x0 + PANEL + cellPx &&
+                    py > y0 - cellPx && py < y0 + PANEL + cellPx) {
+                    // world +z is south on the chart, and the HUD's y runs
+                    // down, so heading maps straight through
+                    const float yaw = app.riding ? app.bird_yaw
+                                                 : app.player.yaw;
+                    const float dx = std::sin(yaw), dy = std::cos(yaw);
+                    const float r = 11.0f;
+                    const float nx = -dy, ny = dx;   // across the heading
+                    tri(px + dx * r, py + dy * r,
+                        px - dx * r * 0.6f + nx * r * 0.62f,
+                        py - dy * r * 0.6f + ny * r * 0.62f,
+                        px - dx * r * 0.6f - nx * r * 0.62f,
+                        py - dy * r * 0.6f - ny * r * 0.62f, you);
+                }
+            }
+
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(hud_prog);
+            const float chart_screen[3] = {VW, VH, 0.0f};
+            glUniform3fv(h_screen, 1, chart_screen);
+            glBindVertexArray(hud_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, hud_vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(cv.size() * sizeof(float)),
+                         cv.data(), GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(cv.size() / 6));
+            glBindVertexArray(0);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
         }
 
         // --- mount prompt: a small pill bottom-center while standing in the

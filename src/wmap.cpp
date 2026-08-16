@@ -2108,11 +2108,7 @@ void build_island_gl()
 
     // prop meshes used by instances
     int okMeshes = 0, badMeshes = 0;
-    std::vector<PropInst> drawProps = gProps;
-    if (gPrev.vao)
-        drawProps.insert(drawProps.end(), gPrev.props.begin(),
-                         gPrev.props.end());
-    for (const PropInst& pi : drawProps) {
+    for (const PropInst& pi : gProps) {
         PropMesh& pm = gMeshes[pi.mesh];
         if (pm.loaded)
             continue;
@@ -2333,7 +2329,13 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         GLint locHas = glGetUniformLocation(gPropProg, "uHasTex");
         GLint locGray = glGetUniformLocation(gPropProg, "uGrayMask");
         glDisable(GL_CULL_FACE);
-        for (const PropInst& inst : gProps) {
+        // the island still being retained keeps its trees: its meshes are
+        // already loaded and its instances are in world space
+        std::vector<PropInst> drawProps = gProps;
+        if (gPrev.vao && !gPrev.props.empty())
+            drawProps.insert(drawProps.end(), gPrev.props.begin(),
+                             gPrev.props.end());
+        for (const PropInst& inst : drawProps) {
             PropMesh& pm = gMeshes[inst.mesh];
             if (!pm.loaded)
                 continue;

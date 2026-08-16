@@ -125,6 +125,12 @@ static float gSeaLevel = -2.7f;
 static float gPlayer[3] = { 0.0f, -1000.0f, 0.0f };
 static float gTime = 0.0f;
 static int gChartSize = 7;
+// Spacing between quadrants, in world units. This has to be a property of
+// the CHART, not of whichever island happens to be loaded: derived from
+// the loaded island it changed every time streaming swapped one in, so
+// every island's world position moved and the player appeared to be
+// teleported. Sized to hold the largest island the chart names.
+static float gQuadSize = 240.0f;
 static int gTestCell[2] = { -1, -1 };
 struct ChartIsle { int cx, cy; std::string path; };
 static std::vector<ChartIsle> gChart;
@@ -1175,6 +1181,25 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     }
     if (mapPath.empty())
         return false;
+    // read each island's header for its world size, so quadrants are
+    // spaced to fit the biggest one and never move again
+    {
+        float maxHalf = 24.0f;
+        for (const ChartIsle& c : gChart) {
+            FILE* mf = fopen(c.path.c_str(), "rb");
+            if (!mf)
+                continue;
+            char mg[8];
+            float half = 24.0f;
+            if (fread(mg, 1, 8, mf) == 8 && memcmp(mg, "TERMAP0", 7) == 0 &&
+                mg[7] >= '8' && fread(&half, 4, 1, mf) == 1)
+                maxHalf = SDL_max(maxHalf, half);
+            fclose(mf);
+        }
+        gQuadSize = SDL_max(240.0f, maxHalf * 2.0f * gScale * 1.3f);
+        SDL_Log("wmap: quadrants %.0f units apart (largest island %.0f)",
+                gQuadSize, maxHalf * 2.0f * gScale);
+    }
     if (gSpawnCell[0] >= 0)
         SDL_Log("wmap: chart starts at %c%d", 'A' + gSpawnCell[0],
                 gSpawnCell[1] + 1);
@@ -1484,8 +1509,7 @@ bool wmap_stream(float px, float pz)
     const ChartIsle& c = gChart[best];
     if (c.cx == gLoadedCell[0] && c.cy == gLoadedCell[1])
         return false;
-    const float quad = TER_HALF * 2.0f * 2.5f;
-    if (bestD2 > (quad * 0.75f) * (quad * 0.75f))
+    if (bestD2 > (gQuadSize * 0.75f) * (gQuadSize * 0.75f))
         return false;              // still out at sea between islands
     SDL_Log("wmap: streaming in %c%d", 'A' + c.cx, c.cy + 1);
     free_island_gl();
@@ -1505,9 +1529,8 @@ void wmap_island_center(float* x, float* z)
 
 void wmap_cell_center(int cx, int cy, float* x, float* z)
 {
-    const float quad = TER_HALF * 2.0f * 2.5f;
-    *x = (cx - (gChartSize - 1) * 0.5f) * quad;
-    *z = (cy - (gChartSize - 1) * 0.5f) * quad;
+    *x = (cx - (gChartSize - 1) * 0.5f) * gQuadSize;
+    *z = (cy - (gChartSize - 1) * 0.5f) * gQuadSize;
 }
 
 void wmap_quadrant_center(float wx, float wz, float* x, float* z)

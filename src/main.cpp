@@ -1325,6 +1325,26 @@ uniform sampler2D uShore;
 uniform vec4 uShoreRect;   // x0, y0, 1/width, 1/height
 uniform float uHasShore;
 uniform float uIslandY;    // shore field heights are stored relative to it
+uniform int uDiscCount;
+uniform vec4 uDiscs[16];   // x, z, radius, top height
+
+// Islands as discs, projected along the sun onto the sea. The shadow map
+// only covers water near the player and the marched field only knows the
+// loaded island, so this is what keeps shadows under every island however
+// far away you fly.
+float island_disc_shadow(vec3 world)
+{
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    float s = 1.0;
+    for (int i = 0; i < uDiscCount; ++i) {
+        vec4 I = uDiscs[i];
+        float lift = max(0.0, I.w - world.y);
+        vec2 c = I.xy - L.xz / max(L.y, 0.05) * lift;
+        float d = length(world.xz - c);
+        s = min(s, smoothstep(I.z * 0.72, I.z * 1.06, d));
+    }
+    return s;
+}
 
 // The sun shadow map only spans the water near the player, so a island's
 // cast shadow used to vanish as you flew off. The shore field carries the
@@ -1386,8 +1406,12 @@ void main() {
     // island shadow carries on past its reach.
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
-    col *= mix(0.66, 1.0, min(shadow_factor(vShadowPos), isl));
+    float disc = island_disc_shadow(vWorld);
+    col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
+    // the haze would erase every distant shadow, so let the island discs
+    // keep tinting the water after it
+    col *= mix(0.84, 1.0, disc);
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -2190,6 +2214,8 @@ int main(int argc, char** argv)
     const GLint wa_shorerect = glGetUniformLocation(water_prog, "uShoreRect");
     const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
     const GLint wa_islandy = glGetUniformLocation(water_prog, "uIslandY");
+    const GLint wa_disccount = glGetUniformLocation(water_prog, "uDiscCount");
+    const GLint wa_discs = glGetUniformLocation(water_prog, "uDiscs");
     const GLint wa_lightvp = glGetUniformLocation(water_prog, "uLightVP");
     const GLint wa_shadowmap = glGetUniformLocation(water_prog, "uShadowMap");
     // water sea: subdivided grid so the vertex waves can roll
@@ -5058,6 +5084,13 @@ int main(int argc, char** argv)
         }
         glUniform1f(wa_hasshore, shore_tex ? 1.0f : 0.0f);
         glUniform1f(wa_islandy, kIslandY);
+        {
+            float discs[16 * 4];
+            const int nd = wmap_active()
+                ? wmap_shadow_discs(discs, 16) : 0;
+            glUniform1i(wa_disccount, nd);
+            if (nd > 0) glUniform4fv(wa_discs, nd, discs);
+        }
         if (shore_tex) {
             glUniform1i(wa_shore, 1);
             const float rect4[4] = {g_hf.x0, g_hf.y0,

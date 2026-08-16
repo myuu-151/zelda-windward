@@ -1241,6 +1241,32 @@ float wmap_block_height(float wx, float wz)
     return height_at(cx, cz) + gYOff;
 }
 
+int wmap_shadow_discs(float* out4, int maxCount)
+{
+    if (!gActive)
+        return 0;
+    int n = 0;
+    auto add = [&](float x, float z, float r, float top) {
+        if (n >= maxCount) return;
+        out4[n * 4 + 0] = x;
+        out4[n * 4 + 1] = z;
+        out4[n * 4 + 2] = r;
+        out4[n * 4 + 3] = top;
+        ++n;
+    };
+    // the loaded island: its own marched shadow is exact up close, but a
+    // disc still carries it once the sea is hazy and far away
+    add(gCenter[0], gCenter[1], TER_HALF * 0.95f, gIslandTop);
+    if (gTestCell[0] >= 0) {
+        float tx, tz;
+        wmap_cell_center(gTestCell[0], gTestCell[1], &tx, &tz);
+        add(tx, tz, 26.0f, gSeaLevel + 9.0f);
+    }
+    for (const ProxyIsle& pr : gProxies)
+        add(pr.x, pr.z, pr.radius * 0.85f, gSeaLevel + pr.height);
+    return n;
+}
+
 bool wmap_flight_ring(float wx, float wz, float* radius, float* height)
 {
     if (!gActive)

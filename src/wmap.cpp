@@ -106,6 +106,8 @@ struct ProxyIsle {
 };
 static std::vector<ProxyIsle> gProxies;
 static float gSeaLevel = -2.7f;
+static float gPlayer[3] = { 0.0f, -1000.0f, 0.0f };
+static float gTime = 0.0f;
 static int gChartSize = 7;
 static int gTestCell[2] = { -1, -1 };
 static float gIslandTop = 0.0f;   // highest terrain point, world units
@@ -261,6 +263,7 @@ uniform mat4 uLightVP;
 uniform float uTime;
 uniform sampler2DShadow uShadow;
 uniform float uScale;
+uniform vec3 uPlayer;      // blades bow away from whoever walks through
 out float vV;
 out vec2 vLxz;
 out float vSeed;
@@ -280,6 +283,24 @@ void main() {
     float sway  = (gust * 0.10 + sin(uTime * 3.1 + aRS.y * 6.28) * 0.03)
                   * aBlade.y * aBlade.y;
     p.xz += vec2(0.85, 0.53) * sway;
+
+    // trampling: within a small radius the blade bows away from the
+    // player and flattens, tips moving most so roots stay planted
+    vec2 away = aRoot.xz - uPlayer.xz;
+    float pd = length(away);
+    float reach = 1.5 * uScale;
+    if (pd < reach) {
+        float w = 1.0 - pd / reach;
+        // only what he is actually standing among: ignore blades far
+        // below a flying player or above him on a terrace
+        float vert = 1.0 - clamp(abs(uPlayer.y - aRoot.y) /
+                                 (2.2 * uScale), 0.0, 1.0);
+        float push = w * w * vert;
+        vec2 dirp = pd > 0.001 ? away / pd : vec2(1.0, 0.0);
+        float lean = aBlade.y * aBlade.y;
+        p.xz += dirp * push * hgt * 0.85 * lean;
+        p.y  -= push * hgt * 0.45 * lean;
+    }
 
     // one shadow probe per blade at the root, via the client shadow map
     vec4 sp = uLightVP * vec4(aRoot, 1.0);
@@ -384,14 +405,39 @@ layout(location=3) in vec3 aVCol;
 uniform mat4 uViewProj;
 uniform mat4 uLightVP;
 uniform mat4 uModel;
+uniform float uTime;
+uniform float uBoundH;
+uniform int uGrayMask;
 out vec3 vNrm;
 out vec2 vUv;
 out float vLocalY;
 out vec3 vWorld;
 out vec3 vVCol;
 out vec4 vShadowPos;
+
+// the client's island wind, so pack props lean in step with its tree:
+// a steady downwind lean plus gusts, weighted by height above the base
+// so trunks stay planted, and a fine flutter on leaf cards
+vec3 wind_sway(vec3 p, float w, float t, int leafy) {
+    if (w <= 0.0) return p;
+    const vec2 W = normalize(vec2(-1.0, -0.35));
+    float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
+                 0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
+    vec2 perp = vec2(-W.y, W.x);
+    vec2 sway = W * (0.55 + gust) +
+                perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
+    p.xz += sway * (0.10 * w * w);
+    if (leafy == 1)
+        p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
+                     cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
+    return p;
+}
+
 void main() {
     vec4 world = uModel * vec4(aPos, 1.0);
+    world.xyz = wind_sway(world.xyz,
+                          clamp(aPos.y / max(uBoundH, 0.001), 0.0, 1.0),
+                          uTime, uGrayMask);
     vNrm = mat3(uModel) * aNorm;
     vUv = aUv;
     vLocalY = aPos.y;
@@ -543,8 +589,37 @@ layout(location=0) in vec3 aPos;
 layout(location=2) in vec2 aUv;
 uniform mat4 uLightVP;
 uniform mat4 uModel;
+uniform float uTime;
+uniform float uBoundH;
+uniform int uGrayMask;
 out vec2 vUv;
-void main() { vUv = aUv; gl_Position = uLightVP * uModel * vec4(aPos, 1.0); }
+
+// the client's island wind, so pack props lean in step with its tree:
+// a steady downwind lean plus gusts, weighted by height above the base
+// so trunks stay planted, and a fine flutter on leaf cards
+vec3 wind_sway(vec3 p, float w, float t, int leafy) {
+    if (w <= 0.0) return p;
+    const vec2 W = normalize(vec2(-1.0, -0.35));
+    float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
+                 0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
+    vec2 perp = vec2(-W.y, W.x);
+    vec2 sway = W * (0.55 + gust) +
+                perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
+    p.xz += sway * (0.10 * w * w);
+    if (leafy == 1)
+        p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
+                     cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
+    return p;
+}
+
+void main() {
+    vUv = aUv;
+    vec4 world = uModel * vec4(aPos, 1.0);
+    world.xyz = wind_sway(world.xyz,
+                          clamp(aPos.y / max(uBoundH, 0.001), 0.0, 1.0),
+                          uTime, uGrayMask);
+    gl_Position = uLightVP * world;
+}
 )GLSL";
 static const char* kDepthPropFS = R"GLSL(#version 330 core
 in vec2 vUv;
@@ -1202,6 +1277,11 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     return true;
 }
 
+void wmap_set_player(float x, float y, float z)
+{
+    gPlayer[0] = x; gPlayer[1] = y; gPlayer[2] = z;
+}
+
 bool wmap_active() { return gActive; }
 const WmapHeights& wmap_heights() { return gOut; }
 void wmap_island_center(float* x, float* z)
@@ -1544,6 +1624,7 @@ void wmap_draw_shadow(const Mat4& lightVP)
         glUniformMatrix4fv(glGetUniformLocation(gDepthPropProg, "uLightVP"),
                            1, GL_FALSE, lightVP.m);
         glUniform1i(glGetUniformLocation(gDepthPropProg, "uTex"), 0);
+        glUniform1f(glGetUniformLocation(gDepthPropProg, "uTime"), gTime);
         GLint dModel = glGetUniformLocation(gDepthPropProg, "uModel");
         GLint dHas = glGetUniformLocation(gDepthPropProg, "uHasTex");
         GLint dGray = glGetUniformLocation(gDepthPropProg, "uGrayMask");
@@ -1560,6 +1641,8 @@ void wmap_draw_shadow(const Mat4& lightVP)
             mdl.m[12] = inst.x; mdl.m[13] = inst.y; mdl.m[14] = inst.z;
             mdl.m[15] = 1.0f;
             glUniformMatrix4fv(dModel, 1, GL_FALSE, mdl.m);
+            glUniform1f(glGetUniformLocation(gDepthPropProg, "uBoundH"),
+                        pm.boundH);
             glBindVertexArray(pm.vao);
             for (const PropSub& sub : pm.subs) {
                 const PropMat& mat = pm.mats[sub.mat];
@@ -1589,6 +1672,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
+    gTime = timeSec;
     const float eyeA[3] = { eye.x, eye.y, eye.z };
     const float center[2] = { gCenter[0], gCenter[1] };
 
@@ -1682,6 +1766,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniformMatrix4fv(glGetUniformLocation(gPropProg, "uLightVP"), 1,
                            GL_FALSE, lightVP.m);
         glUniform3fv(glGetUniformLocation(gPropProg, "uEye"), 1, eyeA);
+        glUniform1f(glGetUniformLocation(gPropProg, "uTime"), timeSec);
         bindT(gPropProg, "uShadow", 5, shadowTex);
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(glGetUniformLocation(gPropProg, "uTex"), 0);
@@ -1729,6 +1814,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniform1f(glGetUniformLocation(gGrassProg, "uTime"), timeSec);
         glUniform2fv(glGetUniformLocation(gGrassProg, "uCenter"), 1, center);
         glUniform1f(glGetUniformLocation(gGrassProg, "uScale"), gScale);
+        glUniform3fv(glGetUniformLocation(gGrassProg, "uPlayer"), 1, gPlayer);
         glUniform3fv(glGetUniformLocation(gGrassProg, "uEye"), 1, eyeA);
         bindT(gGrassProg, "uGrassTex", 0, gGrassTex);
         bindT(gGrassProg, "uShadow", 1, shadowTex);

@@ -46,3 +46,5 @@ void wmap_init_gl();   // after the GL context + loader are ready
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
                GLuint shadowTex, float timeSec);
 void wmap_draw_shadow(const Mat4& lightVP);
+// who is walking through the grass this frame, so blades bow aside
+void wmap_set_player(float x, float y, float z);

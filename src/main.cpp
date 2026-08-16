@@ -5029,6 +5029,8 @@ int main(int argc, char** argv)
         const Vec3 cam_eye = app.cam.eye();
         const float eye3[3] = {cam_eye.x, cam_eye.y, cam_eye.z};
         if (wmap_active()) {
+            wmap_set_player(app.player.pos.x, app.player.pos.y,
+                            app.player.pos.z);
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, shadow_tex);
             wmap_draw(viewproj, cam_eye, light_vp, shadow_tex,

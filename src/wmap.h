@@ -24,6 +24,11 @@ bool wmap_active();
 const WmapHeights& wmap_heights();
 // world-space center of the loaded island (its chart quadrant)
 void wmap_island_center(float* x, float* z);
+// world-space centre of any chart quadrant
+void wmap_cell_center(int cx, int cy, float* x, float* z);
+// the built-in test island's quadrant ("testisland <x> <y>" in the
+// .wworld); false when the chart does not place it
+bool wmap_test_island(float* x, float* z);
 
 void wmap_init_gl();   // after the GL context + loader are ready
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,

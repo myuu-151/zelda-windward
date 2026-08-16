@@ -98,6 +98,16 @@ static GLuint gPropProg = 0, gSkirtProg = 0;
 static GLuint gSkirtVao = 0;
 static GLsizei gSkirtIdx = 0;
 static GLuint gDepthProg = 0, gDepthPropProg = 0;
+// distant island silhouettes, one per chart quadrant
+static GLuint gProxyProg = 0, gProxyVao = 0;
+static GLsizei gProxyIdx = 0;
+struct ProxyIsle {
+    float x, z, seed, radius, height;
+};
+static std::vector<ProxyIsle> gProxies;
+static float gSeaLevel = -2.7f;
+static int gChartSize = 7;
+static int gTestCell[2] = { -1, -1 };
 
 // ---------------------------------------------------------------- shaders
 // lighting mirrors the client's island shader: same sun, same wrap-toon
@@ -370,6 +380,53 @@ void main() {
     vVCol = aVCol;
     vShadowPos = uLightVP * world;
     gl_Position = uViewProj * world;
+}
+)GLSL";
+
+// Distant islands: every other chart quadrant gets a dark silhouette
+// proxy on the horizon, the Wind Waker trick that turns open sea into a
+// navigable map. Shape varies per cell from its seed.
+static const char* kProxyVS = R"GLSL(#version 330 core
+layout(location=0) in vec2 aRT;    // ring t, angle
+uniform mat4 uViewProj;
+uniform vec2 uCell;                // island centre in world xz
+uniform float uSeed;
+uniform float uRadius;
+uniform float uHeight;
+uniform float uBase;               // sea level
+out vec3 vWorld;
+out float vUp;
+void main() {
+    float t = aRT.x;               // 0 centre .. 1 shore
+    float a = aRT.y;
+    // ragged outline: a few harmonics keyed off the cell seed
+    float wob = 0.78
+        + 0.16 * sin(a * 2.0 + uSeed * 6.28)
+        + 0.10 * sin(a * 3.0 - uSeed * 11.3)
+        + 0.07 * sin(a * 5.0 + uSeed * 3.1);
+    float r = t * uRadius * wob;
+    // domed profile with a couple of peaks
+    float peak = 0.55 + 0.45 * sin(a * 2.0 + uSeed * 4.7);
+    float h = uBase + uHeight * peak * pow(max(0.0, 1.0 - t), 1.6);
+    vec3 p = vec3(uCell.x + cos(a) * r, h, uCell.y + sin(a) * r);
+    vUp = 1.0 - t;
+    vWorld = p;
+    gl_Position = uViewProj * vec4(p, 1.0);
+}
+)GLSL";
+
+static const char* kProxyFS = R"GLSL(#version 330 core
+in vec3 vWorld;
+in float vUp;
+out vec4 fragColor;
+uniform vec3 uEye;
+void main() {
+    // flat dark landmass, hazing into the horizon with distance
+    vec3 dark = mix(vec3(0.16, 0.26, 0.38), vec3(0.24, 0.36, 0.46), vUp);
+    float d = length(vWorld - uEye);
+    vec3 col = mix(dark, vec3(0.66, 0.80, 0.95),
+                   smoothstep(200.0, 700.0, d));
+    fragColor = vec4(col, 1.0);
 }
 )GLSL";
 
@@ -904,10 +961,13 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     if (worldPath.empty())
         return false;
 
-    // parse the chart: take the first assigned island, note its quadrant
+    // parse the chart: the first assigned island is the playable one, the
+    // rest become distant silhouettes
     std::string mapPath;
     float waterline = -3.0f;
     int chartSize = 7, cellX = 0, cellY = 0;
+    std::vector<std::pair<int, int>> assigned;
+    int testX = -1, testY = -1;
     {
         FILE* f = fopen(worldPath.c_str(), "rb");
         if (!f)
@@ -924,8 +984,12 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 gScale = SDL_max(0.1f, wl);
                 TER_HALF = 24.0f * gScale;
             }
-            else if (mapPath.empty() &&
-                     sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3) {
+            else if (sscanf(line, "testisland %d %d", &x, &y) == 2) {
+                testX = x;
+                testY = y;
+            }
+            else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3 &&
+                     (assigned.push_back({ x, y }), mapPath.empty())) {
                 mapPath = p;
                 // tolerate CRLF and stray trailing spaces in the path
                 while (!mapPath.empty() &&
@@ -965,9 +1029,29 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     // instances are baked into world space as they are read
     gTune.waterline = waterline;
     gYOff = waterSkim - waterline * gScale;
+    gSeaLevel = waterSkim;
+    gChartSize = chartSize;
+    gTestCell[0] = testX;
+    gTestCell[1] = testY;
     const float quad = TER_HALF * 2.0f * 2.5f;   // island + open sea
     gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * quad;
     gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * quad;
+    // every other quadrant becomes a distant silhouette landmark
+    for (int cy = 0; cy < chartSize; cy++)
+        for (int cx = 0; cx < chartSize; cx++) {
+            if (cx == cellX && cy == cellY)
+                continue;               // the real island lives here
+            if (cx == testX && cy == testY)
+                continue;               // the test island is drawn for real
+            unsigned s = (unsigned)(cx * 73856093 ^ cy * 19349663);
+            float r0 = ((s >> 8) & 1023) / 1023.0f;
+            float r1 = ((s >> 18) & 1023) / 1023.0f;
+            float wx, wz;
+            wmap_cell_center(cx, cy, &wx, &wz);
+            gProxies.push_back({ wx, wz, r0 * 6.2831853f,
+                                 34.0f + r1 * 30.0f,
+                                 12.0f + r0 * 16.0f });
+        }
     load_styles();
     scan_props();
     if (!load_wmap(mapPath)) {
@@ -1097,6 +1181,21 @@ void wmap_island_center(float* x, float* z)
 {
     *x = gCenter[0];
     *z = gCenter[1];
+}
+
+void wmap_cell_center(int cx, int cy, float* x, float* z)
+{
+    const float quad = TER_HALF * 2.0f * 2.5f;
+    *x = (cx - (gChartSize - 1) * 0.5f) * quad;
+    *z = (cy - (gChartSize - 1) * 0.5f) * quad;
+}
+
+bool wmap_test_island(float* x, float* z)
+{
+    if (!gActive || gTestCell[0] < 0)
+        return false;
+    wmap_cell_center(gTestCell[0], gTestCell[1], x, z);
+    return true;
 }
 
 void wmap_init_gl()
@@ -1283,6 +1382,39 @@ void wmap_init_gl()
         glBindVertexArray(0);
     }
 
+    // silhouette proxy: a radial disc the shader shapes per island
+    {
+        gProxyProg = compile_prog(kProxyVS, kProxyFS);
+        const int RINGS = 10, SEG = 40;
+        std::vector<float> pv;
+        for (int r = 0; r <= RINGS; r++)
+            for (int s = 0; s < SEG; s++)
+                pv.insert(pv.end(), { (float)r / RINGS,
+                                      6.2831853f * s / SEG });
+        std::vector<unsigned> pi;
+        for (int r = 0; r < RINGS; r++)
+            for (int s = 0; s < SEG; s++) {
+                unsigned a = r * SEG + s, b = r * SEG + (s + 1) % SEG;
+                unsigned c = a + SEG, d = b + SEG;
+                pi.insert(pi.end(), { a, c, b, b, c, d });
+            }
+        gProxyIdx = (GLsizei)pi.size();
+        GLuint vbo = 0, ibo = 0;
+        glGenVertexArrays(1, &gProxyVao);
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ibo);
+        glBindVertexArray(gProxyVao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, pv.size() * sizeof(float), pv.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, pi.size() * sizeof(unsigned),
+                     pi.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(0);
+    }
+
     // prop meshes used by instances
     int okMeshes = 0, badMeshes = 0;
     for (const PropInst& pi : gProps) {
@@ -1369,6 +1501,36 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     }
     const float eyeA[3] = { eye.x, eye.y, eye.z };
     const float center[2] = { gCenter[0], gCenter[1] };
+
+    // distant island silhouettes on the horizon
+    if (gProxyProg && !gProxies.empty()) {
+        glUseProgram(gProxyProg);
+        glUniformMatrix4fv(glGetUniformLocation(gProxyProg, "uViewProj"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniform3fv(glGetUniformLocation(gProxyProg, "uEye"), 1, eyeA);
+        glUniform1f(glGetUniformLocation(gProxyProg, "uBase"), gSeaLevel);
+        GLint lCell = glGetUniformLocation(gProxyProg, "uCell");
+        GLint lSeed = glGetUniformLocation(gProxyProg, "uSeed");
+        GLint lRad = glGetUniformLocation(gProxyProg, "uRadius");
+        GLint lHgt = glGetUniformLocation(gProxyProg, "uHeight");
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(gProxyVao);
+        for (const ProxyIsle& pr : gProxies) {
+            float dx = pr.x - eye.x, dz = pr.z - eye.z;
+            float d2 = dx * dx + dz * dz;
+            if (d2 > 620.0f * 620.0f)
+                continue;             // past the camera's far plane
+            // they are silhouettes, not places: drop them before the
+            // player can fly into one
+            if (d2 < 200.0f * 200.0f)
+                continue;
+            glUniform2f(lCell, pr.x, pr.z);
+            glUniform1f(lSeed, pr.seed);
+            glUniform1f(lRad, pr.radius);
+            glUniform1f(lHgt, pr.height);
+            glDrawElements(GL_TRIANGLES, gProxyIdx, GL_UNSIGNED_INT, nullptr);
+        }
+    }
 
     // terrain
     glUseProgram(gTerProg);

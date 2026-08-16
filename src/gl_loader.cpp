@@ -33,6 +33,7 @@
     X(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation) \
     X(PFNGLUNIFORM1IPROC, glUniform1i) \
     X(PFNGLUNIFORM1FPROC, glUniform1f) \
+    X(PFNGLUNIFORM2FPROC, glUniform2f) \
     X(PFNGLUNIFORM2FVPROC, glUniform2fv) \
     X(PFNGLUNIFORM3FVPROC, glUniform3fv) \
     X(PFNGLUNIFORM4FVPROC, glUniform4fv) \

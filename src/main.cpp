@@ -4710,10 +4710,14 @@ int main(int argc, char** argv)
             glPolygonOffset(1.0f, 1.0f);
             if (wmap_active())
                 wmap_draw_shadow(light_vp);
-            if ((island.index_count || props.index_count) && !wmap_active()) {
+            // with a chart loaded the test island moves to its quadrant
+            float tix = 0.0f, tiz = 0.0f;
+            const bool test_isle_placed = wmap_test_island(&tix, &tiz);
+            if ((island.index_count || props.index_count) &&
+                (!wmap_active() || test_isle_placed)) {
                 glUseProgram(shadow_prog);
                 glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, light_vp.m);
-                const float off3[3] = {0.0f, kIslandY, 0.0f};
+                const float off3[3] = {tix, kIslandY, tiz};
                 glUniform3fv(sh_offset, 1, off3);
                 glUniform1i(sh_tex, 0);
                 glUniform1f(sh_time, static_cast<float>(app.sim_time));
@@ -4816,13 +4820,16 @@ int main(int argc, char** argv)
             wmap_draw(viewproj, cam_eye, light_vp, shadow_tex,
                       static_cast<float>(app.sim_time));
         }
-        // an editor island replaces the baked test island entirely
-        if ((island.index_count || props.index_count) && !wmap_active()) {
+        // the test island sits at its own chart quadrant when one is given
+        float tisx = 0.0f, tisz = 0.0f;
+        const bool test_isle_shown = wmap_test_island(&tisx, &tisz);
+        if ((island.index_count || props.index_count) &&
+            (!wmap_active() || test_isle_shown)) {
             glUseProgram(island_prog);
             glUniformMatrix4fv(is_viewproj, 1, GL_FALSE, viewproj.m);
             glUniformMatrix4fv(is_lightvp, 1, GL_FALSE, light_vp.m);
             glUniform3fv(is_eye, 1, eye3);
-            const float off3[3] = {0.0f, kIslandY, 0.0f};
+            const float off3[3] = {tisx, kIslandY, tisz};
             glUniform3fv(is_offset, 1, off3);
             glUniform1i(is_tex, 0);
             glUniform1i(is_shadowmap, 2);

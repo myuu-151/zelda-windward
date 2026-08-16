@@ -111,8 +111,14 @@ static float gPlayer[3] = { 0.0f, -1000.0f, 0.0f };
 static float gTime = 0.0f;
 static int gChartSize = 7;
 static int gTestCell[2] = { -1, -1 };
+struct ChartIsle { int cx, cy; std::string path; };
+static std::vector<ChartIsle> gChart;      // every island the chart names
+static int gLoadedCell[2] = { -99, -99 };  // which one is resident
 static float gIslandTop = 0.0f;   // highest terrain point, world units
 static float gTestRadius = 26.0f, gTestTop = 6.0f;
+static float gIslandYConst = 0.0f, gWaterSkimK = -2.7f;
+// height texture for the skirt shader (lazy, created on first draw)
+static GLuint gSkirtHeightTex = 0;
 
 // ---------------------------------------------------------------- shaders
 // lighting mirrors the client's island shader: same sun, same wrap-toon
@@ -736,6 +742,9 @@ static Uint8 mask_at(const std::vector<Uint8>& m, float x, float z)
 
 // ---------------------------------------------------------------- loading
 
+static void build_heightfield();
+static void build_blades();
+
 static bool load_wmap(const std::string& path)
 {
     FILE* f = fopen(path.c_str(), "rb");
@@ -1115,16 +1124,20 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 testX = x;
                 testY = y;
             }
-            else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3 &&
-                     (assigned.push_back({ x, y }), mapPath.empty())) {
-                mapPath = p;
+            else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3) {
+                assigned.push_back({ x, y });
+                std::string q = p;
                 // tolerate CRLF and stray trailing spaces in the path
-                while (!mapPath.empty() &&
-                       (mapPath.back() == '\r' || mapPath.back() == '\n' ||
-                        mapPath.back() == ' ' || mapPath.back() == '\t'))
-                    mapPath.pop_back();
-                cellX = x;
-                cellY = y;
+                while (!q.empty() &&
+                       (q.back() == '\r' || q.back() == '\n' ||
+                        q.back() == ' ' || q.back() == '\t'))
+                    q.pop_back();
+                gChart.push_back({ x, y, q });   // every island, for streaming
+                if (mapPath.empty()) {
+                    mapPath = q;
+                    cellX = x;
+                    cellY = y;
+                }
             }
         }
         fclose(f);
@@ -1155,6 +1168,8 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     // world placement must be known before the island loads: prop
     // instances are baked into world space as they are read
     gTune.waterline = waterline;
+    gIslandYConst = islandYConst;
+    gWaterSkimK = waterSkim;
     gYOff = waterSkim - waterline * gScale;
     gSeaLevel = waterSkim;
     gChartSize = chartSize;
@@ -1186,6 +1201,55 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
         return false;
     }
 
+    build_heightfield();
+    build_blades();
+    gActive = true;
+    SDL_Log("wmap: world %s, %d blades", worldPath.c_str(),
+            (int)gBlades.size());
+    return true;
+}
+
+void build_island_gl();
+
+// Release the resident island's buffers before another takes its place.
+static void free_island_gl()
+{
+    if (gTerVao) {
+        glDeleteVertexArrays(1, &gTerVao);
+        glDeleteBuffers(1, &gTerVbo);
+        glDeleteBuffers(1, &gTerIbo);
+        gTerVao = gTerVbo = gTerIbo = 0;
+    }
+    if (gGrassVao) { glDeleteVertexArrays(1, &gGrassVao); gGrassVao = 0; }
+    if (gMaskTex)  { glDeleteTextures(1, &gMaskTex);  gMaskTex = 0; }
+    if (gMask2Tex) { glDeleteTextures(1, &gMask2Tex); gMask2Tex = 0; }
+    if (gAOTex)    { glDeleteTextures(1, &gAOTex);    gAOTex = 0; }
+    if (gSkirtHeightTex) {
+        glDeleteTextures(1, &gSkirtHeightTex);
+        gSkirtHeightTex = 0;
+    }
+    gProps.clear();
+    gBlades.clear();
+    gBladeCount = 0;
+}
+
+void wmap_set_player(float x, float y, float z)
+{
+    gPlayer[0] = x; gPlayer[1] = y; gPlayer[2] = z;
+}
+
+float wmap_scale() { return gScale; }
+
+void wmap_set_test_island_size(float radius, float top)
+{
+    if (radius > 1.0f) gTestRadius = radius;
+    gTestTop = top;
+}
+
+// The client's collision + foam field, and the grass field: both
+// rebuilt per island so streaming can swap them.
+static void build_heightfield()
+{
     // heightfield for the client: heights (pre-offset, minus kIslandY) and
     // signed shore distance via a two-pass chamfer transform
     // Pad the field with open water around the island: the foam ring
@@ -1211,14 +1275,14 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
             float x = -HALF + cell * i;
             bool inside = fabsf(x) <= TER_HALF && fabsf(by) <= TER_HALF;
             float h = inside ? height_at(x, -by) + gYOff : -100.0f;
-            gOut.data[((size_t)j * PN + i) * 2] = h - islandYConst;
+            gOut.data[((size_t)j * PN + i) * 2] = h - gIslandYConst;
             // The skirt is solid rock filling the whole footprint, so at
             // sea level the island's silhouette is its rect -- not where
             // the terrain surface happens to cross the water. Without
             // this a tapered rim pulls the foam ring inland, under the
             // overhang, instead of leaving it at the cliff base.
             const bool skirt = gTune.islandDepth > 0.05f;
-            bool isLand = inside && (skirt || h > waterSkim - 0.4f);
+            bool isLand = inside && (skirt || h > gWaterSkimK - 0.4f);
             // The skirt flares out past the terrain rim, so the silhouette
             // at the waterline is the skirt's, not the heightfield's. Count
             // that flare as land or the foam ring hides under the overhang.
@@ -1226,7 +1290,7 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 fabsf(x) <= TER_HALF * flare && fabsf(by) <= TER_HALF * flare) {
                 const float rimX = SDL_clamp(x, -TER_HALF, TER_HALF);
                 const float rimZ = SDL_clamp(-by, -TER_HALF, TER_HALF);
-                if (height_at(rimX, rimZ) + gYOff > waterSkim - 0.4f)
+                if (height_at(rimX, rimZ) + gYOff > gWaterSkimK - 0.4f)
                     isLand = true;
             }
             land[(size_t)j * PN + i] = isLand;
@@ -1285,6 +1349,10 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     for (float h : gHeights)
         gIslandTop = SDL_max(gIslandTop, h * gScale + gYOff);
 
+}
+
+static void build_blades()
+{
     // grass blade instances: bake the editor's density rules on CPU
     unsigned rng = 12345u;
     auto frand = [&rng]() {
@@ -1318,23 +1386,68 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                                 z + gCenter[1], rot, seed });
         }
 
-    gActive = true;
-    SDL_Log("wmap: world %s, %d blades", worldPath.c_str(),
-            (int)gBlades.size());
+}
+
+// Load one charted island: its data, world placement, heightfield and
+// grass, then its GL. Used at startup and whenever we stream.
+static bool load_island_at(int cx, int cy, const std::string& path)
+{
+    gProps.clear();
+    gBlades.clear();
+    wmap_cell_center(cx, cy, &gCenter[0], &gCenter[1]);
+    if (!load_wmap(path)) {
+        SDL_Log("wmap: could not open island '%s'", path.c_str());
+        return false;
+    }
+    gLoadedCell[0] = cx;
+    gLoadedCell[1] = cy;
+    build_heightfield();
+    build_blades();
+    // the island we are standing on should not also be a silhouette
+    gProxies.clear();
+    for (const ChartIsle& c : gChart) {
+        if ((c.cx == cx && c.cy == cy) ||
+            (c.cx == gTestCell[0] && c.cy == gTestCell[1]))
+            continue;
+        unsigned sd = (unsigned)(c.cx * 73856093 ^ c.cy * 19349663);
+        float r0 = ((sd >> 8) & 1023) / 1023.0f;
+        float r1 = ((sd >> 18) & 1023) / 1023.0f;
+        float wx, wz;
+        wmap_cell_center(c.cx, c.cy, &wx, &wz);
+        gProxies.push_back({ wx, wz, r0 * 6.2831853f,
+                             34.0f + r1 * 30.0f, 12.0f + r0 * 16.0f });
+    }
     return true;
 }
 
-void wmap_set_player(float x, float y, float z)
+bool wmap_stream(float px, float pz)
 {
-    gPlayer[0] = x; gPlayer[1] = y; gPlayer[2] = z;
-}
-
-float wmap_scale() { return gScale; }
-
-void wmap_set_test_island_size(float radius, float top)
-{
-    if (radius > 1.0f) gTestRadius = radius;
-    gTestTop = top;
+    if (!gActive || gChart.size() < 2)
+        return false;
+    // nearest charted island wins, once we are properly inside its quadrant
+    int best = -1;
+    float bestD2 = 1e30f;
+    for (int i = 0; i < (int)gChart.size(); i++) {
+        float wx, wz;
+        wmap_cell_center(gChart[i].cx, gChart[i].cy, &wx, &wz);
+        const float dx = wx - px, dz = wz - pz;
+        const float d2 = dx * dx + dz * dz;
+        if (d2 < bestD2) { bestD2 = d2; best = i; }
+    }
+    if (best < 0)
+        return false;
+    const ChartIsle& c = gChart[best];
+    if (c.cx == gLoadedCell[0] && c.cy == gLoadedCell[1])
+        return false;
+    const float quad = TER_HALF * 2.0f * 2.5f;
+    if (bestD2 > (quad * 0.75f) * (quad * 0.75f))
+        return false;              // still out at sea between islands
+    SDL_Log("wmap: streaming in %c%d", 'A' + c.cx, c.cy + 1);
+    free_island_gl();
+    if (!load_island_at(c.cx, c.cy, c.path))
+        return false;
+    build_island_gl();
+    return true;
 }
 
 bool wmap_active() { return gActive; }
@@ -1439,6 +1552,12 @@ void wmap_init_gl()
     gDirt2Tex = tex_from_bmp(gAssetsDir + "/dirt2.bmp");
     gCliffTex = tex_from_bmp(gAssetsDir + "/cliff.bmp");
 
+    build_island_gl();
+}
+
+// GL that belongs to one island: rebuilt whenever we stream a new one in
+void build_island_gl()
+{
     auto mask_tex = [](const std::vector<Uint8>& m) {
         GLuint t = 0;
         glGenTextures(1, &t);
@@ -1608,7 +1727,7 @@ void wmap_init_gl()
     }
 
     // silhouette proxy: a radial disc the shader shapes per island
-    {
+    if (!gProxyProg) {
         gProxyProg = compile_prog(kProxyVS, kProxyFS);
         const int RINGS = 10, SEG = 40;
         std::vector<float> pv;
@@ -1662,8 +1781,6 @@ void wmap_init_gl()
         pi.y += gYOff;
 }
 
-// height texture for the skirt shader (lazy, created on first draw)
-static GLuint gSkirtHeightTex = 0;
 
 void wmap_draw_shadow(const Mat4& lightVP)
 {

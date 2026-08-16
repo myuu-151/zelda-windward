@@ -192,14 +192,22 @@ struct HeightField {
     }
 };
 
-HeightField g_hf;
+HeightField g_hf;        // the chart island we are standing on
+HeightField g_test_hf;   // the built-in test island, baked around origin
+float g_test_off[2] = {0.0f, 0.0f};   // its quadrant offset in the chart
 
-// world-space terrain height under (x, z); -1000 over open water
+// world-space terrain height under (x, z); -1000 over open water. Both
+// islands are consulted, so you can walk on either one.
 float ground_h(float x, float z)
 {
     float h = 0, sd = 0;
-    if (!g_hf.sample(x, z, &h, &sd) || h <= -50.0f) return -1000.0f;
-    return h + kIslandY;
+    if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+        return h + kIslandY;
+    if (g_test_hf.nx > 1 &&
+        g_test_hf.sample(x - g_test_off[0], z - g_test_off[1], &h, &sd) &&
+        h > -50.0f)
+        return h + kIslandY;
+    return -1000.0f;
 }
 
 // the solid floor anywhere: island terrain, or the sea skim height
@@ -2368,6 +2376,7 @@ int main(int argc, char** argv)
         }
         HeightField test_hf;
         if (hf_ok) test_hf = g_hf;      // its own shore data, kept aside
+        g_test_hf = test_hf;            // and its collision
         if (wmap_load(SDL_GetBasePath(), kIslandY, kWaterSkim)) {
             wmap_set_test_island_size(test_r, test_top);
             const WmapHeights& wh = wmap_heights();
@@ -2409,6 +2418,8 @@ int main(int argc, char** argv)
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                 // its field was baked around the origin; shift it to the
                 // quadrant the chart placed it in (heightfield by = -z)
+                g_test_off[0] = tix2;
+                g_test_off[1] = tiz2;
                 shore2_rect[0] = test_hf.x0 + tix2;
                 shore2_rect[1] = test_hf.y0 - tiz2;
                 shore2_rect[2] = 1.0f / (test_hf.x1 - test_hf.x0);
@@ -5128,6 +5139,22 @@ int main(int argc, char** argv)
         if (wmap_active()) {
             wmap_set_player(app.player.pos.x, app.player.pos.y,
                             app.player.pos.z);
+            // Sail into another quadrant and its island takes over: the
+            // one behind is released, and collision plus the foam field
+            // follow the new arrival.
+            if (wmap_stream(app.player.pos.x, app.player.pos.z)) {
+                const WmapHeights& wh = wmap_heights();
+                g_hf.x0 = wh.x0; g_hf.y0 = wh.y0;
+                g_hf.x1 = wh.x1; g_hf.y1 = wh.y1;
+                g_hf.nx = wh.nx; g_hf.ny = wh.ny;
+                g_hf.data = wh.data;
+                if (shore_tex) {
+                    glBindTexture(GL_TEXTURE_2D, shore_tex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, g_hf.nx,
+                                 g_hf.ny, 0, GL_RG, GL_FLOAT,
+                                 g_hf.data.data());
+                }
+            }
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, shadow_tex);
             wmap_draw(viewproj, cam_eye, light_vp, shadow_tex,

@@ -16,11 +16,12 @@
 
 // ---------------------------------------------------------------- data
 
-static const int   HN = 257;        // heightmap samples per side
-static const int   MASK_N = 512;    // splat mask resolution
+static int         HN = 257;        // heightmap samples per side
+static int         MASK_N = 512;    // splat mask resolution
 // editor terrain is 48 units across; scale it up so an island reads at
 // the client's world scale (override with "scale <s>" in the .wworld)
 static float gScale = 2.0f;
+static float gEditorHalf = 24.0f;   // the map's own half-extent
 static float TER_HALF = 24.0f * 2.0f;
 static const int   GRASS_N = 320;   // blade candidates per side
 static const int   AO_N = 1024;
@@ -158,6 +159,7 @@ uniform float uEdgeBreak;
 uniform float uGrassAO;
 uniform float uGrassAORad;
 uniform float uScale;
+uniform float uEditorHalf;
 )GLSL";
     s += kShadowFn;
     s += R"GLSL(
@@ -182,7 +184,7 @@ void main() {
     // sample textures in EDITOR space so scaling the island doesn't
     // stretch the painted materials
     vec2 lxz = (vWorld.xz - uCenter) / uScale;
-    vec2 maskUv = (lxz + vec2(24.0)) / 48.0;
+    vec2 maskUv = (lxz + vec2(uEditorHalf)) / (2.0 * uEditorHalf);
     float m = texture(uMask, maskUv).r;
     float m2 = texture(uMask2, maskUv).r;
 
@@ -507,6 +509,7 @@ uniform float uDepth;
 uniform float uFrill;
 uniform float uBulge;
 uniform float uScale;
+uniform float uEditorHalf;
 out vec3 vWorld;
 out vec3 vNrm;
 out float vT;
@@ -526,7 +529,7 @@ void main() {
     float t = aData.z;
     vec3 pos;
     if (t < 0.5) {
-        vec2 uv = (xz + vec2(24.0)) / 48.0;
+        vec2 uv = (xz + vec2(uEditorHalf)) / (2.0 * uEditorHalf);
         pos = vec3(xz.x * uScale,
                    texture(uHeight, uv).r * uScale + uYOff, xz.y * uScale);
     } else if (t < 1.5) {
@@ -708,8 +711,8 @@ static GLuint tex_from_bmp(const std::string& path, bool* gray = nullptr,
 // x,z in WORLD units; returns the editor height scaled to world
 static float height_at(float x, float z)
 {
-    float u = (x / gScale + 24.0f) / 48.0f * (HN - 1);
-    float v = (z / gScale + 24.0f) / 48.0f * (HN - 1);
+    float u = (x / gScale + gEditorHalf) / (2.0f * gEditorHalf) * (HN - 1);
+    float v = (z / gScale + gEditorHalf) / (2.0f * gEditorHalf) * (HN - 1);
     int i = SDL_clamp((int)u, 0, HN - 2);
     int j = SDL_clamp((int)v, 0, HN - 2);
     float fu = SDL_clamp(u - i, 0.0f, 1.0f);
@@ -724,10 +727,10 @@ static float height_at(float x, float z)
 // x,z in WORLD units
 static Uint8 mask_at(const std::vector<Uint8>& m, float x, float z)
 {
-    int i = SDL_clamp((int)((x / gScale + 24.0f) / 48.0f * MASK_N), 0,
-                      MASK_N - 1);
-    int j = SDL_clamp((int)((z / gScale + 24.0f) / 48.0f * MASK_N), 0,
-                      MASK_N - 1);
+    int i = SDL_clamp((int)((x / gScale + gEditorHalf) /
+                           (2.0f * gEditorHalf) * MASK_N), 0, MASK_N - 1);
+    int j = SDL_clamp((int)((z / gScale + gEditorHalf) /
+                           (2.0f * gEditorHalf) * MASK_N), 0, MASK_N - 1);
     return m[j * MASK_N + i];
 }
 
@@ -743,6 +746,31 @@ static bool load_wmap(const std::string& path)
         fclose(f);
         return false;
     }
+    if (magic[7] >= '8') {
+        // v8 carries the map's world size and the resolutions that scale
+        // with it -- without this the whole file reads 16 bytes shifted
+        float half = 24.0f;
+        Uint32 res[3] = { 257, 512, 256 };
+        if (fread(&half, 4, 1, f) != 1 || fread(res, 4, 3, f) != 3) {
+            fclose(f);
+            return false;
+        }
+        gEditorHalf = half;
+        HN = (int)res[0];
+        MASK_N = (int)res[1];
+        TER_HALF = gEditorHalf * gScale;
+        SDL_Log("wmap: map is %.0f units, %d heights, %d masks",
+                half * 2.0f, HN, MASK_N);
+    } else {
+        gEditorHalf = 24.0f;
+        HN = 257;
+        MASK_N = 512;
+        TER_HALF = gEditorHalf * gScale;
+    }
+    gHeights.assign((size_t)HN * HN, 0.0f);
+    gMask.assign((size_t)MASK_N * MASK_N, 0);
+    gMask2.assign((size_t)MASK_N * MASK_N, 0);
+    gKill.assign((size_t)MASK_N * MASK_N, 255);
     fread(gHeights.data(), sizeof(float), gHeights.size(), f);
     fread(gMask.data(), 1, gMask.size(), f);
     fread(gKill.data(), 1, gKill.size(), f);
@@ -1537,7 +1565,7 @@ void wmap_init_gl()
     {
         // ring in EDITOR space; the shader multiplies by uScale
         const int N = 128;
-        const float E = 24.0f;
+        const float E = gEditorHalf;
         std::vector<float> ring;
         for (int i = 0; i < N; i++)
             ring.insert(ring.end(), { -E + 2.0f * E * i / N, -E });
@@ -1744,6 +1772,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     glUniform1f(glGetUniformLocation(gTerProg, "uHalf"), TER_HALF);
     glUniform1f(glGetUniformLocation(gTerProg, "uEdgeBreak"), gTune.edgeBreak);
     glUniform1f(glGetUniformLocation(gTerProg, "uScale"), gScale);
+    glUniform1f(glGetUniformLocation(gTerProg, "uEditorHalf"), gEditorHalf);
     glUniform1f(glGetUniformLocation(gTerProg, "uGrassAO"), gTune.groundAO);
     glUniform1f(glGetUniformLocation(gTerProg, "uGrassAORad"), gTune.aoRadius);
     auto bindT = [&](GLuint prog, const char* name, int unit, GLuint tex) {
@@ -1771,6 +1800,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniform1f(glGetUniformLocation(gSkirtProg, "uYOff"), gYOff);
         glUniform1f(glGetUniformLocation(gSkirtProg, "uHalf"), TER_HALF);
         glUniform1f(glGetUniformLocation(gSkirtProg, "uScale"), gScale);
+        glUniform1f(glGetUniformLocation(gSkirtProg, "uEditorHalf"), gEditorHalf);
         glUniform1f(glGetUniformLocation(gSkirtProg, "uDepth"),
                     gTune.islandDepth);
         glUniform1f(glGetUniformLocation(gSkirtProg, "uFrill"),

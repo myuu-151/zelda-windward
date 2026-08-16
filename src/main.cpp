@@ -1324,6 +1324,29 @@ vec3 water(vec2 uv, vec3 cdir, float t) {
 uniform sampler2D uShore;
 uniform vec4 uShoreRect;   // x0, y0, 1/width, 1/height
 uniform float uHasShore;
+uniform float uIslandY;    // shore field heights are stored relative to it
+
+// The sun shadow map only spans the water near the player, so a island's
+// cast shadow used to vanish as you flew off. The shore field carries the
+// island's heights, so march toward the sun and test for a blocker: that
+// works at any distance and needs no depth map.
+float island_sun_shadow(vec3 world)
+{
+    if (uHasShore < 0.5)
+        return 1.0;
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    for (int i = 1; i <= 10; ++i) {
+        vec3 p = world + L * (float(i) * 7.0);
+        vec2 buv = vec2((p.x - uShoreRect.x) * uShoreRect.z,
+                        (-p.z - uShoreRect.y) * uShoreRect.w);
+        if (any(lessThan(buv, vec2(0.0))) || any(greaterThan(buv, vec2(1.0))))
+            continue;
+        float h = texture(uShore, buv).r + uIslandY;
+        if (h > -50.0 && h > p.y)
+            return 0.0;              // land stands between us and the sun
+    }
+    return 1.0;
+}
 
 void main() {
     vec3 cdir = normalize(vWorld - uEye);
@@ -1358,7 +1381,8 @@ void main() {
     }
     // the sea receives shadows from everything -- the island's cliffs,
     // Link, the bird overhead
-    col *= mix(0.66, 1.0, shadow_factor(vShadowPos));
+    col *= mix(0.66, 1.0,
+               min(shadow_factor(vShadowPos), island_sun_shadow(vWorld)));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -1437,9 +1461,11 @@ struct OrbitCamera {
         // any ground the boom would pass through, so orbiting around a
         // cliff or terrace pulls the camera in instead of showing the
         // inside of the island.
-        constexpr float kSkin = 0.55f;   // clearance kept off the surface
-        constexpr float kMinDist = 1.1f; // never end up inside his head
-        constexpr int kSteps = 24;
+        constexpr float kSkin = 0.45f;   // clearance kept off the surface
+        // when even a short boom is buried -- backed into a corner, say --
+        // keep closing rather than stopping inside the rock
+        constexpr float kMinDist = 0.4f;
+        constexpr int kSteps = 28;
         // solid = terrain, plus the island's overhanging skirt just off
         // the shore, which the heightfield alone calls open water
         auto solid_at = [](float x, float z) {
@@ -1456,7 +1482,9 @@ struct OrbitCamera {
             const Vec3 s = target + dir * t;
             const float sh = solid_at(s.x, s.z);
             if (sh > -900.0f && s.y < sh + kSkin) {
-                safe = std::max(kMinDist, t - want / kSteps);
+                // pull back to the last clear sample, two steps of slack so
+                // a grazing wall does not leave us skimming its face
+                safe = std::max(kMinDist, t - 2.0f * want / kSteps);
                 break;
             }
         }
@@ -2120,6 +2148,7 @@ int main(int argc, char** argv)
     const GLint wa_shore = glGetUniformLocation(water_prog, "uShore");
     const GLint wa_shorerect = glGetUniformLocation(water_prog, "uShoreRect");
     const GLint wa_hasshore = glGetUniformLocation(water_prog, "uHasShore");
+    const GLint wa_islandy = glGetUniformLocation(water_prog, "uIslandY");
     const GLint wa_lightvp = glGetUniformLocation(water_prog, "uLightVP");
     const GLint wa_shadowmap = glGetUniformLocation(water_prog, "uShadowMap");
     // water sea: subdivided grid so the vertex waves can roll
@@ -4940,6 +4969,7 @@ int main(int argc, char** argv)
             glUniform2fv(wa_center, 1, center);
         }
         glUniform1f(wa_hasshore, shore_tex ? 1.0f : 0.0f);
+        glUniform1f(wa_islandy, kIslandY);
         if (shore_tex) {
             glUniform1i(wa_shore, 1);
             const float rect4[4] = {g_hf.x0, g_hf.y0,

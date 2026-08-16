@@ -1233,7 +1233,7 @@ float wmap_block_height(float wx, float wz)
     const float lx = wx - gCenter[0], lz = wz - gCenter[1];
     // the skirt flares outward from the rim: treat a margin past the shore
     // as solid so a camera dropping below the rim is pushed back in
-    const float margin = TER_HALF * 0.30f;
+    const float margin = TER_HALF * 0.07f;   // just the overhang, not the bay
     if (fabsf(lx) > TER_HALF + margin || fabsf(lz) > TER_HALF + margin)
         return -1000.0f;
     const float cx = SDL_clamp(lx, -TER_HALF, TER_HALF);

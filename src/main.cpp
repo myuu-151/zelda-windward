@@ -1335,8 +1335,8 @@ float island_sun_shadow(vec3 world)
     if (uHasShore < 0.5)
         return 1.0;
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
-    for (int i = 1; i <= 10; ++i) {
-        vec3 p = world + L * (float(i) * 7.0);
+    for (int i = 1; i <= 22; ++i) {
+        vec3 p = world + L * (float(i) * 3.0);
         vec2 buv = vec2((p.x - uShoreRect.x) * uShoreRect.z,
                         (-p.z - uShoreRect.y) * uShoreRect.w);
         if (any(lessThan(buv, vec2(0.0))) || any(greaterThan(buv, vec2(1.0))))
@@ -1381,8 +1381,12 @@ void main() {
     }
     // the sea receives shadows from everything -- the island's cliffs,
     // Link, the bird overhead
-    col *= mix(0.66, 1.0,
-               min(shadow_factor(vShadowPos), island_sun_shadow(vWorld)));
+    // Two shadow sources would stack into a stepped double image, so hand
+    // over with distance: the depth map is exact up close, the marched
+    // island shadow carries on past its reach.
+    float isl = mix(1.0, island_sun_shadow(vWorld),
+                    smoothstep(90.0, 190.0, d));
+    col *= mix(0.66, 1.0, min(shadow_factor(vShadowPos), isl));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -1447,49 +1451,54 @@ struct OrbitCamera {
     float pull = 0.0f;
     static constexpr float kDefaultPitch = 0.35f;
 
-    Vec3 eye() const
+    // the collided boom length, eased each frame so walls never snap the
+    // camera onto the character's face
+    float boom = -1.0f;
+
+    Vec3 dir() const
     {
-        // the whisper of rotation rides the pull itself, so zoom-out and
-        // tilt are one continuous motion (and reverse together)
-        // pulling out is a pure dolly; the low end couples downward tilt
         const float p = pitch + (pull > 0.0f ? 0.0f : pull * 0.025f);
         const float cp = std::cos(p);
-        const Vec3 dir{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
-        const float want = distance + pull;
+        return Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
+    }
 
-        // Terrain collision: walk out from the character and stop short of
-        // any ground the boom would pass through, so orbiting around a
-        // cliff or terrace pulls the camera in instead of showing the
-        // inside of the island.
-        constexpr float kSkin = 0.45f;   // clearance kept off the surface
-        // when even a short boom is buried -- backed into a corner, say --
-        // keep closing rather than stopping inside the rock
-        constexpr float kMinDist = 0.4f;
+    // how far back the boom would like to sit, ignoring the world
+    float want_dist() const { return distance + pull; }
+
+    // longest clear boom along the current angle
+    float clear_dist() const
+    {
+        const Vec3 d = dir();
+        const float want = want_dist();
+        constexpr float kSkin = 0.6f;
+        constexpr float kMinDist = 1.7f;   // never closer than this
+        constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
-        // solid = terrain, plus the island's overhanging skirt just off
-        // the shore, which the heightfield alone calls open water
         auto solid_at = [](float x, float z) {
             const float g = ground_h(x, z);
             const float b = wmap_active() ? wmap_block_height(x, z) : -1000.0f;
             return std::max(g, b);
         };
-        // Keep the player's angle and simply come in closer, the way a
-        // DCC viewport does -- never hoist the camera over the obstacle,
-        // which throws the framing away.
-        float safe = want;
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
-            const Vec3 s = target + dir * t;
+            if (t < kIgnore) continue;
+            const Vec3 s = target + d * t;
             const float sh = solid_at(s.x, s.z);
-            if (sh > -900.0f && s.y < sh + kSkin) {
-                // pull back to the last clear sample, two steps of slack so
-                // a grazing wall does not leave us skimming its face
-                safe = std::max(kMinDist, t - 2.0f * want / kSteps);
-                break;
-            }
+            if (sh > -900.0f && s.y < sh + kSkin)
+                return std::max(kMinDist, t - want / kSteps);
         }
-        return target + dir * safe;
+        return want;
     }
+
+    Vec3 eye() const
+    {
+        // the whisper of rotation rides the pull itself, so zoom-out and
+        // tilt are one continuous motion (and reverse together)
+        // pulling out is a pure dolly; the low end couples downward tilt
+        const Vec3 dirv = dir();
+        return target + dirv * (boom > 0.0f ? boom : want_dist());
+    }
+
 };
 
 struct App {
@@ -4784,6 +4793,18 @@ int main(int argc, char** argv)
             Vec3 free_target = head;
             free_target.y += app.cam.pull * 0.10f;
             app.cam.target = lerp(free_target, lock_target, app.lock_blend);
+
+            // Ease the boom to the longest clear length along the angle we
+            // are rotated to: snap in quickly when a wall arrives, drift
+            // back out slowly so the camera never pops.
+            {
+                const float target_boom = app.cam.clear_dist();
+                if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
+                const float rate = target_boom < app.cam.boom ? 14.0f : 2.5f;
+                const float k = 1.0f - std::exp(-rate *
+                                    static_cast<float>(frame_dt));
+                app.cam.boom += (target_boom - app.cam.boom) * k;
+            }
             app.cam_aim = lerp(free_target, aim_target, app.lock_blend);
         }
 

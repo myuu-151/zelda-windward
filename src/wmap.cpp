@@ -1089,7 +1089,7 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     // spread it gets clipped to the island's own rect.
     const float PAD = 28.0f;
     const float HALF = TER_HALF + PAD;
-    const int PN = 321;
+    const int PN = 513;   // finer: the camera collides against this
     gOut.x0 = gCenter[0] - HALF; gOut.x1 = gCenter[0] + HALF;
     gOut.y0 = -gCenter[1] - HALF; gOut.y1 = -gCenter[1] + HALF;
     gOut.nx = PN;

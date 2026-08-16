@@ -2432,7 +2432,10 @@ int main(int argc, char** argv)
         // editor island spawns the player on its own quadrant
         float sx = 0.0f, sz = 2.0f;
         if (wmap_active()) {
-            wmap_island_center(&sx, &sz);
+            // the chart's start cell if it names one, else the island
+            // that happened to load first
+            if (!wmap_spawn_center(&sx, &sz))
+                wmap_island_center(&sx, &sz);
             app.player.pos.x = sx;
             app.player.pos.z = sz;
         }

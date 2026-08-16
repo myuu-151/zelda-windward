@@ -127,7 +127,8 @@ static float gTime = 0.0f;
 static int gChartSize = 7;
 static int gTestCell[2] = { -1, -1 };
 struct ChartIsle { int cx, cy; std::string path; };
-static std::vector<ChartIsle> gChart;      // every island the chart names
+static std::vector<ChartIsle> gChart;
+static int gSpawnCell[2] = { -1, -1 };   // "spawn x y" in the chart      // every island the chart names
 static int gLoadedCell[2] = { -99, -99 };  // which one is resident
 static float gIslandTop = 0.0f;   // highest terrain point, world units
 static float gTestRadius = 26.0f, gTestTop = 6.0f;
@@ -1144,6 +1145,10 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 gScale = SDL_max(0.1f, wl);
                 TER_HALF = 24.0f * gScale;
             }
+            else if (sscanf(line, "spawn %d %d", &x, &y) == 2) {
+                gSpawnCell[0] = x;
+                gSpawnCell[1] = y;
+            }
             else if (sscanf(line, "testisland %d %d", &x, &y) == 2) {
                 testX = x;
                 testY = y;
@@ -1157,7 +1162,9 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                         q.back() == ' ' || q.back() == '\t'))
                     q.pop_back();
                 gChart.push_back({ x, y, q });   // every island, for streaming
-                if (mapPath.empty()) {
+                // the start cell wins outright; otherwise first listed
+                if (mapPath.empty() ||
+                    (x == gSpawnCell[0] && y == gSpawnCell[1])) {
                     mapPath = q;
                     cellX = x;
                     cellY = y;
@@ -1556,9 +1563,32 @@ bool wmap_flight_ring(float wx, float wz, float* radius, float* height)
     return true;
 }
 
+// where the chart says the game should start, if it says at all
+bool wmap_spawn_center(float* x, float* z)
+{
+    if (gSpawnCell[0] < 0)
+        return false;
+    wmap_cell_center(gSpawnCell[0], gSpawnCell[1], x, z);
+    return true;
+}
+
+// True when a charted island already occupies that quadrant: the
+// built-in test island has to stand down rather than sit inside it.
+static bool cell_is_charted(int cx, int cy)
+{
+    for (const ChartIsle& c : gChart)
+        if (c.cx == cx && c.cy == cy)
+            return true;
+    return false;
+}
+
 bool wmap_test_island(float* x, float* z)
 {
     if (!gActive || gTestCell[0] < 0)
+        return false;
+    // a charted island in that quadrant takes precedence -- otherwise
+    // the two occupy the same water and read as one broken island
+    if (cell_is_charted(gTestCell[0], gTestCell[1]))
         return false;
     wmap_cell_center(gTestCell[0], gTestCell[1], x, z);
     return true;

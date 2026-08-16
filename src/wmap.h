@@ -46,6 +46,9 @@ void wmap_set_test_island_size(float radius, float top);
 // the built-in test island's quadrant ("testisland <x> <y>" in the
 // .wworld); false when the chart does not place it
 bool wmap_test_island(float* x, float* z);
+// the quadrant the chart starts the player in ("spawn <x> <y>"); false
+// when the chart does not say, and the loaded island is used instead
+bool wmap_spawn_center(float* x, float* z);
 
 void wmap_init_gl();   // after the GL context + loader are ready
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,

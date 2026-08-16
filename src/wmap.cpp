@@ -1241,9 +1241,11 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
     gChartSize = chartSize;
     gTestCell[0] = testX;
     gTestCell[1] = testY;
-    const float quad = TER_HALF * 2.0f * 2.5f;   // island + open sea
-    gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * quad;
-    gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * quad;
+    // the chart's own spacing, not one derived from this island: placing
+    // the island by its own size put it somewhere the rest of the world
+    // (spawn, streaming, the silhouettes, the map) did not agree with
+    gCenter[0] = (cellX - (chartSize - 1) * 0.5f) * gQuadSize;
+    gCenter[1] = (cellY - (chartSize - 1) * 0.5f) * gQuadSize;
     // silhouettes stand in for islands the chart really has but that are
     // not loaded -- never invent land the player cannot sail to
     for (const auto& c : assigned) {
@@ -1535,7 +1537,7 @@ void wmap_cell_center(int cx, int cy, float* x, float* z)
 
 void wmap_quadrant_center(float wx, float wz, float* x, float* z)
 {
-    const float quad = TER_HALF * 2.0f * 2.5f;
+    const float quad = gQuadSize;
     const float off = (gChartSize - 1) * 0.5f * quad;
     // chart cells are laid out on a fixed grid: snap to the nearest one
     *x = roundf((wx + off) / quad) * quad - off;

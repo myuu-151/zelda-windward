@@ -4786,11 +4786,24 @@ constexpr int kShadowResFar = 4096;
                     // deck, so trusting it alone put the bird's floor
                     // inside the island.
                     float gh = ground_h(app.bird_pos.x, app.bird_pos.z);
-                    float birdTop = 0.0f;
-                    if (wmap_mesh_ready() &&
-                        wmap_mesh_top(app.bird_pos.x, app.bird_pos.z,
-                                      &birdTop))
-                        gh = birdTop;
+                    if (wmap_mesh_ready()) {
+                        // Sampled around him, not at one point: a single
+                        // sample lands in a gap between triangles now and
+                        // then, and falling back to the field there dropped
+                        // him through the island and back out. Kept as the
+                        // higher of the two so a miss can only ever leave
+                        // the old answer, never a lower one.
+                        static const float off[5][2] = {
+                            {0.0f, 0.0f}, {0.9f, 0.0f}, {-0.9f, 0.0f},
+                            {0.0f, 0.9f}, {0.0f, -0.9f}};
+                        for (const auto& o : off) {
+                            float ty = 0.0f;
+                            if (wmap_mesh_top(app.bird_pos.x + o[0],
+                                              app.bird_pos.z + o[1], &ty) &&
+                                ty > gh)
+                                gh = ty;
+                        }
+                    }
                     const bool over_isle = gh > -900.0f;
                     // over the island: normal floor is terrain + 2.5 (or the
                     // terrain itself when diving to land -- or under thrust,

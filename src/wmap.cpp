@@ -2455,8 +2455,20 @@ void wmap_draw_shadow(const Mat4& lightVP)
                            GL_FALSE, lightVP.m);
         glBindVertexArray(gTerVao);
         glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+        // the island streamed out of is still drawn, so it still casts
+        if (gPrev.vao) {
+            glBindVertexArray(gPrev.vao);
+            glDrawElements(GL_TRIANGLES, gPrev.idx, GL_UNSIGNED_INT, nullptr);
+        }
     }
-    if (!gProps.empty()) {
+    // ...and so do its props: without this an island keeps its terrain, its
+    // grass and its trees the moment it stops being resident, but loses
+    // every shadow they cast.
+    std::vector<PropInst> castProps = gProps;
+    if (gPrev.vao && !gPrev.props.empty())
+        castProps.insert(castProps.end(), gPrev.props.begin(),
+                         gPrev.props.end());
+    if (!castProps.empty()) {
         glUseProgram(gDepthPropProg);
         glUniformMatrix4fv(glGetUniformLocation(gDepthPropProg, "uLightVP"),
                            1, GL_FALSE, lightVP.m);
@@ -2466,7 +2478,7 @@ void wmap_draw_shadow(const Mat4& lightVP)
         GLint dHas = glGetUniformLocation(gDepthPropProg, "uHasTex");
         GLint dGray = glGetUniformLocation(gDepthPropProg, "uGrayMask");
         glActiveTexture(GL_TEXTURE0);
-        for (const PropInst& inst : gProps) {
+        for (const PropInst& inst : castProps) {
             PropMesh& pm = gMeshes[inst.mesh];
             if (!pm.loaded)
                 continue;

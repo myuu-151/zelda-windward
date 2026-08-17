@@ -1744,28 +1744,14 @@ struct OrbitCamera {
         return want;
     }
 
-    // Pick the boom: keep the angle you rotated to when it is clear, and
-    // only borrow pitch -- climbing over the obstruction -- when that
-    // angle has nowhere to stand. Returns the distance, sets the lift.
+    // Pull in along the angle you rotated to, and nothing else. This used
+    // to climb the boom overhead when the angle it was on had nowhere to
+    // stand, which swung the shot skyward whenever anything crowded the
+    // lens. A camera that only ever dollies keeps the framing you chose.
     float solve_boom(float* outLift) const
     {
-        const float want = want_dist();
-        float bestD = clear_dist_at(0.0f);
-        float bestLift = 0.0f;
-        // A tall face is not cleared by a shallow climb: the boom has to
-        // come almost overhead before it misses the rock, so keep raising
-        // until the full length fits rather than settling for a crowded
-        // shot at the original angle.
-        if (bestD < want * 0.9f) {
-            for (int s = 1; s <= 11; ++s) {
-                const float extra = static_cast<float>(s) * 0.13f;
-                const float d = clear_dist_at(extra);
-                if (d > bestD + 0.05f) { bestD = d; bestLift = extra; }
-                if (bestD >= want * 0.9f) break;
-            }
-        }
-        *outLift = bestLift;
-        return bestD;
+        *outLift = 0.0f;
+        return clear_dist_at(0.0f);
     }
 
     Vec3 eye() const

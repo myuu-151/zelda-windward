@@ -1619,6 +1619,19 @@ static void build_heightfield()
             // is the silhouette again.
             const bool skirt = gTune.islandDepth > 0.05f && !gTune.trimSkirt;
             bool isLand = inside && (skirt || h > gWaterSkimK - 0.4f);
+            if (gPropsOnly && inside) {
+                // These maps carry the model's outline at the waterline in
+                // place of the soft-dirt layer, because an overhanging
+                // island's deck -- which is what the heights describe --
+                // is not where it meets the sea. Foam belongs at the water.
+                const int mi = SDL_clamp((int)((x / gScale + gEditorHalf) /
+                                               (2.0f * gEditorHalf) * MASK_N),
+                                         0, MASK_N - 1);
+                const int mj = SDL_clamp((int)((-by / gScale + gEditorHalf) /
+                                               (2.0f * gEditorHalf) * MASK_N),
+                                         0, MASK_N - 1);
+                isLand = gMask2[(size_t)mj * MASK_N + mi] > 128;
+            }
             // The skirt flares out past the terrain rim, so the silhouette
             // at the waterline is the skirt's, not the heightfield's. Count
             // that flare as land or the foam ring hides under the overhang.
@@ -1677,10 +1690,28 @@ static void build_heightfield()
         for (int i = 0; i < PN; i++) {
             size_t k = (size_t)j * PN + i;
             gOut.data[k * 2 + 1] = land[k] ? -dist[k] : dist2[k];
-            if (!land[k])
+            // Only clear the height where there is genuinely nothing to
+            // stand on. Land here means "the sea should foam around this",
+            // which for an overhanging island is a smaller area than the
+            // surface you can walk on -- clearing by it dropped the deck.
+            if (!land[k] && gOut.data[k * 2] < gWaterSkimK - 0.4f)
                 gOut.data[k * 2] = -100.0f;   // open water marker
         }
 
+    {
+        // what the sea will actually see: land cells and how far the shore
+        // field reaches, so a missing foam ring is diagnosable
+        int nland = 0;
+        float dmin = 1e9f, dmax = -1e9f;
+        for (size_t k = 0; k < (size_t)PN * PN; k++) {
+            if (land[k]) nland++;
+            const float sd = gOut.data[k * 2 + 1];
+            if (sd < dmin) dmin = sd;
+            if (sd > dmax) dmax = sd;
+        }
+        SDL_Log("wmap: shore field %d land cells of %d, dist %.1f..%.1f",
+                nland, PN * PN, dmin, dmax);
+    }
     gIslandTop = -1e9f;
     for (float h : gHeights)
         gIslandTop = SDL_max(gIslandTop, h * gScale + gYOff);

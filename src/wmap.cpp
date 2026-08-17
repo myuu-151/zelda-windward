@@ -156,7 +156,11 @@ static bool gPropsOnly = false;
 // per-quadrant wind ribbon height from the chart; 0 means "as the game has it"
 static float gWindH[8][8] = {};      // every island the chart names
 static int gLoadedCell[2] = { -99, -99 };  // which one is resident
-static float gIslandTop = 0.0f;   // highest terrain point, world units
+static float gIslandTop = 0.0f;
+// How far the island actually reaches from its centre. The disc that shades
+// the sea at range used to be the whole map's half-extent, so a small model
+// dropped into a big quadrant threw a shadow the size of the quadrant.
+static float gIslandRadius = 0.0f;   // highest terrain point, world units
 static float gTestRadius = 26.0f, gTestTop = 6.0f;
 static float gIslandYConst = 0.0f, gWaterSkimK = -2.7f;
 // height texture for the skirt shader (lazy, created on first draw)
@@ -1769,6 +1773,17 @@ static void build_heightfield()
         SDL_Log("wmap: shore field %d land cells of %d, dist %.1f..%.1f",
                 nland, PN * PN, dmin, dmax);
     }
+    // measure the island while its land is known
+    gIslandRadius = 0.0f;
+    for (int j = 0; j < PN; j++)
+        for (int i = 0; i < PN; i++) {
+            if (!land[(size_t)j * PN + i])
+                continue;
+            const float x = -HALF + cell * i, by = -HALF + cell * j;
+            const float r = sqrtf(x * x + by * by);
+            if (r > gIslandRadius)
+                gIslandRadius = r;
+        }
     gIslandTop = -1e9f;
     for (float h : gHeights)
         gIslandTop = SDL_max(gIslandTop, h * gScale + gYOff);
@@ -2042,7 +2057,11 @@ int wmap_shadow_discs(float* out4, int maxCount)
     };
     // the loaded island: its own marched shadow is exact up close, but a
     // disc still carries it once the sea is hazy and far away
-    add(gCenter[0], gCenter[1], TER_HALF * 0.95f, gIslandTop);
+    // its own radius, not the map's: a small island in a large quadrant was
+    // shading the sea for the whole quadrant
+    add(gCenter[0], gCenter[1],
+        gIslandRadius > 1.0f ? gIslandRadius * 1.05f : TER_HALF * 0.95f,
+        gIslandTop);
     if (gTestCell[0] >= 0) {
         float tx, tz;
         wmap_cell_center(gTestCell[0], gTestCell[1], &tx, &tz);

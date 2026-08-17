@@ -568,11 +568,22 @@ in float vUp;
 out vec4 fragColor;
 uniform vec3 uEye;
 void main() {
-    // flat dark landmass, hazing into the horizon with distance
     vec3 dark = mix(vec3(0.16, 0.26, 0.38), vec3(0.24, 0.36, 0.46), vUp);
+    // The proxy had no sun term at all, so an island swapping between its
+    // real geometry and this one went shaded, then flat, then shaded --
+    // the swap read as the lighting dropping out rather than as distance.
+    // No normals are baked into the proxy, so take one from the surface
+    // itself and run the same wrap the props use.
+    const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
+    vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+    if (n.y < 0.0) n = -n;
+    float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
+    dark *= mix(0.72, 1.12, smoothstep(0.25, 0.75, nl));
     float d = length(vWorld - uEye);
+    // and haze over the range the props use, so both reach the horizon
+    // colour together instead of one washing out ahead of the other
     vec3 col = mix(dark, vec3(0.66, 0.80, 0.95),
-                   smoothstep(200.0, 700.0, d));
+                   smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";

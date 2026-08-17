@@ -614,7 +614,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0010;
+    float z = c.z - 0.00053;
     // a wide soft disc: the probe's penumbra spans ~half a unit of ground,
     // so walking across a shadow edge fades the band in smoothly
     const vec2 taps[12] = vec2[12](
@@ -1034,7 +1034,7 @@ float shadow_factor(vec4 sp) {
         c.z > 1.0)
         return 1.0;
     // small bias + 4-tap PCF on top of the hardware compare
-    float z = c.z - 0.0007;
+    float z = c.z - 0.00037;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -1220,7 +1220,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0007;
+    float z = c.z - 0.00037;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadowMap, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -2380,7 +2380,7 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
+            mat4_look_at(center + sun_dir * 170.0f, center, {0, 1, 0});
         // Width AND depth both matter, and the depth is what broke the
         // shadows. This was 20..180 when they read correctly; it had grown
         // to 20..560 for distant casters, and the bias in the shadow
@@ -2390,7 +2390,18 @@ int main(int argc, char** argv)
         // detaches from whatever cast it, which is the offset. Back to the
         // range that worked, with the sun eye at the distance that suits
         // it.
-        return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 180.0f) * view;
+        // Widened from 112 units across to 220. The sharp map ending that
+        // close is what left a band where it no longer reached and the
+        // cascade had nothing useful, so shading dropped out entirely
+        // before returning further out. At 4096 this is 0.054 units per
+        // texel against 0.027 -- still far finer than anything readable.
+        // The depth range grows with it, from 160 to 300, because ground
+        // offset along the sun's azimuth changes depth: a point 110 units
+        // out sits about 100 nearer or further than the centre. That range
+        // is what sets what the normalised bias means in world units, so
+        // every near-map bias below is divided by the same 1.875.
+        return mat4_ortho(-110.0f, 110.0f, -110.0f, 110.0f, 20.0f, 320.0f) *
+               view;
     };
     // The far cascade: same sun, a much wider box, its own coarse map. The
     // near one is deliberately tight so shadows are crisp underfoot, which

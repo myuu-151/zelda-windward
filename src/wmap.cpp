@@ -198,7 +198,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0007;
+    float z = c.z - 0.00037;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -411,7 +411,7 @@ void main() {
     float sh = -1.0;
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
-        sh = texture(uShadow, vec3(c.xy, c.z - 0.0012));
+        sh = texture(uShadow, vec3(c.xy, c.z - 0.00064));
     if (sh < 0.0) {
         vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
         vec3 cf = sf.xyz * 0.5 + 0.5;

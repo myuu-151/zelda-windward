@@ -771,7 +771,10 @@ static float height_at(float x, float z)
         h = (a * (1 - fu) + b * fu) * (1 - fv) +
             (c * (1 - fu) + d * fu) * fv;
     } else {
-        h = SDL_max(SDL_max(a, b), SDL_max(c, d));
+        // nearest, not highest: the highest reaches a full cell past the
+        // last real sample and puts ground out over the water
+        h = (fu < 0.5f) ? ((fv < 0.5f) ? a : c)
+                        : ((fv < 0.5f) ? b : d);
     }
     return h * gScale;
 }

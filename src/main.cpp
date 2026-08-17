@@ -201,12 +201,13 @@ struct HeightField {
             *h = (c00 * (1 - fu) + c10 * fu) * (1 - fv) +
                  (c01 * (1 - fu) + c11 * fu) * fv;
         } else {
-            float best = -100.0f;
-            if (c00 > best) best = c00;
-            if (c10 > best) best = c10;
-            if (c01 > best) best = c01;
-            if (c11 > best) best = c11;
-            *h = best;
+            // Nearest corner, not the highest. Taking the highest carries
+            // ground a whole cell past the last real sample -- you walk out
+            // over the water. Nearest puts the boundary halfway between the
+            // last land sample and the first water one, which is the best a
+            // grid can say and is wrong by at most half a cell either way.
+            *h = (fu < 0.5f) ? ((fv < 0.5f) ? c00 : c01)
+                             : ((fv < 0.5f) ? c10 : c11);
         }
         *sd = (at(i, j, 1) * (1 - fu) + at(i + 1, j, 1) * fu) * (1 - fv) +
               (at(i, j + 1, 1) * (1 - fu) + at(i + 1, j + 1, 1) * fu) * fv;

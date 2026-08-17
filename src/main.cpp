@@ -225,7 +225,7 @@ float g_test_off[2] = {0.0f, 0.0f};   // its quadrant offset in the chart
 // point rather than at it: a single sample drops into a gap between
 // triangles now and then, and the baked field underneath need not be the
 // deck -- which is how the bird ended up standing inside the island.
-static bool mesh_top_around(float x, float z, float* out)
+static bool mesh_top_around(float x, float z, float* out, bool cam = false)
 {
     if (!wmap_mesh_ready())
         return false;
@@ -236,7 +236,9 @@ static bool mesh_top_around(float x, float z, float* out)
     float best = -1e9f;
     for (const auto& o : off) {
         float y = 0.0f;
-        if (wmap_mesh_top(x + o[0], z + o[1], &y) && y > best) {
+        const bool got = cam ? wmap_mesh_top_cam(x + o[0], z + o[1], &y)
+                             : wmap_mesh_top(x + o[0], z + o[1], &y);
+        if (got && y > best) {
             best = y;
             any = true;
         }
@@ -244,6 +246,22 @@ static bool mesh_top_around(float x, float z, float* out)
     if (any)
         *out = best;
     return any;
+}
+
+// What the camera may be stopped by: the same, minus the parts a model says
+// the view should pass through.
+float ground_h_cam(float x, float z)
+{
+    float mt = 0.0f;
+    const bool hasMesh = mesh_top_around(x, z, &mt, true);
+    float h = 0, sd = 0;
+    if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
+    if (g_test_hf.nx > 1 &&
+        g_test_hf.sample(x - g_test_off[0], z - g_test_off[1], &h, &sd) &&
+        h > -50.0f)
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
+    return hasMesh ? mt : -1000.0f;
 }
 
 float ground_h(float x, float z)
@@ -1710,7 +1728,7 @@ struct OrbitCamera {
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
         auto solid_at = [](float x, float z) {
-            const float g = ground_h(x, z);
+            const float g = ground_h_cam(x, z);
             const float b =
                 wmap_active() ? wmap_cam_block_height(x, z) : -1000.0f;
             return std::max(g, b);

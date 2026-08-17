@@ -51,6 +51,9 @@ static std::vector<float> gHeights(HN* HN, 0.0f);   // raw editor heights
 // the map carries one. Only the camera boom reads it; walking still uses
 // the full surface, so ground stays ground whatever the view does.
 static std::vector<float> gCamHeights;
+// per model, per material name: bit 0 ground, bit 1 stops the camera
+static std::unordered_map<std::string, std::unordered_map<std::string, Uint8>>
+    gPartFlags;
 static std::vector<Uint8> gMask(MASK_N* MASK_N, 0);
 static std::vector<Uint8> gMask2(MASK_N* MASK_N, 0);
 static std::vector<Uint8> gKill(MASK_N* MASK_N, 255);
@@ -1030,6 +1033,7 @@ static bool load_wmap(const std::string& path)
     // Appended past everything else, behind a tag: a map without one simply
     // ends here, which is how older maps keep loading unchanged.
     gCamHeights.clear();
+    gPartFlags.clear();
     {
         char tag[8];
         Uint32 cn = 0;
@@ -1040,6 +1044,30 @@ static bool load_wmap(const std::string& path)
                 gCamHeights.swap(cam);
                 SDL_Log("wmap: map carries a camera field");
             }
+        }
+        // and the per-part flags, if this map was saved with them
+        char tag2[8];
+        Uint32 mc = 0;
+        if (fread(tag2, 1, 8, f) == 8 && memcmp(tag2, "PARTFLG1", 8) == 0 &&
+            fread(&mc, 4, 1, f) == 1 && mc < 4096) {
+            for (Uint32 m = 0; m < mc; m++) {
+                Uint16 il = 0;
+                if (fread(&il, 2, 1, f) != 1 || il > 512) break;
+                std::string id(il, '\0');
+                if (fread(&id[0], 1, il, f) != il) break;
+                Uint16 nm = 0;
+                if (fread(&nm, 2, 1, f) != 1 || nm > 512) break;
+                for (Uint16 n = 0; n < nm; n++) {
+                    Uint16 nl = 0;
+                    if (fread(&nl, 2, 1, f) != 1 || nl > 512) break;
+                    std::string nme(nl, '\0');
+                    if (nl && fread(&nme[0], 1, nl, f) != nl) break;
+                    Uint8 fl = 3;
+                    if (fread(&fl, 1, 1, f) != 1) break;
+                    gPartFlags[id][nme] = fl;
+                }
+            }
+            SDL_Log("wmap: part flags for %d models", (int)gPartFlags.size());
         }
     }
     fclose(f);
@@ -2151,6 +2179,9 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z)
 namespace col {
 constexpr float kCell = 4.0f;
 static std::vector<float> tris;          // 9 floats per triangle
+// bit 0: ground you can stand on. bit 1: stops the camera. Straight from
+// the model's parts, so a canopy can be neither and still be drawn.
+static std::vector<Uint8> flags;
 static std::vector<std::vector<int>> grid;
 static int nx = 0, nz = 0;
 static float ox = 0.0f, oz = 0.0f;
@@ -2159,6 +2190,7 @@ static bool ready = false;
 static void clear()
 {
     tris.clear();
+    flags.clear();
     grid.clear();
     nx = nz = 0;
     ready = false;
@@ -2173,6 +2205,22 @@ static void build_impl()
         if (!pm.loaded || pm.cpts.empty())
             continue;
         const float c = cosf(pi.yaw), s = sinf(pi.yaw), sc = pi.scale;
+        // per-vertex part flags, so a triangle knows what it belongs to
+        std::vector<Uint8> vflag(pm.cpts.size() / 3, 3);
+        for (const PropSub& sub : pm.subs) {
+            Uint8 fl = 3;
+            if (sub.mat >= 0 && sub.mat < (int)pm.mats.size()) {
+                auto it = gPartFlags.find(pm.id);
+                if (it != gPartFlags.end()) {
+                    auto jt = it->second.find(pm.mats[sub.mat].name);
+                    if (jt != it->second.end())
+                        fl = jt->second;
+                }
+            }
+            for (int k = sub.first; k < sub.first + sub.count &&
+                                    k < (int)vflag.size(); k++)
+                vflag[k] = fl;
+        }
         for (size_t v = 0; v + 2 < pm.cpts.size(); v += 3) {
             const float lx = pm.cpts[v] * sc, ly = pm.cpts[v + 1] * sc,
                         lz = pm.cpts[v + 2] * sc;
@@ -2182,6 +2230,10 @@ static void build_impl()
             tris.push_back(x);
             tris.push_back(y);
             tris.push_back(z);
+            if (v % 9 == 0) {
+                const size_t vi = v / 3;
+                flags.push_back(vi < vflag.size() ? vflag[vi] : 3);
+            }
             lo[0] = SDL_min(lo[0], x); hi[0] = SDL_max(hi[0], x);
             lo[2] = SDL_min(lo[2], z); hi[2] = SDL_max(hi[2], z);
         }
@@ -2281,6 +2333,8 @@ static bool resolve(float* pos, float radius, float height, float* groundY)
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++)
                 for (int k : grid[(size_t)j * nx + i]) {
+                    if (!(flags[k] & 1))
+                        continue;   // scenery: he walks through it
                     const float* T = &tris[(size_t)k * 9];
                     // the capsule's segment, feet to head
                     const float lo = pos[1] + radius, hi = pos[1] + height - radius;
@@ -2321,7 +2375,7 @@ static bool resolve(float* pos, float radius, float height, float* groundY)
     return grounded;
 }
 
-static bool surface(float x, float z, float yMax, float* out)
+static bool surface(float x, float z, float yMax, float* out, Uint8 mask)
 {
     if (!ready)
         return false;
@@ -2331,6 +2385,8 @@ static bool surface(float x, float z, float yMax, float* out)
     float best = -1e9f;
     bool hit = false;
     for (int k : grid[(size_t)j * nx + i]) {
+        if (!(flags[k] & mask))
+            continue;
         const float* T = &tris[(size_t)k * 9];
         const float d = (T[5] - T[8]) * (T[0] - T[6]) +
                         (T[6] - T[3]) * (T[2] - T[8]);
@@ -2367,13 +2423,13 @@ bool wmap_mesh_ready()
 
 bool wmap_mesh_floor(float wx, float wz, float yMax, float* outY)
 {
-    return col::surface(wx, wz, yMax, outY);
+    return col::surface(wx, wz, yMax, outY, 1);
 }
 
 bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi)
 {
     float y = 0.0f;
-    return col::surface(wx, wz, yHi, &y) && y > yLo;
+    return col::surface(wx, wz, yHi, &y, 1) && y > yLo;
 }
 
 bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY)
@@ -2384,7 +2440,13 @@ bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY)
 bool wmap_mesh_top(float wx, float wz, float* outY)
 {
     // the highest surface there, which is what you want to be put on top of
-    return col::surface(wx, wz, 1e9f, outY);
+    return col::surface(wx, wz, 1e9f, outY, 1);
+}
+
+bool wmap_mesh_top_cam(float wx, float wz, float* outY)
+{
+    // what the camera is allowed to hit, which is a different set of parts
+    return col::surface(wx, wz, 1e9f, outY, 2);
 }
 
 float wmap_cam_block_height(float wx, float wz)

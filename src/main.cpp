@@ -5485,6 +5485,7 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
+            }
             // the climb eases in quickly and settles back slowly, so it
             // reads as the camera riding over the rock, not teleporting
             const float lk = 1.0f - std::exp(
@@ -5524,24 +5525,20 @@ constexpr int kShadowResFar = 4096;
                 // buried: the eye is under the surface it sits over
                 const float here = solid(e.x, e.z);
                 bool bad = here > -900.0f && e.y < here + 0.5f;
-                // grazing: a face rises past the lens beside us. Ground
-                // *below* the camera is not a collision -- treating it as
-                // one walks the boom all the way onto his face.
-                if (!bad) {
-                    constexpr float kR = 0.6f;
-                    const float ox[4] = {kR, -kR, 0.0f, 0.0f};
-                    const float oz[4] = {0.0f, 0.0f, kR, -kR};
-                    for (int k = 0; k < 4 && !bad; ++k) {
-                        const float s = solid(e.x + ox[k], e.z + oz[k]);
-                        bad = s > -900.0f && s > e.y + 0.8f;
-                    }
-                }
+                // The grazing test that used to sit here -- anything
+                // beside the lens rising above it counts -- fired on every
+                // frame once real geometry existed, pinning the boom at its
+                // floor while the easing tried to climb out. That is the
+                // drilling. The clearance solve above already keeps the
+                // lens out of things; this stays a backstop for the one
+                // case it was written for, an eye actually inside a
+                // surface, and nothing else.
                 if (!bad) break;
                 // a gentler bite: this is a backstop for a buried lens, and
                 // taking a quarter of the boom at a time made it a snap in
                 // its own right
-                app.cam.boom = std::max(0.3f, app.cam.boom * 0.90f);
-                if (app.cam.boom <= 0.3f) break;
+                app.cam.boom = std::max(1.0f, app.cam.boom * 0.90f);
+                if (app.cam.boom <= 1.0f) break;
             }
         }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;

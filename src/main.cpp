@@ -614,7 +614,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0004;
+    float z = c.z - 0.0010;
     // a wide soft disc: the probe's penumbra spans ~half a unit of ground,
     // so walking across a shadow edge fades the band in smoothly
     const vec2 taps[12] = vec2[12](
@@ -677,6 +677,12 @@ vec3 wind_sway(vec3 p, float w) {
 void main() {
     vUV = aUV;
     gl_Position = uLightVP * vec4(wind_sway(aPos, aSway) + uOffset, 1.0);
+    // Pancaking: a caster nearer the light than the near plane would be
+    // clipped away, and the surface it shades then reads as lit -- the
+    // band where shading dropped out. Flatten it onto the near plane
+    // instead of losing it. Depth ordering past the plane is irrelevant;
+    // only occlusion matters here.
+    gl_Position.z = max(gl_Position.z, -gl_Position.w);
 }
 )GLSL";
 
@@ -705,6 +711,12 @@ void main() {
               + aWeights.z * uPalette[aJoints.z]
               + aWeights.w * uPalette[aJoints.w];
     gl_Position = uLightVP * uModel * skin * vec4(aPos, 1.0);
+    // Pancaking: a caster nearer the light than the near plane would be
+    // clipped away, and the surface it shades then reads as lit -- the
+    // band where shading dropped out. Flatten it onto the near plane
+    // instead of losing it. Depth ordering past the plane is irrelevant;
+    // only occlusion matters here.
+    gl_Position.z = max(gl_Position.z, -gl_Position.w);
 }
 )GLSL";
 
@@ -1034,7 +1046,7 @@ float shadow_factor(vec4 sp) {
         c.z > 1.0)
         return 1.0;
     // small bias + 4-tap PCF on top of the hardware compare
-    float z = c.z - 0.00028;
+    float z = c.z - 0.0007;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -1063,8 +1075,8 @@ void main() {
     float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
     vec3 sc = vShadowPos.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(sc.xy, vec2(0.177))) &&
-                   all(lessThanEqual(sc.xy, vec2(0.823))) && sc.z <= 1.0;
+    bool near_ok = all(greaterThanEqual(sc.xy, vec2(0.02))) &&
+                   all(lessThanEqual(sc.xy, vec2(0.98))) && sc.z <= 1.0;
     float sh = near_ok ? shadow_factor(vShadowPos) : shadow_far_isle(vWorld);
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
@@ -1227,7 +1239,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.00028;
+    float z = c.z - 0.0007;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadowMap, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -2390,7 +2402,7 @@ constexpr int kShadowResFar = 4096;
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 220.0f, center, {0, 1, 0});
+            mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
         // Width AND depth both matter, and the depth is what broke the
         // shadows. This was 20..180 when they read correctly; it had grown
         // to 20..560 for distant casters, and the bias in the shadow
@@ -2410,18 +2422,11 @@ constexpr int kShadowResFar = 4096;
         // out sits about 100 nearer or further than the centre. That range
         // is what sets what the normalised bias means in world units, so
         // every near-map bias below is divided by the same 1.875.
-        // Rendered over 340 units but only read from the middle 220 (see
-        // kNearInner). The hole that made shading drop out was a caster
-        // standing outside this box while the surface it shaded stood
-        // inside, so the map held no caster and reported the surface lit.
-        // Casting wider than we read gives every caster within 60 units of
-        // the read region a place in the map, which closes that hole with
-        // one lookup -- no second map to union in, so nothing doubles.
-        // Depth grows to 400 because ground offset along the sun's azimuth
-        // shifts depth by about 154 at this width; the near-map biases
-        // below are scaled by the same ratio to hold their world size.
-        return mat4_ortho(-170.0f, 170.0f, -170.0f, 170.0f, 20.0f, 420.0f) *
-               view;
+        // Back to 112 units across: at 4096 that is 0.027 per texel, and
+        // widening it to close the shadow gap cost three times that. The
+        // gap is fixed in the depth pass instead, by pancaking, so this
+        // can stay as tight and as crisp as it was.
+        return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 180.0f) * view;
     };
     // The far cascade: same sun, a much wider box, its own coarse map. The
     // near one is deliberately tight so shadows are crisp underfoot, which

@@ -198,7 +198,7 @@ float shadow_factor(vec4 sp) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.00028;
+    float z = c.z - 0.0007;
     float s = 0.0;
     vec2 t = vec2(1.0 / 4096.0);
     s += texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, z));
@@ -218,8 +218,8 @@ float shadow_any(vec4 sp, vec3 world) {
     // one lookup: the sharp map is cast wider than it is read, so it holds
     // the casters for everything inside the region trusted here
     vec3 c = sp.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(c.xy, vec2(0.177))) &&
-                   all(lessThanEqual(c.xy, vec2(0.823))) && c.z <= 1.0;
+    bool near_ok = all(greaterThanEqual(c.xy, vec2(0.02))) &&
+                   all(lessThanEqual(c.xy, vec2(0.98))) && c.z <= 1.0;
     return near_ok ? shadow_factor(sp) : shadow_far(world);
 }
 )GLSL";
@@ -413,9 +413,9 @@ void main() {
     float sh = 1.0;
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
-        sh = texture(uShadow, vec3(c.xy, c.z - 0.00048));
-    if (any(lessThan(c.xy, vec2(0.177))) ||
-        any(greaterThan(c.xy, vec2(0.823))) || c.z > 1.0) {
+        sh = texture(uShadow, vec3(c.xy, c.z - 0.0012));
+    if (any(lessThan(c.xy, vec2(0.02))) ||
+        any(greaterThan(c.xy, vec2(0.98))) || c.z > 1.0) {
         sh = 1.0;
         vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
         vec3 cf = sf.xyz * 0.5 + 0.5;
@@ -719,7 +719,15 @@ void main() {
 static const char* kDepthVS = R"GLSL(#version 330 core
 layout(location=0) in vec3 aPos;
 uniform mat4 uLightVP;
-void main() { gl_Position = uLightVP * vec4(aPos, 1.0); }
+void main() {
+    gl_Position = uLightVP * vec4(aPos, 1.0);
+    // Pancaking: a caster nearer the light than the near plane would be
+    // clipped away, and the surface it shades then reads as lit -- the
+    // band where shading dropped out. Flatten it onto the near plane
+    // instead of losing it. Depth ordering past the plane is irrelevant;
+    // only occlusion matters here.
+    gl_Position.z = max(gl_Position.z, -gl_Position.w);
+}
 )GLSL";
 static const char* kDepthFS = R"GLSL(#version 330 core
 void main() {}
@@ -759,6 +767,12 @@ void main() {
                           clamp(aPos.y / max(uBoundH, 0.001), 0.0, 1.0),
                           uTime, uGrayMask);
     gl_Position = uLightVP * world;
+    // Pancaking: a caster nearer the light than the near plane would be
+    // clipped away, and the surface it shades then reads as lit -- the
+    // band where shading dropped out. Flatten it onto the near plane
+    // instead of losing it. Depth ordering past the plane is irrelevant;
+    // only occlusion matters here.
+    gl_Position.z = max(gl_Position.z, -gl_Position.w);
 }
 )GLSL";
 static const char* kDepthPropFS = R"GLSL(#version 330 core

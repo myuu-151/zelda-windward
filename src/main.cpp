@@ -2743,8 +2743,12 @@ int main(int argc, char** argv)
         // The scatter has to follow the setting rather than sit on top of
         // it: thirteen units of spread above a base of one still puts a
         // ribbon fourteen units up, which is no lower than before.
+        // The band keeps its depth: scaling the scatter with the setting
+        // meant a low sky became a single flat layer, where the default's
+        // character comes from ribbons drifting at all sorts of heights.
+        // Lower the floor, keep the spread.
         const float base = wh > 0.01f ? wh : 7.0f;
-        const float spread = wh > 0.01f ? SDL_max(0.5f, wh * 0.45f) : 13.0f;
+        const float spread = wh > 0.01f ? SDL_max(6.0f, wh * 0.9f) : 13.0f;
         w.origin = {wx + std::cos(ang) * rad, base + wrand() * spread,
                     wz + std::sin(ang) * rad};
         // fixed world wind, matching the sky's cloud drift and the tree sway

@@ -1788,13 +1788,16 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
+    // how far the lens has been shoved off its arc to keep out of geometry
+    Vec3 push{};
+
     Vec3 eye() const
     {
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
         const Vec3 dirv = dir();
-        return target + dirv * (boom > 0.0f ? boom : want_dist());
+        return target + dirv * (boom > 0.0f ? boom : want_dist()) + push;
     }
 
 };
@@ -5527,6 +5530,21 @@ constexpr int kShadowResFar = 4096;
                 (want_lift > app.cam.pitch_lift ? -9.0f : -2.0f) *
                 static_cast<float>(frame_dt));
             app.cam.pitch_lift += (want_lift - app.cam.pitch_lift) * lk;
+            // Last resort: with him against a thick trunk, no length of
+            // boom along this angle is outside it, so closing the arm just
+            // buries the lens nearer his head. Shove it clear of the
+            // surface instead and ease that offset away as soon as the arc
+            // itself is clear again.
+            {
+                const Vec3 raw = app.cam.target + app.cam.dir() * app.cam.boom;
+                float p[3] = { raw.x, raw.y, raw.z };
+                Vec3 want{};
+                if (wmap_mesh_cam_push(p, 0.5f))
+                    want = Vec3{ p[0] - raw.x, p[1] - raw.y, p[2] - raw.z };
+                const float pk = 1.0f - std::exp(-12.0f *
+                                                 static_cast<float>(frame_dt));
+                app.cam.push = app.cam.push + (want - app.cam.push) * pk;
+            }
             // Backstop: easing takes frames, and a frame spent inside the
             // rock is a frame of grey screen. Close the boom immediately
             // while the eye is buried.

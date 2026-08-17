@@ -1117,7 +1117,12 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
                 cgltf_accessor_read_float(pos, v, p3, 3);
                 if (nrm) cgltf_accessor_read_float(nrm, v, n3, 3);
                 if (uv)  cgltf_accessor_read_float(uv, v, t2, 2);
-                if (col) cgltf_accessor_read_float(col, v, c4, 4);
+                // Vertex colours multiply the texture in the prop shader,
+                // and the client's own model path ignores them -- so a mesh
+                // carrying baked shading in COLOR_0 came out darker as a
+                // prop than the identical model drawn as an island. Take
+                // them only where there is no texture to darken.
+                if (col && !mat.tex) cgltf_accessor_read_float(col, v, c4, 4);
                 const float wx = xf[0]*p3[0] + xf[4]*p3[1] + xf[8]*p3[2] + xf[12];
                 const float wy = xf[1]*p3[0] + xf[5]*p3[1] + xf[9]*p3[2] + xf[13];
                 const float wz = xf[2]*p3[0] + xf[6]*p3[1] + xf[10]*p3[2] + xf[14];

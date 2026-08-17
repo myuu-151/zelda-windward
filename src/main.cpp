@@ -1206,6 +1206,10 @@ out vec4 fragColor;
 uniform vec3  uEye;
 uniform float uTime;
 uniform sampler2DShadow uShadowMap;
+// The far cascade. With it, the sea can take an island's real shadow at
+// range instead of a disc standing in for one.
+uniform sampler2DShadow uShadowMap2;
+uniform mat4 uLightVP2;
 
 float shadow_factor(vec4 sp) {
     vec3 c = sp.xyz * 0.5 + 0.5;
@@ -1407,8 +1411,34 @@ float island_disc_foam(vec3 world, float t)
     return f;
 }
 
+// The real shadow, out to wherever the far cascade reaches. A disc is a
+// crude stand-in -- it is round, it is the island's whole bounding size,
+// and it knows nothing of the tree standing on it -- so it is only worth
+// falling back to beyond the cascade's box.
+float far_map_shadow(vec3 world, out bool covered)
+{
+    vec4 sp = uLightVP2 * vec4(world, 1.0);
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    covered = all(greaterThanEqual(c.xy, vec2(0.01))) &&
+              all(lessThanEqual(c.xy, vec2(0.99))) && c.z <= 1.0;
+    if (!covered)
+        return 1.0;
+    float z = c.z - 0.0016;
+    vec2 tf = vec2(1.0 / 2048.0);
+    float s = 0.0;
+    s += texture(uShadowMap2, vec3(c.xy + vec2(-0.5, -0.5) * tf, z));
+    s += texture(uShadowMap2, vec3(c.xy + vec2( 0.5, -0.5) * tf, z));
+    s += texture(uShadowMap2, vec3(c.xy + vec2(-0.5,  0.5) * tf, z));
+    s += texture(uShadowMap2, vec3(c.xy + vec2( 0.5,  0.5) * tf, z));
+    return s * 0.25;
+}
+
 float island_disc_shadow(vec3 world)
 {
+    bool covered = false;
+    float far = far_map_shadow(world, covered);
+    if (covered)
+        return far;
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float s = 1.0;
     for (int i = 0; i < uDiscCount; ++i) {
@@ -5376,6 +5406,12 @@ int main(int argc, char** argv)
             glUniform2fv(wa_center, 1, center);
         }
         glUniform1f(wa_hasshore, shore_tex ? 1.0f : 0.0f);
+        glUniformMatrix4fv(glGetUniformLocation(water_prog, "uLightVP2"), 1,
+                           GL_FALSE, light_vp_far.m);
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, shadow_tex_far);
+        glUniform1i(glGetUniformLocation(water_prog, "uShadowMap2"), 8);
+        glActiveTexture(GL_TEXTURE0);
         glUniform1f(wa_islandy, kIslandY);
         glUniform1f(wa_shorescale,
                     wmap_active() ? wmap_scale() : 1.0f);

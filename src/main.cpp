@@ -1788,6 +1788,11 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
+    // How far the lens lifts as it closes. Coming straight in along the arm
+    // puts it level with his head and he vanishes; rising as it shortens
+    // keeps him in shot, looking down on him from just above.
+    float rise = 0.0f;
+
     Vec3 eye() const
     {
 
@@ -1795,7 +1800,8 @@ struct OrbitCamera {
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
         const Vec3 dirv = dir();
-        return target + dirv * (boom > 0.0f ? boom : want_dist());
+        return target + dirv * (boom > 0.0f ? boom : want_dist()) +
+               Vec3{0.0f, rise, 0.0f};
     }
 
 };
@@ -5571,6 +5577,16 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
+            // Lift as it closes, so he stays in frame. Tested with the
+            // lift included, or the rise would push the lens into whatever
+            // the shortening just got it out of.
+            {
+                const float wantRise =
+                    app.cam.boom < 3.0f ? (3.0f - app.cam.boom) * 0.55f : 0.0f;
+                const float rk =
+                    1.0f - std::exp(-8.0f * static_cast<float>(frame_dt));
+                app.cam.rise += (wantRise - app.cam.rise) * rk;
+            }
             // Immediate, on where the lens actually is rather than where it
             // is heading. Easing towards a shortened target takes frames,
             // and at running speed the surface arrives first -- which is
@@ -5578,7 +5594,8 @@ constexpr int kShadowResFar = 4096;
             // the easing: the target is walked down by the same test, so
             // both settle at the same length.
             for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
-                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
+                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom +
+                               Vec3{0.0f, app.cam.rise, 0.0f};
                 const float ep[3] = { e.x, e.y, e.z };
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;

@@ -4077,7 +4077,17 @@ constexpr int kShadowResFar = 4096;
                     const float gh =
                         ground_h(app.player.pos.x, app.player.pos.z);
                     const bool on_isle = gh > -900.0f;
-                    const float floor_y = on_isle ? gh : kWaterSkim;
+                    float floor_y = on_isle ? gh : kWaterSkim;
+                    // A heightfield holds one surface per spot, so a branch
+                    // overhead is recorded as the ground there and walking
+                    // under it lifted him onto it. Standing on something
+                    // already, refuse a floor more than a step above his
+                    // feet: that is a thing over his head, not under them,
+                    // and he keeps the surface he is on. Slopes climb by
+                    // far less than this each frame, and a fall approaches
+                    // its floor from above, so neither is affected.
+                    if (app.fall_vel == 0.0f && floor_y > app.player.pos.y + 1.1f)
+                        floor_y = app.player.pos.y;
                     if (app.player.pos.y > floor_y + 0.05f) {
                         app.fall_vel -= 26.0f * static_cast<float>(kFixedDt);
                         app.player.pos.y +=

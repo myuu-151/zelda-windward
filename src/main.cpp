@@ -1051,14 +1051,18 @@ void main() {
     vec4 albedo = texture(uTex, vUV);
     if (uClip == 1 && albedo.a < 0.5) discard;
     vec3 n = normalize(vNrm);
+    // The darker of the two maps, not one or the other. Choosing by where
+    // the receiving surface falls goes wrong when the caster does not fall
+    // the same way: the deck sits just inside the sharp map's box while
+    // the tree standing on it is just outside, so that map holds no tree
+    // and reports the deck lit -- a band as wide as the shadow is long.
+    // Both maps hold the same casters and each returns lit where it has
+    // nothing, so the minimum can only ever restore a missing shadow.
     // lit from the sky's visible sun, so the cast shadows agree with it
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
-    vec3 sc = vShadowPos.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(sc.xy, vec2(0.02))) &&
-                   all(lessThanEqual(sc.xy, vec2(0.98))) && sc.z <= 1.0;
-    float sh = near_ok ? shadow_factor(vShadowPos) : shadow_far_isle(vWorld);
+    float sh = min(shadow_factor(vShadowPos), shadow_far_isle(vWorld));
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);

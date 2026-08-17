@@ -215,10 +215,9 @@ float shadow_factor(vec4 sp) {
 // why an island a few hundred units off cast a disc on the sea but nothing
 // on itself, tree included.
 float shadow_any(vec4 sp, vec3 world) {
-    vec3 c = sp.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(c.xy, vec2(0.02))) &&
-                   all(lessThanEqual(c.xy, vec2(0.98))) && c.z <= 1.0;
-    return near_ok ? shadow_factor(sp) : shadow_far(world);
+    // the darker of the two: a caster can sit outside the sharp map's box
+    // while the surface it shades sits inside, and that map returns lit
+    return min(shadow_factor(sp), shadow_far(world));
 }
 )GLSL";
 
@@ -408,18 +407,16 @@ void main() {
     // terrain and props already use covers the rest.
     vec4 sp = uLightVP * vec4(aRoot, 1.0);
     vec3 c = sp.xyz * 0.5 + 0.5;
-    float sh = -1.0;
+    float sh = 1.0;
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
         sh = texture(uShadow, vec3(c.xy, c.z - 0.00064));
-    if (sh < 0.0) {
-        vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
-        vec3 cf = sf.xyz * 0.5 + 0.5;
-        if (all(greaterThan(cf.xy, vec2(0.0))) &&
-            all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
-            sh = texture(uShadow2, vec3(cf.xy, cf.z - 0.0016));
-    }
-    vShadow = mix(0.58, 1.0, sh < 0.0 ? 1.0 : sh);
+    vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
+    vec3 cf = sf.xyz * 0.5 + 0.5;
+    if (all(greaterThan(cf.xy, vec2(0.0))) &&
+        all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
+        sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0016)));
+    vShadow = mix(0.58, 1.0, sh);
 
     vV = aBlade.y;
     vLxz = (aRoot.xz - uCenter) / uScale;

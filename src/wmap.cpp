@@ -47,6 +47,10 @@ static WmapHeights gOut;
 static std::string gAssetsDir;      // <root>/terrain/assets
 
 static std::vector<float> gHeights(HN* HN, 0.0f);   // raw editor heights
+// The same field with the parts that let the camera through left out, when
+// the map carries one. Only the camera boom reads it; walking still uses
+// the full surface, so ground stays ground whatever the view does.
+static std::vector<float> gCamHeights;
 static std::vector<Uint8> gMask(MASK_N* MASK_N, 0);
 static std::vector<Uint8> gMask2(MASK_N* MASK_N, 0);
 static std::vector<Uint8> gKill(MASK_N* MASK_N, 255);
@@ -854,7 +858,14 @@ static GLuint tex_from_bmp(const std::string& path, bool* gray = nullptr,
 }
 
 // x,z in WORLD units; returns the editor height scaled to world
+static float height_at_in(const std::vector<float>& H, float x, float z);
+
 static float height_at(float x, float z)
+{
+    return height_at_in(gHeights, x, z);
+}
+
+static float height_at_in(const std::vector<float>& H, float x, float z)
 {
     float u = (x / gScale + gEditorHalf) / (2.0f * gEditorHalf) * (HN - 1);
     float v = (z / gScale + gEditorHalf) / (2.0f * gEditorHalf) * (HN - 1);
@@ -862,8 +873,8 @@ static float height_at(float x, float z)
     int j = SDL_clamp((int)v, 0, HN - 2);
     float fu = SDL_clamp(u - i, 0.0f, 1.0f);
     float fv = SDL_clamp(v - j, 0.0f, 1.0f);
-    float a = gHeights[j * HN + i], b = gHeights[j * HN + i + 1];
-    float c = gHeights[(j + 1) * HN + i], d = gHeights[(j + 1) * HN + i + 1];
+    float a = H[j * HN + i], b = H[j * HN + i + 1];
+    float c = H[(j + 1) * HN + i], d = H[(j + 1) * HN + i + 1];
     // A props-only map marks open water as -100: a sentinel, not a height.
     // Blending it with a neighbouring deck cell gives about -50, ground far
     // under the sea, so the outer half cell of every island evaporates --
@@ -999,6 +1010,21 @@ static bool load_wmap(const std::string& path)
                     const int* ib = (const int*)blob.data();
                     gTune.trimSkirt = (75 < (int)nf && ib[75] != 0);
                 }
+            }
+        }
+    }
+    // Appended past everything else, behind a tag: a map without one simply
+    // ends here, which is how older maps keep loading unchanged.
+    gCamHeights.clear();
+    {
+        char tag[8];
+        Uint32 cn = 0;
+        if (fread(tag, 1, 8, f) == 8 && memcmp(tag, "CAMBLK01", 8) == 0 &&
+            fread(&cn, 4, 1, f) == 1 && cn == (Uint32)(HN * HN)) {
+            std::vector<float> cam(cn);
+            if (fread(cam.data(), sizeof(float), cn, f) == cn) {
+                gCamHeights.swap(cam);
+                SDL_Log("wmap: map carries a camera field");
             }
         }
     }
@@ -2086,6 +2112,19 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z)
     // chart cells are laid out on a fixed grid: snap to the nearest one
     *x = roundf((wx + off) / quad) * quad - off;
     *z = roundf((wz + off) / quad) * quad - off;
+}
+
+float wmap_cam_block_height(float wx, float wz)
+{
+    if (!gActive || gCamHeights.empty())
+        return wmap_block_height(wx, wz);
+    const float lx = wx - gCenter[0], lz = wz - gCenter[1];
+    const float margin = TER_HALF * 0.07f;
+    if (fabsf(lx) > TER_HALF + margin || fabsf(lz) > TER_HALF + margin)
+        return -1000.0f;
+    return height_at_in(gCamHeights,
+                        SDL_clamp(lx, -TER_HALF, TER_HALF),
+                        SDL_clamp(lz, -TER_HALF, TER_HALF)) + gYOff;
 }
 
 float wmap_block_height(float wx, float wz)

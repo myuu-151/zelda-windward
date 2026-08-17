@@ -35,6 +35,10 @@ bool wmap_flight_ring(float wx, float wz, float* radius, float* height);
 // the terrain heightfield this also covers the overhanging skirt just off
 // the shore, so the camera cannot slip underneath the rim. -1000 = clear.
 float wmap_block_height(float wx, float wz);
+// What the camera boom is allowed to hit: the same surface, minus any part
+// the map marks as one the view should rotate through. Falls back to
+// wmap_block_height for maps that carry no such field.
+float wmap_cam_block_height(float wx, float wz);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

@@ -1681,7 +1681,8 @@ struct OrbitCamera {
         constexpr int kSteps = 28;
         auto solid_at = [](float x, float z) {
             const float g = ground_h(x, z);
-            const float b = wmap_active() ? wmap_block_height(x, z) : -1000.0f;
+            const float b =
+                wmap_active() ? wmap_cam_block_height(x, z) : -1000.0f;
             return std::max(g, b);
         };
         for (int i = 1; i <= kSteps; ++i) {

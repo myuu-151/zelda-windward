@@ -4701,8 +4701,13 @@ constexpr int kShadowResFar = 4096;
                         const Vec3 next = app.bird_pos + fwd * (3.9f * dtb);
                         // taxi stays on the island: no walking off cliffs or
                         // up walls -- reject steps with a big height change
-                        // strictly under the step he is about to take
-                        const float ngh = ground_h_strict(next.x, next.z);
+                        // Sampled around the step, not just under it. A
+                        // single point refuses any gap between triangles,
+                        // which on tight geometry reads as him catching on
+                        // nothing at all -- and under you he has somewhere
+                        // to be put back anyway, unlike when he wanders on
+                        // his own.
+                        const float ngh = ground_h(next.x, next.z);
                         if (ngh > -900.0f &&
                             std::fabs(ngh - app.bird_pos.y) < 1.2f) {
                             app.bird_pos.x = next.x;

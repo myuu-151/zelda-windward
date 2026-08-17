@@ -264,6 +264,24 @@ float ground_h_cam(float x, float z)
     return hasMesh ? mt : -1000.0f;
 }
 
+// The same question asked exactly where it is put, with no sampling around
+// it. Widening the query keeps a floor over gaps between triangles, but it
+// also reports ground up to its own reach past a real edge -- which is how
+// the bird taxied out over open air.
+float ground_h_strict(float x, float z)
+{
+    float mt = 0.0f;
+    const bool hasMesh = wmap_mesh_ready() && wmap_mesh_top(x, z, &mt);
+    float h = 0, sd = 0;
+    if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
+    if (g_test_hf.nx > 1 &&
+        g_test_hf.sample(x - g_test_off[0], z - g_test_off[1], &h, &sd) &&
+        h > -50.0f)
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
+    return hasMesh ? mt : -1000.0f;
+}
+
 float ground_h(float x, float z)
 {
     float mt = 0.0f;
@@ -4575,8 +4593,24 @@ constexpr int kShadowResFar = 4096;
                             const Vec3 fwd{std::sin(app.bird_yaw), 0,
                                            std::cos(app.bird_yaw)};
                             // stride length scales with the legs
-                            app.bird_pos =
-                                app.bird_pos + fwd * (0.8f * kBirdScale * kBirdReach * dtb);
+                            const Vec3 step =
+                                app.bird_pos +
+                                fwd * (0.8f * kBirdScale * kBirdReach * dtb);
+                            // ...but only onto ground that is there. This
+                            // stride had no test at all under it, so he
+                            // wandered off the deck and kept walking over
+                            // open water. Asked exactly where the foot
+                            // lands, not sampled around it, or he steps
+                            // over the edge by the width of the sampling.
+                            const float sg = ground_h_strict(step.x, step.z);
+                            if (sg > -900.0f &&
+                                std::fabs(sg - app.bird_pos.y) < 1.0f) {
+                                app.bird_pos = step;
+                                app.bird_pos.y = sg;
+                            } else {
+                                // turn away from the drop rather than stop
+                                app.bird_yaw += 1.6f * dtb;
+                            }
                         }
                     }
                     break;
@@ -4667,7 +4701,8 @@ constexpr int kShadowResFar = 4096;
                         const Vec3 next = app.bird_pos + fwd * (3.9f * dtb);
                         // taxi stays on the island: no walking off cliffs or
                         // up walls -- reject steps with a big height change
-                        const float ngh = ground_h(next.x, next.z);
+                        // strictly under the step he is about to take
+                        const float ngh = ground_h_strict(next.x, next.z);
                         if (ngh > -900.0f &&
                             std::fabs(ngh - app.bird_pos.y) < 1.2f) {
                             app.bird_pos.x = next.x;

@@ -5468,7 +5468,12 @@ constexpr int kShadowResFar = 4096;
             float want_lift = 0.0f;
             const float target_boom = app.cam.solve_boom(&want_lift);
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
-            const float rate = target_boom < app.cam.boom ? 18.0f : 2.5f;
+            // Pulling in was near-instant at 18, which reads as a snap the
+            // moment anything crosses the lens. Easing it in makes the
+            // camera look like it is being pushed rather than cutting.
+            // Coming back out stays slower still, so it settles rather than
+            // springing the moment the way is clear.
+            const float rate = target_boom < app.cam.boom ? 6.0f : 2.5f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
             app.cam.boom += (target_boom - app.cam.boom) * k;
             // the climb eases in quickly and settles back slowly, so it

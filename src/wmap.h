@@ -63,6 +63,8 @@ bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY);
 bool wmap_mesh_cam_touching(const float* p, float radius);
 // Step a point around what it overlaps, keeping the boom's length.
 bool wmap_mesh_cam_push(float* p, float radius);
+// Where the segment a->b first crosses camera-blocking geometry, 0..1.
+bool wmap_mesh_cam_segment(const float* a, const float* b, float* tOut);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

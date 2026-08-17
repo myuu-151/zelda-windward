@@ -2358,6 +2358,59 @@ static bool overlaps(const float* p, float radius, Uint8 mask)
 // Push a point out of what it overlaps, along the shortest way out. This is
 // how the lens gets past a trunk rather than into it: the boom keeps its
 // length and the eye steps around the surface.
+// Where the segment from a to b first crosses camera-blocking geometry, as
+// a fraction along it. A sphere at the eye cannot answer this: inside a wide
+// trunk the nearest bark is further off than any sensible radius, so it
+// reports clear while the lens sits in the middle of the wood. Whether a
+// surface stands between him and the camera is the question that matters.
+static bool segment_hit(const float* a, const float* b, Uint8 mask, float* tOut)
+{
+    if (!ready)
+        return false;
+    const float d[3] = { b[0]-a[0], b[1]-a[1], b[2]-a[2] };
+    float best = 1e9f;
+    const float lox = SDL_min(a[0], b[0]), hix = SDL_max(a[0], b[0]);
+    const float loz = SDL_min(a[2], b[2]), hiz = SDL_max(a[2], b[2]);
+    const int i0 = SDL_clamp((int)((lox - ox) / kCell), 0, nx - 1);
+    const int i1 = SDL_clamp((int)((hix - ox) / kCell), 0, nx - 1);
+    const int j0 = SDL_clamp((int)((loz - oz) / kCell), 0, nz - 1);
+    const int j1 = SDL_clamp((int)((hiz - oz) / kCell), 0, nz - 1);
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++)
+            for (int k : grid[(size_t)j * nx + i]) {
+                if (!(flags[k] & mask))
+                    continue;
+                const float* T = &tris[(size_t)k * 9];
+                // Moller-Trumbore
+                const float e1[3] = { T[3]-T[0], T[4]-T[1], T[5]-T[2] };
+                const float e2[3] = { T[6]-T[0], T[7]-T[1], T[8]-T[2] };
+                const float pv[3] = { d[1]*e2[2]-d[2]*e2[1],
+                                      d[2]*e2[0]-d[0]*e2[2],
+                                      d[0]*e2[1]-d[1]*e2[0] };
+                const float det = e1[0]*pv[0] + e1[1]*pv[1] + e1[2]*pv[2];
+                if (fabsf(det) < 1e-8f)
+                    continue;
+                const float inv = 1.0f / det;
+                const float tv[3] = { a[0]-T[0], a[1]-T[1], a[2]-T[2] };
+                const float u = (tv[0]*pv[0] + tv[1]*pv[1] + tv[2]*pv[2]) * inv;
+                if (u < 0.0f || u > 1.0f)
+                    continue;
+                const float qv[3] = { tv[1]*e1[2]-tv[2]*e1[1],
+                                      tv[2]*e1[0]-tv[0]*e1[2],
+                                      tv[0]*e1[1]-tv[1]*e1[0] };
+                const float v = (d[0]*qv[0] + d[1]*qv[1] + d[2]*qv[2]) * inv;
+                if (v < 0.0f || u + v > 1.0f)
+                    continue;
+                const float tt = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
+                if (tt > 0.001f && tt < best)
+                    best = tt;
+            }
+    if (best > 1.0f)
+        return false;
+    *tOut = best;
+    return true;
+}
+
 static bool push_out(float* p, float radius, Uint8 mask)
 {
     if (!ready)
@@ -2537,6 +2590,11 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
 bool wmap_mesh_cam_touching(const float* p, float radius)
 {
     return col::overlaps(p, radius, 2);
+}
+
+bool wmap_mesh_cam_segment(const float* a, const float* b, float* tOut)
+{
+    return col::segment_hit(a, b, 2, tOut);
 }
 
 bool wmap_mesh_cam_push(float* p, float radius)

@@ -5534,6 +5534,20 @@ constexpr int kShadowResFar = 4096;
                     return wmap_mesh_cam_touching(p, 0.45f);
                 };
                 Vec3 want{};
+                // Anything between him and where the lens wants to be: stop
+                // short of it. This is the one test that cannot be fooled
+                // by being deep inside a trunk, where no surface is near
+                // enough for a sphere to notice.
+                {
+                    const Vec3 e = app.cam.target + d * target_boom;
+                    const float a3[3] = { app.cam.target.x, app.cam.target.y,
+                                          app.cam.target.z };
+                    const float b3[3] = { e.x, e.y, e.z };
+                    float th = 1.0f;
+                    if (wmap_mesh_cam_segment(a3, b3, &th))
+                        target_boom = SDL_max(0.5f,
+                                              target_boom * th - 0.35f);
+                }
                 if (inside(target_boom)) {
                     // He is walking into the tree with the lens on the far
                     // side of it, so where the camera wants to sit is now

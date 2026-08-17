@@ -1713,16 +1713,7 @@ struct OrbitCamera {
         return Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
     }
 
-    // a temporary swing around an obstruction, eased in and out
-    float yaw_off = 0.0f;
-
-    Vec3 dir() const
-    {
-        const float p = pitch + pitch_lift;
-        const float cp = std::cos(p);
-        const float y = yaw + yaw_off;
-        return Vec3{cp * std::sin(y), std::sin(p), cp * std::cos(y)};
-    }
+    Vec3 dir() const { return dir_at(pitch_lift); }
 
     // how far back the boom would like to sit, ignoring the world
     float want_dist() const { return distance + pull; }
@@ -1797,16 +1788,13 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
-    // how far the lens has stepped off its arc to get round something
-    Vec3 push{};
-
     Vec3 eye() const
     {
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
         const Vec3 dirv = dir();
-        return target + dirv * (boom > 0.0f ? boom : want_dist()) + push;
+        return target + dirv * (boom > 0.0f ? boom : want_dist());
     }
 
 };
@@ -5529,101 +5517,14 @@ constexpr int kShadowResFar = 4096;
             // was clear again, and eased out once more -- for ever, with
             // him standing still. Walking the target down to a length whose
             // endpoint is clear gives it somewhere to settle.
-            // Slip past rather than pull in. Walking backwards into a
-            // trunk used to shorten the arm, dragging the view onto his
-            // back; stepping the lens around the surface keeps the shot's
-            // length and just eases it aside. Only if it cannot get clear
-            // that way -- more than a couple of units of shove, meaning it
-            // is deep inside something -- does the boom give as well.
-            if (wmap_mesh_ready()) {
-                const Vec3 d = app.cam.dir();
-                auto inside = [&](float t) {
-                    const Vec3 e = app.cam.target + d * t;
-                    const float p[3] = { e.x, e.y, e.z };
-                    return wmap_mesh_cam_touching(p, 0.45f);
-                };
-                Vec3 want{};
-                // A trunk between him and the lens is a choice between
-                // pulling in and looking at bark, and neither is wanted --
-                // so go round it instead. Swing the orbit to the nearest
-                // angle with a clear line and keep the shot's length; the
-                // swing eases away as soon as the way ahead is open again.
-                {
-                    const float a3[3] = { app.cam.target.x, app.cam.target.y,
-                                          app.cam.target.z };
-                    auto blocked = [&](float off) {
-                        const float p = app.cam.pitch + app.cam.pitch_lift;
-                        const float cp = std::cos(p);
-                        const float y = app.cam.yaw + off;
-                        const Vec3 dd{cp * std::sin(y), std::sin(p),
-                                      cp * std::cos(y)};
-                        const Vec3 e = app.cam.target + dd * target_boom;
-                        const float b3[3] = { e.x, e.y, e.z };
-                        float th = 1.0f;
-                        return wmap_mesh_cam_segment(a3, b3, &th);
-                    };
-                    // Hold the swing until the angle he actually chose is
-                    // clear again. Testing the shifted angle instead meant
-                    // it read clear the moment it swung, eased back, was
-                    // blocked once more, and stuck there juddering.
-                    float wantOff = 0.0f;
-                    if (blocked(0.0f)) {
-                        wantOff = app.cam.yaw_off;
-                        if (blocked(app.cam.yaw_off)) {
-                        bool found = false;
-                        for (float step = 0.10f; step <= 1.25f && !found;
-                             step += 0.10f) {
-                            if (!blocked(step)) { wantOff = step; found = true; }
-                            else if (!blocked(-step)) { wantOff = -step; found = true; }
-                        }
-                        if (!found) {
-                            // nowhere round it: come in beside him instead
-                            const Vec3 e = app.cam.target +
-                                           app.cam.dir() * target_boom;
-                            const float b3[3] = { e.x, e.y, e.z };
-                            float th = 1.0f;
-                            if (wmap_mesh_cam_segment(a3, b3, &th))
-                                target_boom =
-                                    SDL_max(0.5f, target_boom * th - 0.35f);
-                        }
-                        }
-                    }
-                    const float yk = 1.0f - std::exp(
-                        -(wantOff != 0.0f ? 8.0f : 3.0f) *
-                        static_cast<float>(frame_dt));
-                    app.cam.yaw_off += (wantOff - app.cam.yaw_off) * yk;
-                }
-                if (inside(target_boom)) {
-                    // He is walking into the tree with the lens on the far
-                    // side of it, so where the camera wants to sit is now
-                    // within the trunk. Come in along the arm to the last
-                    // length that is clear -- up beside him, in front of
-                    // the tree -- rather than staying put and looking out
-                    // from inside the bark.
-                    float clear = 0.8f;
-                    for (float t = target_boom; t >= 0.8f; t -= 0.2f)
-                        if (!inside(t)) {
-                            clear = t;
-                            break;
-                        }
-                    target_boom = clear;
-                } else {
-                    // Only brushing it: step the lens aside and keep the
-                    // shot's length.
-                    const Vec3 raw = app.cam.target + d * target_boom;
-                    float p[3] = { raw.x, raw.y, raw.z };
-                    if (wmap_mesh_cam_push(p, 0.5f))
-                        want = Vec3{ p[0] - raw.x, p[1] - raw.y,
-                                     p[2] - raw.z };
-                    const float mag = std::sqrt(dot(want, want));
-                    if (mag > 2.0f)
-                        want = want * (2.0f / mag);
-                }
-                const float pk =
-                    1.0f - std::exp(-14.0f * static_cast<float>(frame_dt));
-                app.cam.push = app.cam.push + (want - app.cam.push) * pk;
-            } else {
-                app.cam.push = Vec3{};
+            for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
+                const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
+                const float ep[3] = { e.x, e.y, e.z };
+                if (!wmap_mesh_cam_touching(ep, 0.45f))
+                    break;
+                target_boom = std::max(0.6f, target_boom - 0.35f);
+                if (target_boom <= 0.6f)
+                    break;
             }
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             // Pulling in was near-instant at 18, which reads as a snap the

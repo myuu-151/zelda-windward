@@ -13,6 +13,8 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include "cgltf.h"
+#include "stb_image.h"
 
 // ---------------------------------------------------------------- data
 
@@ -924,7 +926,8 @@ static void scan_props()
     for (const std::string& c : cats) {
         std::vector<fs::path> objs;
         for (const auto& e : fs::directory_iterator(dir + "/" + c, ec))
-            if (e.path().extension() == ".obj")
+            if (e.path().extension() == ".obj" ||
+                e.path().extension() == ".glb")
                 objs.push_back(e.path());
         std::sort(objs.begin(), objs.end());
         for (const auto& p : objs) {
@@ -970,13 +973,160 @@ static std::pair<GLuint, bool> prop_texture(const std::string& file)
     return { t, gray };
 }
 
+// A prop imported from Blender is a glb, not an OBJ. cgltf is already
+// here for the client's own models, so this reads one into the same
+// interleaved layout the OBJ path builds -- baking each node's world
+// transform in, since a glb places its objects with node transforms and
+// reading the mesh list alone would pile them all on the origin.
+static bool load_prop_glb(PropMesh& m, const std::string& path)
+{
+    cgltf_options opt{};
+    cgltf_data* d = nullptr;
+    if (cgltf_parse_file(&opt, path.c_str(), &d) != cgltf_result_success)
+        return false;
+    if (cgltf_load_buffers(&opt, d, path.c_str()) != cgltf_result_success) {
+        cgltf_free(d);
+        return false;
+    }
+    std::vector<float> data;
+    float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+    for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
+        const cgltf_node& nd = d->nodes[ni];
+        if (!nd.mesh)
+            continue;
+        cgltf_float xf[16];
+        cgltf_node_transform_world(&nd, xf);
+        for (cgltf_size pi = 0; pi < nd.mesh->primitives_count; pi++) {
+            const cgltf_primitive& pr = nd.mesh->primitives[pi];
+            if (pr.type != cgltf_primitive_type_triangles)
+                continue;
+            const cgltf_accessor *pos = nullptr, *nrm = nullptr;
+            const cgltf_accessor *uv = nullptr, *col = nullptr;
+            for (cgltf_size ai = 0; ai < pr.attributes_count; ai++) {
+                const cgltf_attribute& at = pr.attributes[ai];
+                if (at.type == cgltf_attribute_type_position) pos = at.data;
+                else if (at.type == cgltf_attribute_type_normal) nrm = at.data;
+                else if (at.type == cgltf_attribute_type_texcoord && !uv)
+                    uv = at.data;
+                else if (at.type == cgltf_attribute_type_color && !col)
+                    col = at.data;
+            }
+            if (!pos)
+                continue;
+            PropMat mat;
+            if (pr.material && pr.material->has_pbr_metallic_roughness) {
+                const cgltf_pbr_metallic_roughness& pbr =
+                    pr.material->pbr_metallic_roughness;
+                for (int k = 0; k < 3; k++) {
+                    mat.kd[k] = pbr.base_color_factor[k];
+                    mat.ka[k] = pbr.base_color_factor[k] * 0.72f;
+                }
+                if (pbr.base_color_texture.texture &&
+                    pbr.base_color_texture.texture->image) {
+                    const cgltf_image* im = pbr.base_color_texture.texture->image;
+                    if (im->buffer_view && im->buffer_view->buffer &&
+                        im->buffer_view->buffer->data) {
+                        int w = 0, h = 0, ch = 0;
+                        const unsigned char* bytes =
+                            (const unsigned char*)im->buffer_view->buffer->data +
+                            im->buffer_view->offset;
+                        stbi_uc* px = stbi_load_from_memory(
+                            bytes, (int)im->buffer_view->size, &w, &h, &ch, 4);
+                        if (px) {
+                            bool gray = true;
+                            const int step = w * h > 4096 ? (w * h) / 4096 : 1;
+                            for (int i = 0; i < w * h && gray; i += step) {
+                                const stbi_uc* q = px + (size_t)i * 4;
+                                if (abs((int)q[0] - (int)q[1]) > 6 ||
+                                    abs((int)q[1] - (int)q[2]) > 6)
+                                    gray = false;
+                            }
+                            mat.gray = gray;
+                            glGenTextures(1, &mat.tex);
+                            glBindTexture(GL_TEXTURE_2D, mat.tex);
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                                         GL_RGBA, GL_UNSIGNED_BYTE, px);
+                            glGenerateMipmap(GL_TEXTURE_2D);
+                            glTexParameteri(GL_TEXTURE_2D,
+                                            GL_TEXTURE_MIN_FILTER,
+                                            GL_LINEAR_MIPMAP_LINEAR);
+                            glTexParameteri(GL_TEXTURE_2D,
+                                            GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                            stbi_image_free(px);
+                        }
+                    }
+                }
+            }
+            PropSub sub;
+            sub.mat = (int)m.mats.size();
+            m.mats.push_back(mat);
+            sub.first = (int)(data.size() / 11);
+            const cgltf_size n = pr.indices ? pr.indices->count : pos->count;
+            for (cgltf_size k = 0; k < n; k++) {
+                const cgltf_size v =
+                    pr.indices ? cgltf_accessor_read_index(pr.indices, k) : k;
+                float p3[3] = { 0, 0, 0 }, n3[3] = { 0, 1, 0 };
+                float t2[2] = { 0, 0 }, c4[4] = { 1, 1, 1, 1 };
+                cgltf_accessor_read_float(pos, v, p3, 3);
+                if (nrm) cgltf_accessor_read_float(nrm, v, n3, 3);
+                if (uv)  cgltf_accessor_read_float(uv, v, t2, 2);
+                if (col) cgltf_accessor_read_float(col, v, c4, 4);
+                const float wx = xf[0]*p3[0] + xf[4]*p3[1] + xf[8]*p3[2] + xf[12];
+                const float wy = xf[1]*p3[0] + xf[5]*p3[1] + xf[9]*p3[2] + xf[13];
+                const float wz = xf[2]*p3[0] + xf[6]*p3[1] + xf[10]*p3[2] + xf[14];
+                float nx = xf[0]*n3[0] + xf[4]*n3[1] + xf[8]*n3[2];
+                float ny = xf[1]*n3[0] + xf[5]*n3[1] + xf[9]*n3[2];
+                float nz = xf[2]*n3[0] + xf[6]*n3[1] + xf[10]*n3[2];
+                const float nl = sqrtf(nx*nx + ny*ny + nz*nz);
+                if (nl > 1e-6f) { nx /= nl; ny /= nl; nz /= nl; }
+                lo[0] = SDL_min(lo[0], wx); hi[0] = SDL_max(hi[0], wx);
+                lo[1] = SDL_min(lo[1], wy); hi[1] = SDL_max(hi[1], wy);
+                lo[2] = SDL_min(lo[2], wz); hi[2] = SDL_max(hi[2], wz);
+                data.insert(data.end(), { wx, wy, wz, nx, ny, nz,
+                                          t2[0], t2[1], c4[0], c4[1], c4[2] });
+            }
+            sub.count = (int)(data.size() / 11) - sub.first;
+            if (sub.count > 0)
+                m.subs.push_back(sub);
+        }
+    }
+    cgltf_free(d);
+    if (data.empty())
+        return false;
+    m.boundH = SDL_max(0.05f, hi[1] - lo[1]);
+    glGenVertexArrays(1, &m.vao);
+    glBindVertexArray(m.vao);
+    glGenBuffers(1, &m.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(),
+                 GL_STATIC_DRAW);
+    for (int a = 0; a < 4; a++)
+        glEnableVertexAttribArray(a);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float), (void*)0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(6 * sizeof(float)));
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(8 * sizeof(float)));
+    glBindVertexArray(0);
+    m.loaded = true;
+    SDL_Log("wmap: loaded glb prop %s (%d verts)", m.id.c_str(),
+            (int)(data.size() / 11));
+    return true;
+}
+
 static bool load_prop_mesh(PropMesh& m)
 {
     if (m.loaded)
         return true;
     size_t slash = m.id.find('/');
-    std::string path = gAssetsDir + "/props/" + m.id.substr(0, slash) + "/" +
-                       m.id.substr(slash + 1) + ".obj";
+    std::string base = gAssetsDir + "/props/" + m.id.substr(0, slash) + "/" +
+                       m.id.substr(slash + 1);
+    std::string path = base + ".obj";
+    if (!std::filesystem::exists(path) &&
+        std::filesystem::exists(base + ".glb"))
+        return load_prop_glb(m, base + ".glb");
     FILE* f = fopen(path.c_str(), "rb");
     if (!f)
         return false;

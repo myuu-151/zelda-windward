@@ -1567,26 +1567,19 @@ void main() {
     }
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
-    // Weighting the cascade by where the fragment sits in the near box,
-    // rather than switching on its border. Taking the smaller of both
-    // everywhere drew the bird twice -- 4096 texels over 112 units against
-    // 2048 over 1200 do not agree -- but suppressing the cascade across
-    // the whole box lost the shadow of an island that stands outside the
-    // near frustum while its shadow falls on water inside it, so it
-    // blinked as the box slid with the player. The near map owns the
-    // middle of its box, where the bird's own shadow lies; the cascade
-    // fades in towards the edge, where casters it cannot see begin.
+    // The same rule the land uses: the darker of both maps, unweighted.
+    // This was weighted by position in the sharp map's box to stop the bird
+    // drawing twice, but the bird and Link are no longer rendered into the
+    // coarse map at all, so there is nothing left to protect -- only the
+    // fade itself, which showed as an island's shadow dropping off the
+    // water and easing back in as you flew away.
     // (These shader strings sit near the 16380-byte MSVC literal limit;
     // keep commentary out here rather than inside the GLSL.)
     // Fading this in from 120 units left a gap: the near map stops at about
     // 56, so between the two there was no shadow at all -- the sea faded
     // out and popped back in, while the trees, which sample the cascade
     // directly, stayed put. The cascade now carries the whole way.
-    vec3 wsc = vShadowPos.xyz * 0.5 + 0.5;
-    float we = max(abs(wsc.x - 0.5), abs(wsc.y - 0.5)) * 2.0;
-    if (wsc.z > 1.0) we = 2.0;
-    float disc = mix(1.0, island_disc_shadow(vWorld, d),
-                     smoothstep(0.72, 1.0, we));
+    float disc = island_disc_shadow(vWorld, d);
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs

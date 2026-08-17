@@ -4781,8 +4781,16 @@ constexpr int kShadowResFar = 4096;
                         !app.dive_freeze)
                         app.boost_speed =
                             SDL_min(26.0f, app.boost_speed + 24.0f * dtb);
-                    const float gh =
-                        ground_h(app.bird_pos.x, app.bird_pos.z);
+                    // The geometry where an island has it. The baked
+                    // field holds one surface per spot and need not be the
+                    // deck, so trusting it alone put the bird's floor
+                    // inside the island.
+                    float gh = ground_h(app.bird_pos.x, app.bird_pos.z);
+                    float birdTop = 0.0f;
+                    if (wmap_mesh_ready() &&
+                        wmap_mesh_top(app.bird_pos.x, app.bird_pos.z,
+                                      &birdTop))
+                        gh = birdTop;
                     const bool over_isle = gh > -900.0f;
                     // over the island: normal floor is terrain + 2.5 (or the
                     // terrain itself when diving to land -- or under thrust,

@@ -5484,6 +5484,23 @@ constexpr int kShadowResFar = 4096;
         // ease to the longest clear boom along the current angle, snapping
         // in fast when a wall arrives and drifting out slowly after.
         {
+            // Once the way back is blocked, stop the orbit rather than
+            // walking the lens in. Turning further into a wall only buries
+            // the camera, so the turn is what gives: hold the angle that
+            // still has room and let go the moment turning helps again.
+            {
+                static float last_yaw = 0.0f;
+                static bool have_last = false;
+                const float now = app.cam.clear_dist_at(0.0f);
+                if (have_last && now < app.cam.want_dist() - 0.05f) {
+                    const float tried = app.cam.yaw;
+                    app.cam.yaw = last_yaw;
+                    if (app.cam.clear_dist_at(0.0f) <= now + 0.01f)
+                        app.cam.yaw = tried;   // no better back there
+                }
+                last_yaw = app.cam.yaw;
+                have_last = true;
+            }
             float want_lift = 0.0f;
             const float target_boom = app.cam.solve_boom(&want_lift);
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;

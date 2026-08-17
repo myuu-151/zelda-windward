@@ -2332,7 +2332,7 @@ static void closest_on_tri(const float* T, const float* p, float* out)
 // Whether a sphere at p overlaps camera-blocking geometry. A height query
 // cannot answer this: inside a closed trunk the only surface under the point
 // is the deck far below, so nothing ever reports the lens as buried.
-static bool overlaps(const float* p, float radius, Uint8 mask)
+static bool overlaps(const float* p, float radius, Uint8 mask, float yMin)
 {
     if (!ready)
         return false;
@@ -2346,6 +2346,12 @@ static bool overlaps(const float* p, float radius, Uint8 mask)
                 if (!(flags[k] & mask))
                     continue;
                 const float* T = &tris[(size_t)k * 9];
+                // Nothing below him counts. Rotated all the way down the
+                // lens swings out past the rim, where the cliff face is
+                // steep and close, and it snapped in although the drop was
+                // under his feet and never in shot.
+                if (SDL_max(T[1], SDL_max(T[4], T[7])) < yMin)
+                    continue;
                 float cp[3];
                 closest_on_tri(T, p, cp);
                 const float dx = p[0] - cp[0], dy = p[1] - cp[1],
@@ -2502,9 +2508,9 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
     return col::surface(wx, wz, 1e9f, outY, 2);
 }
 
-bool wmap_mesh_cam_touching(const float* p, float radius)
+bool wmap_mesh_cam_touching(const float* p, float radius, float yMin)
 {
-    return col::overlaps(p, radius, 2);
+    return col::overlaps(p, radius, 2, yMin);
 }
 
 bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY)

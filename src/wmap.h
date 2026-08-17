@@ -60,7 +60,7 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY);
 // the lens does not count as being in its way.
 bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY);
 // Whether a sphere at p is inside camera-blocking geometry.
-bool wmap_mesh_cam_touching(const float* p, float radius);
+bool wmap_mesh_cam_touching(const float* p, float radius, float yMin);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

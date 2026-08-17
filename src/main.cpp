@@ -5534,11 +5534,21 @@ constexpr int kShadowResFar = 4096;
             // while the eye is buried.
             // at most a couple of bites per frame: twelve of them was a
             // snap however small each one was
-            // The clearance solve above already keeps the lens out of
-            // things, and this ran after it every frame, cutting the boom
-            // behind its back -- which the hold then eased out again, over
-            // and over. That is the drilling. It stays only for a lens
-            // genuinely inside a surface, and only while it is.
+            // Resistance, so the lens can never end up inside anything:
+            // while a sphere at the eye overlaps geometry the boom closes,
+            // and the moment it does not this does nothing at all. Tested
+            // as an overlap rather than by what surface sits underneath,
+            // which is why it cannot fire in open air and start the boom
+            // drilling in and out the way the old height test did.
+            for (int i = 0; i < 8 && wmap_mesh_ready(); ++i) {
+                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
+                const float ep[3] = { e.x, e.y, e.z };
+                if (!wmap_mesh_cam_touching(ep, 0.45f))
+                    break;
+                app.cam.boom = std::max(0.6f, app.cam.boom * 0.85f);
+                if (app.cam.boom <= 0.6f)
+                    break;
+            }
             for (int i = 0; i < (wmap_mesh_ready() ? 0 : 2); ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
                 // At the lens's height, not the highest thing at that

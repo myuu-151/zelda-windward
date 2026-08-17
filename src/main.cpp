@@ -1713,7 +1713,16 @@ struct OrbitCamera {
         return Vec3{cp * std::sin(yaw), std::sin(p), cp * std::cos(yaw)};
     }
 
-    Vec3 dir() const { return dir_at(pitch_lift); }
+    // a temporary swing around an obstruction, eased in and out
+    float yaw_off = 0.0f;
+
+    Vec3 dir() const
+    {
+        const float p = pitch + pitch_lift;
+        const float cp = std::cos(p);
+        const float y = yaw + yaw_off;
+        return Vec3{cp * std::sin(y), std::sin(p), cp * std::cos(y)};
+    }
 
     // how far back the boom would like to sit, ignoring the world
     float want_dist() const { return distance + pull; }
@@ -5534,19 +5543,49 @@ constexpr int kShadowResFar = 4096;
                     return wmap_mesh_cam_touching(p, 0.45f);
                 };
                 Vec3 want{};
-                // Anything between him and where the lens wants to be: stop
-                // short of it. This is the one test that cannot be fooled
-                // by being deep inside a trunk, where no surface is near
-                // enough for a sphere to notice.
+                // A trunk between him and the lens is a choice between
+                // pulling in and looking at bark, and neither is wanted --
+                // so go round it instead. Swing the orbit to the nearest
+                // angle with a clear line and keep the shot's length; the
+                // swing eases away as soon as the way ahead is open again.
                 {
-                    const Vec3 e = app.cam.target + d * target_boom;
                     const float a3[3] = { app.cam.target.x, app.cam.target.y,
                                           app.cam.target.z };
-                    const float b3[3] = { e.x, e.y, e.z };
-                    float th = 1.0f;
-                    if (wmap_mesh_cam_segment(a3, b3, &th))
-                        target_boom = SDL_max(0.5f,
-                                              target_boom * th - 0.35f);
+                    auto blocked = [&](float off) {
+                        const float p = app.cam.pitch + app.cam.pitch_lift;
+                        const float cp = std::cos(p);
+                        const float y = app.cam.yaw + off;
+                        const Vec3 dd{cp * std::sin(y), std::sin(p),
+                                      cp * std::cos(y)};
+                        const Vec3 e = app.cam.target + dd * target_boom;
+                        const float b3[3] = { e.x, e.y, e.z };
+                        float th = 1.0f;
+                        return wmap_mesh_cam_segment(a3, b3, &th);
+                    };
+                    float wantOff = 0.0f;
+                    if (blocked(app.cam.yaw_off)) {
+                        bool found = false;
+                        for (float step = 0.10f; step <= 1.25f && !found;
+                             step += 0.10f) {
+                            if (!blocked(step)) { wantOff = step; found = true; }
+                            else if (!blocked(-step)) { wantOff = -step; found = true; }
+                        }
+                        if (!found) {
+                            // nowhere round it: come in beside him instead
+                            wantOff = app.cam.yaw_off;
+                            const Vec3 e = app.cam.target +
+                                           app.cam.dir() * target_boom;
+                            const float b3[3] = { e.x, e.y, e.z };
+                            float th = 1.0f;
+                            if (wmap_mesh_cam_segment(a3, b3, &th))
+                                target_boom =
+                                    SDL_max(0.5f, target_boom * th - 0.35f);
+                        }
+                    }
+                    const float yk = 1.0f - std::exp(
+                        -(wantOff != 0.0f ? 8.0f : 3.0f) *
+                        static_cast<float>(frame_dt));
+                    app.cam.yaw_off += (wantOff - app.cam.yaw_off) * yk;
                 }
                 if (inside(target_boom)) {
                     // He is walking into the tree with the lens on the far

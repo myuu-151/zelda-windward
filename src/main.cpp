@@ -5015,40 +5015,6 @@ int main(int argc, char** argv)
         {
             glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
             glViewport(0, 0, kShadowRes, kShadowRes);
-#ifndef ZELDA_RETAIL
-            // SHADOWDUMP=<file.pgm> writes the depth map once, a few
-            // seconds in, so where a caster lands in it can be looked at
-            // rather than inferred.
-            static int dump_at = -2;
-            if (dump_at == -2)
-                dump_at = SDL_getenv("SHADOWDUMP") ? 150 : -1;
-            if (dump_at > 0 && --dump_at == 0) {
-                std::vector<float> px((size_t)kShadowRes * kShadowRes);
-                glFinish();
-                glReadPixels(0, 0, kShadowRes, kShadowRes, GL_DEPTH_COMPONENT,
-                             GL_FLOAT, px.data());
-                float lo = 1.0f, hi = 0.0f;
-                for (float v : px) { if (v < lo) lo = v; if (v < 1.0f && v > hi) hi = v; }
-                const char* out = SDL_getenv("SHADOWDUMP");
-                if (FILE* f = fopen(out, "wb")) {
-                    fprintf(f, "P5
-%d %d
-255
-", kShadowRes, kShadowRes);
-                    const float sp = (hi > lo) ? (hi - lo) : 1.0f;
-                    for (int y = kShadowRes - 1; y >= 0; y--)
-                        for (int x = 0; x < kShadowRes; x++) {
-                            float v = px[(size_t)y * kShadowRes + x];
-                            unsigned char b = v >= 1.0f ? 255
-                                : (unsigned char)(20 + 200 * (v - lo) / sp);
-                            fwrite(&b, 1, 1, f);
-                        }
-                    fclose(f);
-                    SDL_Log("shadow map written to %s (depth %.4f..%.4f)",
-                            out, lo, hi);
-                }
-            }
-#endif
             // depth writes must be on or the clear is a no-op and the map
             // keeps last frame's depths -- with a light frustum that moves
             // with the player, stale depths slide the shadow around

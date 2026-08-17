@@ -5640,7 +5640,7 @@ int main(int argc, char** argv)
                 // quieter overall: it was loud enough to sit on top of
                 // everything else even inland
                 const float want =
-                    (0.09f + 0.17f * edge) * (1.0f - 0.75f * height);
+                    (0.045f + 0.09f * edge) * (1.0f - 0.75f * height);
                 ocean_gain += (want - ocean_gain) *
                               std::min(1.0f, 1.2f * static_cast<float>(frame_dt));
                 SDL_SetAudioStreamGain(ocean_stream, ocean_gain);

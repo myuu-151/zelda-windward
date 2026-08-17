@@ -2250,7 +2250,14 @@ int main(int argc, char** argv)
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
             mat4_look_at(center + sun_dir * 280.0f, center, {0, 1, 0});
-        return mat4_ortho(-205.0f, 205.0f, -205.0f, 205.0f, 20.0f, 560.0f) * view;
+        // A compromise, deliberately. 4096 texels across 410 units is 0.10
+        // each, which is why shadows went soft; but the frustum is wide so
+        // an island still casts as you fly off it -- streaming keeps that
+        // island loaded out to 2200 units, and pulling the frustum right in
+        // would drop its shadow while it is plainly still there. 280 across
+        // is 0.068 per texel: noticeably crisper underfoot, and still
+        // covering an island and the water around it well past its shore.
+        return mat4_ortho(-140.0f, 140.0f, -140.0f, 140.0f, 20.0f, 560.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 

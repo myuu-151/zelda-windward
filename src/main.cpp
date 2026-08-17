@@ -1546,21 +1546,20 @@ void main() {
     }
     float isl = mix(1.0, island_sun_shadow(vWorld),
                     smoothstep(90.0, 190.0, d));
-    // the disc is a stand-in for range the depth map cannot cover, so it
-    // has to be absent up close or it doubles the shadow already there
+    // Selecting one map, not the smaller of both. They disagree -- 4096
+    // texels over 112 units against 2048 over 1200 -- so taking min() drew
+    // the bird twice, sharp with a coarse offset copy beside it. The near
+    // map wherever it reaches, the cascade only beyond its box.
+    // (This shader string is close to the MSVC 64K literal limit; keep
+    // commentary out here rather than inside the GLSL.)
     // Fading this in from 120 units left a gap: the near map stops at about
     // 56, so between the two there was no shadow at all -- the sea faded
     // out and popped back in, while the trees, which sample the cascade
     // directly, stayed put. The cascade now carries the whole way.
-    // Taking the smaller of the near map and the cascade drew both, and
-    // they do not agree: one is 4096 texels over 112 units, the other 2048
-    // over 1200, so the bird cast a sharp shadow with a coarse offset copy
-    // beside it. Pick one, the way every other surface does -- the sharp
-    // map wherever it reaches, the cascade only past its box.
     vec3 wsc = vShadowPos.xyz * 0.5 + 0.5;
-    bool w_near = all(greaterThanEqual(wsc.xy, vec2(0.02))) &&
-                  all(lessThanEqual(wsc.xy, vec2(0.98))) && wsc.z <= 1.0;
-    float disc = w_near ? 1.0 : island_disc_shadow(vWorld, d);
+    bool wn = all(greaterThanEqual(wsc.xy, vec2(0.02))) &&
+              all(lessThanEqual(wsc.xy, vec2(0.98))) && wsc.z <= 1.0;
+    float disc = wn ? 1.0 : island_disc_shadow(vWorld, d);
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs

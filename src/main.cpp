@@ -5532,7 +5532,7 @@ constexpr int kShadowResFar = 4096;
             // while the eye is buried.
             // at most a couple of bites per frame: twelve of them was a
             // snap however small each one was
-            for (int i = 0; i < 2; ++i) {
+            for (int i = 0; i < 8; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
                 // At the lens's height, not the highest thing at that
                 // spot. ground_h reports the top surface, so a canopy
@@ -5561,9 +5561,16 @@ constexpr int kShadowResFar = 4096;
                         g = std::max(g, wmap_cam_block_height(x, z));
                     return g;
                 };
-                // buried: the eye is under the surface it sits over
-                const float here = solid(e.x, e.z);
-                bool bad = here > -900.0f && e.y < here + 0.5f;
+                // Inside anything at all, tested as a sphere. Asking what
+                // surface sits under the eye cannot catch a lens within a
+                // closed shape -- inside a trunk the only thing beneath it
+                // is the deck, so nothing ever reported it buried.
+                const float ep[3] = { e.x, e.y, e.z };
+                bool bad = wmap_mesh_cam_touching(ep, 0.45f);
+                if (!bad) {
+                    const float here = solid(e.x, e.z);
+                    bad = here > -900.0f && e.y < here + 0.5f;
+                }
                 // The grazing test that used to sit here -- anything
                 // beside the lens rising above it counts -- fired on every
                 // frame once real geometry existed, pinning the boom at its

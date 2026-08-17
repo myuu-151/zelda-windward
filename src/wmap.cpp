@@ -2402,8 +2402,20 @@ static bool segment_hit(const float* a, const float* b, Uint8 mask, float* tOut)
                 if (v < 0.0f || u + v > 1.0f)
                     continue;
                 const float tt = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
-                if (tt > 0.001f && tt < best)
-                    best = tt;
+                if (tt <= 0.001f || tt >= best)
+                    continue;
+                // Ground is not something to go round. The island's own
+                // deck blocks the camera like anything else, and a line
+                // from his head out to a low camera grazes it constantly --
+                // which read as an obstruction the whole time. Only steep
+                // faces, the ones you would actually walk round, count.
+                float n[3] = { e1[1]*e2[2]-e1[2]*e2[1],
+                               e1[2]*e2[0]-e1[0]*e2[2],
+                               e1[0]*e2[1]-e1[1]*e2[0] };
+                const float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+                if (nl > 1e-6f && fabsf(n[1] / nl) > 0.7f)
+                    continue;
+                best = tt;
             }
     if (best > 1.0f)
         return false;

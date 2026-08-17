@@ -5562,8 +5562,14 @@ constexpr int kShadowResFar = 4096;
                         float th = 1.0f;
                         return wmap_mesh_cam_segment(a3, b3, &th);
                     };
+                    // Hold the swing until the angle he actually chose is
+                    // clear again. Testing the shifted angle instead meant
+                    // it read clear the moment it swung, eased back, was
+                    // blocked once more, and stuck there juddering.
                     float wantOff = 0.0f;
-                    if (blocked(app.cam.yaw_off)) {
+                    if (blocked(0.0f)) {
+                        wantOff = app.cam.yaw_off;
+                        if (blocked(app.cam.yaw_off)) {
                         bool found = false;
                         for (float step = 0.10f; step <= 1.25f && !found;
                              step += 0.10f) {
@@ -5572,7 +5578,6 @@ constexpr int kShadowResFar = 4096;
                         }
                         if (!found) {
                             // nowhere round it: come in beside him instead
-                            wantOff = app.cam.yaw_off;
                             const Vec3 e = app.cam.target +
                                            app.cam.dir() * target_boom;
                             const float b3[3] = { e.x, e.y, e.z };
@@ -5580,6 +5585,7 @@ constexpr int kShadowResFar = 4096;
                             if (wmap_mesh_cam_segment(a3, b3, &th))
                                 target_boom =
                                     SDL_max(0.5f, target_boom * th - 0.35f);
+                        }
                         }
                     }
                     const float yk = 1.0f - std::exp(

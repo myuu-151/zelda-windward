@@ -5487,10 +5487,28 @@ constexpr int kShadowResFar = 4096;
             // while the eye is buried.
             for (int i = 0; i < 12; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
-                auto solid = [](float x, float z) {
-                    const float g = ground_h(x, z);
+                // At the lens's height, not the highest thing at that
+                // spot. ground_h reports the top surface, so a canopy
+                // overhead read as the eye being buried -- this fired every
+                // frame under a tree, slamming the boom shut while the
+                // easing above pulled it back out, which is the drilling
+                // in and out.
+                const float eyeY = e.y;
+                auto solid = [eyeY](float x, float z) {
+                    float h = 0, sd = 0;
+                    float g = -1000.0f;
+                    if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                        g = h + kIslandY;
+                    else if (g_test_hf.nx > 1 &&
+                             g_test_hf.sample(x - g_test_off[0],
+                                              z - g_test_off[1], &h, &sd) &&
+                             h > -50.0f)
+                        g = h + kIslandY;
+                    float my = 0.0f;
+                    if (wmap_mesh_cam_below(x, z, eyeY + 1.2f, &my) && my > g)
+                        g = my;
                     return wmap_active()
-                               ? std::max(g, wmap_block_height(x, z)) : g;
+                               ? std::max(g, wmap_cam_block_height(x, z)) : g;
                 };
                 // buried: the eye is under the surface it sits over
                 const float here = solid(e.x, e.z);
@@ -5508,7 +5526,10 @@ constexpr int kShadowResFar = 4096;
                     }
                 }
                 if (!bad) break;
-                app.cam.boom = std::max(0.3f, app.cam.boom * 0.75f);
+                // a gentler bite: this is a backstop for a buried lens, and
+                // taking a quarter of the boom at a time made it a snap in
+                // its own right
+                app.cam.boom = std::max(0.3f, app.cam.boom * 0.90f);
                 if (app.cam.boom <= 0.3f) break;
             }
         }

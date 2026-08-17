@@ -1788,8 +1788,16 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
+    // Where the lens is pinned when there is nothing left to give: with the
+    // boom at its floor and him still walking towards it, following him any
+    // further would put it in the wall, so it stays where it last stood.
+    Vec3 hold_eye{}, last_clear{};
+    bool holding = false;
+
     Vec3 eye() const
     {
+        if (holding)
+            return hold_eye;
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
@@ -5570,6 +5578,27 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
+            // Pin it when the boom is spent. Shortening is the only way it
+            // has to keep out of a surface, so once it is at the floor and
+            // he keeps coming, the lens holds its ground and lets him walk
+            // past rather than being pushed into the wood.
+            {
+                const Vec3 e0 = app.cam.target + app.cam.dir() * app.cam.boom;
+                const float p0[3] = { e0.x, e0.y, e0.z };
+                const bool tight = wmap_mesh_ready() &&
+                                   wmap_mesh_cam_touching(p0, 1.1f);
+                if (tight && app.cam.boom <= 2.05f) {
+                    if (!app.cam.holding) {
+                        app.cam.holding = true;
+                        // last place it stood that was clear
+                        app.cam.hold_eye = app.cam.last_clear;
+                    }
+                } else {
+                    app.cam.holding = false;
+                    if (!tight)
+                        app.cam.last_clear = e0;
+                }
+            }
             // Immediate, on where the lens actually is rather than where it
             // is heading. Easing towards a shortened target takes frames,
             // and at running speed the surface arrives first -- which is

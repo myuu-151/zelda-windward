@@ -89,6 +89,10 @@ struct PropMesh {
     std::vector<PropMat> mats;
     float boundH = 1.0f;
     bool loaded = false;
+    // Positions kept on the CPU for collision. A heightfield holds one
+    // surface per spot, so a branch is recorded as the ground under it;
+    // the triangles let a query ask what is under the feet specifically.
+    std::vector<float> cpts;
 };
 struct PropInst {
     int mesh;
@@ -867,6 +871,8 @@ static GLuint tex_from_bmp(const std::string& path, bool* gray = nullptr,
 
 // x,z in WORLD units; returns the editor height scaled to world
 static float height_at_in(const std::vector<float>& H, float x, float z);
+static bool load_prop_mesh(PropMesh& m);
+static void build_collision();
 
 static float height_at(float x, float z)
 {
@@ -1050,6 +1056,12 @@ static bool load_wmap(const std::string& path)
                            ri.tr[1] * gScale, ri.tr[2] * gScale + gCenter[1],
                            ri.tr[3], ri.tr[4] * gScale });
     }
+    for (const PropInst& pi : gProps) {
+        PropMesh& pm = gMeshes[pi.mesh];
+        if (!pm.loaded)
+            load_prop_mesh(pm);   // collision needs geometry, not just a draw
+    }
+    build_collision();
     SDL_Log("wmap: %s -- %d prop instances from %d saved, library %d meshes",
             path.c_str(), (int)gProps.size(), (int)raw.size(),
             (int)gMeshes.size());
@@ -1301,6 +1313,14 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
         }
     }
     cgltf_free(d);
+    // positions kept for collision, same as the obj path
+    m.cpts.clear();
+    m.cpts.reserve(data.size() / 11 * 3);
+    for (size_t v = 0; v + 10 < data.size(); v += 11) {
+        m.cpts.push_back(data[v]);
+        m.cpts.push_back(data[v + 1]);
+        m.cpts.push_back(data[v + 2]);
+    }
     if (data.empty())
         return false;
     m.boundH = SDL_max(0.05f, hi[1] - lo[1]);
@@ -1442,6 +1462,13 @@ static bool load_prop_mesh(PropMesh& m)
                 mat.gray = pt.second;
             }
         }
+    }
+    m.cpts.clear();
+    m.cpts.reserve(data.size() / 11 * 3);
+    for (size_t v = 0; v + 10 < data.size(); v += 11) {
+        m.cpts.push_back(data[v]);
+        m.cpts.push_back(data[v + 1]);
+        m.cpts.push_back(data[v + 2]);
     }
     glGenVertexArrays(1, &m.vao);
     glGenBuffers(1, &m.vbo);
@@ -2120,6 +2147,135 @@ void wmap_quadrant_center(float wx, float wz, float* x, float* z)
     // chart cells are laid out on a fixed grid: snap to the nearest one
     *x = roundf((wx + off) / quad) * quad - off;
     *z = roundf((wz + off) / quad) * quad - off;
+}
+
+// ---------------------------------------------------------------- collision
+// World-space triangles of every placed prop, bucketed by ground cell. A
+// heightfield can only answer "how high is the surface here", which makes a
+// branch the floor beneath it; these answer "what is under this point, at or
+// below this height", which is the question walking actually asks.
+namespace col {
+constexpr float kCell = 4.0f;
+static std::vector<float> tris;          // 9 floats per triangle
+static std::vector<std::vector<int>> grid;
+static int nx = 0, nz = 0;
+static float ox = 0.0f, oz = 0.0f;
+static bool ready = false;
+
+static void clear()
+{
+    tris.clear();
+    grid.clear();
+    nx = nz = 0;
+    ready = false;
+}
+
+static void build_impl()
+{
+    clear();
+    float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+    for (const PropInst& pi : gProps) {
+        const PropMesh& pm = gMeshes[pi.mesh];
+        if (!pm.loaded || pm.cpts.empty())
+            continue;
+        const float c = cosf(pi.yaw), s = sinf(pi.yaw), sc = pi.scale;
+        for (size_t v = 0; v + 2 < pm.cpts.size(); v += 3) {
+            const float lx = pm.cpts[v] * sc, ly = pm.cpts[v + 1] * sc,
+                        lz = pm.cpts[v + 2] * sc;
+            const float x = pi.x + lx * c + lz * s;
+            const float y = pi.y + ly;
+            const float z = pi.z - lx * s + lz * c;
+            tris.push_back(x);
+            tris.push_back(y);
+            tris.push_back(z);
+            lo[0] = SDL_min(lo[0], x); hi[0] = SDL_max(hi[0], x);
+            lo[2] = SDL_min(lo[2], z); hi[2] = SDL_max(hi[2], z);
+        }
+    }
+    if (tris.size() < 9)
+        return;
+    ox = lo[0];
+    oz = lo[2];
+    nx = (int)((hi[0] - lo[0]) / kCell) + 2;
+    nz = (int)((hi[2] - lo[2]) / kCell) + 2;
+    if (nx < 1 || nz < 1 || (long long)nx * nz > 4000000)
+        return;
+    grid.assign((size_t)nx * nz, {});
+    const int ntri = (int)(tris.size() / 9);
+    for (int k = 0; k < ntri; k++) {
+        const float* T = &tris[(size_t)k * 9];
+        float mnx = SDL_min(T[0], SDL_min(T[3], T[6]));
+        float mxx = SDL_max(T[0], SDL_max(T[3], T[6]));
+        float mnz = SDL_min(T[2], SDL_min(T[5], T[8]));
+        float mxz = SDL_max(T[2], SDL_max(T[5], T[8]));
+        const int i0 = SDL_clamp((int)((mnx - ox) / kCell), 0, nx - 1);
+        const int i1 = SDL_clamp((int)((mxx - ox) / kCell), 0, nx - 1);
+        const int j0 = SDL_clamp((int)((mnz - oz) / kCell), 0, nz - 1);
+        const int j1 = SDL_clamp((int)((mxz - oz) / kCell), 0, nz - 1);
+        for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++)
+                grid[(size_t)j * nx + i].push_back(k);
+    }
+    ready = true;
+    SDL_Log("wmap: mesh collision -- %d triangles, %dx%d cells", ntri, nx, nz);
+}
+
+// Height of the triangle surface directly under (x, z), taking the highest
+// that is no higher than yMax. That ceiling is the whole point: pass the
+// feet and a branch overhead is not a candidate, while the deck under it is.
+static bool surface(float x, float z, float yMax, float* out)
+{
+    if (!ready)
+        return false;
+    const int i = (int)((x - ox) / kCell), j = (int)((z - oz) / kCell);
+    if (i < 0 || j < 0 || i >= nx || j >= nz)
+        return false;
+    float best = -1e9f;
+    bool hit = false;
+    for (int k : grid[(size_t)j * nx + i]) {
+        const float* T = &tris[(size_t)k * 9];
+        const float d = (T[5] - T[8]) * (T[0] - T[6]) +
+                        (T[6] - T[3]) * (T[2] - T[8]);
+        if (fabsf(d) < 1e-9f)
+            continue;
+        const float w0 = ((T[5] - T[8]) * (x - T[6]) +
+                          (T[6] - T[3]) * (z - T[8])) / d;
+        const float w1 = ((T[8] - T[2]) * (x - T[6]) +
+                          (T[0] - T[6]) * (z - T[8])) / d;
+        const float w2 = 1.0f - w0 - w1;
+        if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f)
+            continue;
+        const float y = T[1] * w0 + T[4] * w1 + T[7] * w2;
+        if (y <= yMax && y > best) {
+            best = y;
+            hit = true;
+        }
+    }
+    if (hit)
+        *out = best;
+    return hit;
+}
+}  // namespace col
+
+static void build_collision()
+{
+    col::build_impl();
+}
+
+bool wmap_mesh_ready()
+{
+    return gActive && col::ready;
+}
+
+bool wmap_mesh_floor(float wx, float wz, float yMax, float* outY)
+{
+    return col::surface(wx, wz, yMax, outY);
+}
+
+bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi)
+{
+    float y = 0.0f;
+    return col::surface(wx, wz, yHi, &y) && y > yLo;
 }
 
 float wmap_cam_block_height(float wx, float wz)

@@ -5485,7 +5485,26 @@ constexpr int kShadowResFar = 4096;
         // in fast when a wall arrives and drifting out slowly after.
         {
             float want_lift = 0.0f;
-            const float target_boom = app.cam.solve_boom(&want_lift);
+            float target_boom = app.cam.solve_boom(&want_lift);
+            // Hold a shortened boom briefly. Beside a trunk the clearance
+            // test flips blocked-clear-blocked as he moves, and following
+            // it frame by frame is the drilling in and out. Going in is
+            // immediate, since that is the frame the lens would clip;
+            // coming back out waits until the way has stayed clear.
+            {
+                static float held = 1e9f, wait = 0.0f;
+                if (target_boom <= held) {
+                    held = target_boom;
+                    wait = 0.45f;
+                } else {
+                    wait -= static_cast<float>(frame_dt);
+                    if (wait <= 0.0f)
+                        held += (target_boom - held) *
+                                (1.0f - std::exp(-3.0f *
+                                                 static_cast<float>(frame_dt)));
+                }
+                target_boom = held;
+            }
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             // Pulling in was near-instant at 18, which reads as a snap the
             // moment anything crosses the lens. Easing it in makes the

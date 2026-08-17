@@ -1727,17 +1727,32 @@ struct OrbitCamera {
         constexpr float kMinDist = 0.3f;   // last resort: right at his head
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
-        auto solid_at = [](float x, float z) {
-            const float g = ground_h_cam(x, z);
+        // What is in the lens's way at the height the lens is at. Taking
+        // the highest surface at a spot meant the branches over your head
+        // counted, so standing anywhere under a tree drew the camera in
+        // against the trunk although nothing was between you and it.
+        auto solid_at = [](float x, float z, float yTop) {
+            float h = 0, sd = 0;
+            float best = -1000.0f;
+            if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                best = h + kIslandY;
+            else if (g_test_hf.nx > 1 &&
+                     g_test_hf.sample(x - g_test_off[0], z - g_test_off[1],
+                                      &h, &sd) &&
+                     h > -50.0f)
+                best = h + kIslandY;
+            float my = 0.0f;
+            if (wmap_mesh_cam_below(x, z, yTop, &my) && my > best)
+                best = my;
             const float b =
                 wmap_active() ? wmap_cam_block_height(x, z) : -1000.0f;
-            return std::max(g, b);
+            return std::max(best, b);
         };
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
             if (t < kIgnore) continue;
             const Vec3 s = target + d * t;
-            const float sh = solid_at(s.x, s.z);
+            const float sh = solid_at(s.x, s.z, s.y + kSkin);
             if (sh > -900.0f && s.y < sh + kSkin)
                 return std::max(kMinDist, t - want / kSteps);
         }

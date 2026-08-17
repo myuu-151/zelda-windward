@@ -184,8 +184,30 @@ struct HeightField {
         auto at = [&](int ii2, int jj, int c) {
             return data[(size_t(jj) * nx + ii2) * 2 + c];
         };
-        *h = (at(i, j, 0) * (1 - fu) + at(i + 1, j, 0) * fu) * (1 - fv) +
-             (at(i, j + 1, 0) * (1 - fu) + at(i + 1, j + 1, 0) * fu) * fv;
+        // Open water is a sentinel, not a height, so it must not be blended
+        // into. A cell of deck beside one of -100 averages to about -50 --
+        // ground far below the sea -- which is why the last half cell of an
+        // island reads as empty and you drop just short of the edge you can
+        // see. Whether it bites depends on how a cliff happens to fall
+        // across the grid, which is why some sides were fine and others
+        // were not. Where the four corners are not all real, take the
+        // highest that is: the surface then reaches the last cell that has
+        // one, and stops there.
+        const float c00 = at(i, j, 0), c10 = at(i + 1, j, 0);
+        const float c01 = at(i, j + 1, 0), c11 = at(i + 1, j + 1, 0);
+        const bool all_real = c00 > -50.0f && c10 > -50.0f &&
+                              c01 > -50.0f && c11 > -50.0f;
+        if (all_real) {
+            *h = (c00 * (1 - fu) + c10 * fu) * (1 - fv) +
+                 (c01 * (1 - fu) + c11 * fu) * fv;
+        } else {
+            float best = -100.0f;
+            if (c00 > best) best = c00;
+            if (c10 > best) best = c10;
+            if (c01 > best) best = c01;
+            if (c11 > best) best = c11;
+            *h = best;
+        }
         *sd = (at(i, j, 1) * (1 - fu) + at(i + 1, j, 1) * fu) * (1 - fv) +
               (at(i, j + 1, 1) * (1 - fu) + at(i + 1, j + 1, 1) * fu) * fv;
         return true;

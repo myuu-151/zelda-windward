@@ -2345,12 +2345,28 @@ static bool overlaps(const float* p, float radius, Uint8 mask)
             for (int k : grid[(size_t)j * nx + i]) {
                 if (!(flags[k] & mask))
                     continue;
+                const float* T = &tris[(size_t)k * 9];
                 float cp[3];
-                closest_on_tri(&tris[(size_t)k * 9], p, cp);
+                closest_on_tri(T, p, cp);
                 const float dx = p[0] - cp[0], dy = p[1] - cp[1],
                             dz = p[2] - cp[2];
-                if (dx * dx + dy * dy + dz * dz < radius * radius)
-                    return true;
+                if (dx * dx + dy * dy + dz * dz >= radius * radius)
+                    continue;
+                // Ground is not something the lens has to keep away from.
+                // The deck blocks the camera like anything else, and a lens
+                // a metre above it sits inside any sensible radius -- so
+                // this read as touching everywhere on the island, closed
+                // the boom to nothing and never let it back out. Only steep
+                // faces count.
+                const float e1[3] = { T[3]-T[0], T[4]-T[1], T[5]-T[2] };
+                const float e2[3] = { T[6]-T[0], T[7]-T[1], T[8]-T[2] };
+                float n[3] = { e1[1]*e2[2]-e1[2]*e2[1],
+                               e1[2]*e2[0]-e1[0]*e2[2],
+                               e1[0]*e2[1]-e1[1]*e2[0] };
+                const float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+                if (nl > 1e-6f && fabsf(n[1] / nl) > 0.7f)
+                    continue;
+                return true;
             }
     return false;
 }

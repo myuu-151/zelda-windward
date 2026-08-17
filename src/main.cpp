@@ -5316,8 +5316,6 @@ constexpr int kShadowResFar = 4096;
             glDisable(GL_POLYGON_OFFSET_FILL);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
         }
-            }
-        }
 
         int fb_w = 0, fb_h = 0;
         SDL_GetWindowSizeInPixels(app.window, &fb_w, &fb_h);

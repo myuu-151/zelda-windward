@@ -4124,9 +4124,14 @@ constexpr int kShadowResFar = 4096;
                         // highest of those stood him above his own ground.
                         // The ceiling keeps a branch out of it -- a knee
                         // above him while walking, his feet while falling.
+                        // Only as far above his feet as a stride up a
+                        // slope can carry him. A knee's worth of headroom
+                        // let a surface layered a little over the deck --
+                        // these models have several -- win over the deck
+                        // itself, and he stood on the higher one.
                         const float ceiling =
                             app.player.pos.y +
-                            (app.fall_vel == 0.0f ? 1.1f : 0.05f);
+                            (app.fall_vel == 0.0f ? 0.3f : 0.05f);
                         float my = 0.0f;
                         gh = wmap_mesh_floor(app.player.pos.x,
                                              app.player.pos.z, ceiling, &my)

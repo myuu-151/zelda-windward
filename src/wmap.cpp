@@ -2332,7 +2332,8 @@ static void closest_on_tri(const float* T, const float* p, float* out)
 // Whether a sphere at p overlaps camera-blocking geometry. A height query
 // cannot answer this: inside a closed trunk the only surface under the point
 // is the deck far below, so nothing ever reports the lens as buried.
-static bool overlaps(const float* p, float radius, Uint8 mask, float yMin)
+static bool overlaps(const float* p, float radius, Uint8 mask, float yMin,
+                     float flatRadius)
 {
     if (!ready)
         return false;
@@ -2358,6 +2359,7 @@ static bool overlaps(const float* p, float radius, Uint8 mask, float yMin)
                             dz = p[2] - cp[2];
                 if (dx * dx + dy * dy + dz * dz >= radius * radius)
                     continue;
+                (void)0;
                 // Ground is not something the lens has to keep away from.
                 // The deck blocks the camera like anything else, and a lens
                 // a metre above it sits inside any sensible radius -- so
@@ -2370,9 +2372,18 @@ static bool overlaps(const float* p, float radius, Uint8 mask, float yMin)
                                e1[2]*e2[0]-e1[0]*e2[2],
                                e1[0]*e2[1]-e1[1]*e2[0] };
                 const float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
-                if (nl > 1e-6f && fabsf(n[1] / nl) > 0.7f)
+                const bool flat = nl > 1e-6f && fabsf(n[1] / nl) > 0.7f;
+                if (!flat)
+                    return true;
+                // Ground gets a much tighter margin than a wall. Given the
+                // same one it fired the whole time -- the lens flies about
+                // a metre over the deck -- but with none at all the camera
+                // went through the floor as he ran off an edge. Close
+                // enough to be under it counts; merely above it does not.
+                if (flatRadius <= 0.0f)
                     continue;
-                return true;
+                if (dx * dx + dy * dy + dz * dz < flatRadius * flatRadius)
+                    return true;
             }
     return false;
 }
@@ -2508,9 +2519,10 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
     return col::surface(wx, wz, 1e9f, outY, 2);
 }
 
-bool wmap_mesh_cam_touching(const float* p, float radius, float yMin)
+bool wmap_mesh_cam_touching(const float* p, float radius, float yMin,
+                            float flatRadius)
 {
-    return col::overlaps(p, radius, 2, yMin);
+    return col::overlaps(p, radius, 2, yMin, flatRadius);
 }
 
 bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY)

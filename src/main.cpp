@@ -1018,8 +1018,8 @@ float shadow_far_isle(vec3 world) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0016;
-    vec2 tf = vec2(1.0 / 2048.0);
+    float z = c.z - 0.0005;
+    vec2 tf = vec2(1.0 / 4096.0);
     float sf = 0.0;
     sf += texture(uShadow2, vec3(c.xy + vec2(-0.5, -0.5) * tf, z));
     sf += texture(uShadow2, vec3(c.xy + vec2( 0.5, -0.5) * tf, z));
@@ -1432,8 +1432,8 @@ float far_map_shadow(vec3 world, out bool covered)
               all(lessThanEqual(c.xy, vec2(0.99))) && c.z <= 1.0;
     if (!covered)
         return 1.0;
-    float z = c.z - 0.0016;
-    vec2 tf = vec2(1.0 / 2048.0);
+    float z = c.z - 0.0005;
+    vec2 tf = vec2(1.0 / 4096.0);
     float s = 0.0;
     s += texture(uShadowMap2, vec3(c.xy + vec2(-0.5, -0.5) * tf, z));
     s += texture(uShadowMap2, vec3(c.xy + vec2( 0.5, -0.5) * tf, z));
@@ -2250,7 +2250,10 @@ int main(int argc, char** argv)
     const GLint is_time = glGetUniformLocation(island_prog, "uTime");
     const GLint is_wind = glGetUniformLocation(island_prog, "uWind");
 
-    constexpr int kShadowResFar = 2048;
+    // 4096, not 2048. Every surface takes the darker of the two maps now, so
+// where both hold the same caster their disagreement is visible as a second
+// shadow beside the first. Halving the texel size closes most of that gap.
+constexpr int kShadowResFar = 4096;
     GLuint shadow_tex_far = 0, shadow_fbo_far = 0;
     // sun shadow map: depth-only pass from the sky's sun direction
     const GLuint shadow_prog = link_program(kShadowVS, kShadowClipFS);
@@ -5244,6 +5247,13 @@ int main(int argc, char** argv)
                     }
                 }
             }
+            // Link and the bird go into the sharp map only. Every surface
+            // now takes the darker of the two maps, and where both hold the
+            // same caster they disagree -- 4096 texels over 220 units
+            // against 2048 over 1200 -- which drew these two twice, a sharp
+            // shadow with a coarse copy beside it. They never leave the
+            // sharp map's range, so the coarse one has nothing to add.
+            if (!far_pass) {
             glUseProgram(shadow_skin_prog);
             glUniformMatrix4fv(shs_lightvp, 1, GL_FALSE, lvp.m);
             glDisable(GL_CULL_FACE);
@@ -5285,6 +5295,7 @@ int main(int argc, char** argv)
                         reinterpret_cast<void*>(sub.first_index *
                                                 sizeof(uint32_t)));
                 }
+            }
             }
             glBindVertexArray(0);
             glDisable(GL_POLYGON_OFFSET_FILL);

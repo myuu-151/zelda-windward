@@ -183,8 +183,8 @@ float shadow_far(vec3 world) {
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
         c.z > 1.0)
         return 1.0;
-    float z = c.z - 0.0016;   // coarser texels want a little more bias
-    vec2 tf = vec2(1.0 / 2048.0);
+    float z = c.z - 0.0005;   // coarser texels want a little more bias
+    vec2 tf = vec2(1.0 / 4096.0);
     float sf2 = 0.0;
     sf2 += texture(uShadow2, vec3(c.xy + vec2(-0.5, -0.5) * tf, z));
     sf2 += texture(uShadow2, vec3(c.xy + vec2( 0.5, -0.5) * tf, z));
@@ -415,7 +415,7 @@ void main() {
     vec3 cf = sf.xyz * 0.5 + 0.5;
     if (all(greaterThan(cf.xy, vec2(0.0))) &&
         all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
-        sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0016)));
+        sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0005)));
     vShadow = mix(0.58, 1.0, sh);
 
     vV = aBlade.y;

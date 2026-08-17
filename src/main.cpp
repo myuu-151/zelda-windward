@@ -1723,7 +1723,13 @@ struct OrbitCamera {
     {
         const Vec3 d = dir_at(extra);
         const float want = want_dist();
-        constexpr float kSkin = 0.6f;
+        // How close the lens may pass to a surface before it counts as
+        // buried. At 0.6 a boom on a low orbit grazes that near the ground
+        // the whole way back, so it read as blocked at the first sample and
+        // sat at its floor: measured with the eye at 2.73 over a surface at
+        // 2.52, clear by a fifth of a unit and still refused. A skin is
+        // meant to stop the lens clipping through, not to demand headroom.
+        constexpr float kSkin = 0.15f;
         constexpr float kMinDist = 1.0f;   // last resort: close over him
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;

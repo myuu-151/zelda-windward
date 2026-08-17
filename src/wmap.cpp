@@ -1034,22 +1034,28 @@ static bool load_wmap(const std::string& path)
     // ends here, which is how older maps keep loading unchanged.
     gCamHeights.clear();
     gPartFlags.clear();
-    {
+    // Trailing sections, each behind its own tag, in whatever order and
+    // however many. Reading them in a fixed order consumed the tag of a
+    // section that came first when the one expected was absent -- so a map
+    // with part flags and no camera field lost its flags entirely.
+    for (;;) {
         char tag[8];
-        Uint32 cn = 0;
-        if (fread(tag, 1, 8, f) == 8 && memcmp(tag, "CAMBLK01", 8) == 0 &&
-            fread(&cn, 4, 1, f) == 1 && cn == (Uint32)(HN * HN)) {
+        const long mark = ftell(f);
+        if (fread(tag, 1, 8, f) != 8)
+            break;
+        if (memcmp(tag, "CAMBLK01", 8) == 0) {
+            Uint32 cn = 0;
+            if (fread(&cn, 4, 1, f) != 1 || cn != (Uint32)(HN * HN))
+                break;
             std::vector<float> cam(cn);
-            if (fread(cam.data(), sizeof(float), cn, f) == cn) {
-                gCamHeights.swap(cam);
-                SDL_Log("wmap: map carries a camera field");
-            }
-        }
-        // and the per-part flags, if this map was saved with them
-        char tag2[8];
-        Uint32 mc = 0;
-        if (fread(tag2, 1, 8, f) == 8 && memcmp(tag2, "PARTFLG1", 8) == 0 &&
-            fread(&mc, 4, 1, f) == 1 && mc < 4096) {
+            if (fread(cam.data(), sizeof(float), cn, f) != cn)
+                break;
+            gCamHeights.swap(cam);
+            SDL_Log("wmap: map carries a camera field");
+        } else if (memcmp(tag, "PARTFLG1", 8) == 0) {
+            Uint32 mc = 0;
+            if (fread(&mc, 4, 1, f) != 1 || mc > 4096)
+                break;
             for (Uint32 m = 0; m < mc; m++) {
                 Uint16 il = 0;
                 if (fread(&il, 2, 1, f) != 1 || il > 512) break;
@@ -1065,9 +1071,14 @@ static bool load_wmap(const std::string& path)
                     Uint8 fl = 3;
                     if (fread(&fl, 1, 1, f) != 1) break;
                     gPartFlags[id][nme] = fl;
+                    SDL_Log("wmap: part '%s' of '%s' -> %s%s", nme.c_str(),
+                            id.c_str(), (fl & 1) ? "ground " : "",
+                            (fl & 2) ? "stops-camera" : "");
                 }
             }
-            SDL_Log("wmap: part flags for %d models", (int)gPartFlags.size());
+        } else {
+            fseek(f, mark, SEEK_SET);   // not ours: leave it where it was
+            break;
         }
     }
     fclose(f);

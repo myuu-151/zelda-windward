@@ -5525,7 +5525,7 @@ constexpr int kShadowResFar = 4096;
                 // surface. At 0.45 the lens was already cutting into bark
                 // by the time this reported a touch, because the plane the
                 // view is clipped against stands further out than that.
-                if (!wmap_mesh_cam_touching(ep, 1.1f))
+                if (!wmap_mesh_cam_touching(ep, 1.1f, app.cam.target.y - 0.6f))
                     break;
                 target_boom = std::max(0.25f, target_boom - 0.30f);
                 if (target_boom <= 0.25f)
@@ -5554,7 +5554,7 @@ constexpr int kShadowResFar = 4096;
                         const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
                         const float ep[3] = { e.x, e.y, e.z };
                         if (!wmap_mesh_ready() ||
-                            !wmap_mesh_cam_touching(ep, 1.1f))
+                            !wmap_mesh_cam_touching(ep, 1.1f, app.cam.target.y - 0.6f))
                             held = target_boom;
                         else
                             held += (target_boom - held) *
@@ -5594,7 +5594,7 @@ constexpr int kShadowResFar = 4096;
             for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
                 const float ep[3] = { e.x, e.y, e.z };
-                if (!wmap_mesh_cam_touching(ep, 1.1f))
+                if (!wmap_mesh_cam_touching(ep, 1.1f, app.cam.target.y - 0.6f))
                     break;
                 app.cam.boom = SDL_max(0.25f, app.cam.boom - 0.30f);
                 // and remember it, or the held length eases the boom

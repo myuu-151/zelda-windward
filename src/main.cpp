@@ -3834,7 +3834,34 @@ int main(int argc, char** argv)
                 app.player.weapons_drawn = shield_in_hand;
                 app.key_attack = app.key_roll = app.key_flute = false;
                 app.key_sheathe = false;
-                app.player.update(in, static_cast<float>(kFixedDt));
+                // Walls. The island is a heightfield, and standing on it
+                // only ever snapped the player to whatever was underfoot --
+                // so a cliff lifted you up its face instead of stopping
+                // you, and an island whose sides are sheer could be walked
+                // straight through. A step taller than knee height is not
+                // something to walk up: keep the axis that is clear so you
+                // slide along the face rather than sticking to it.
+                {
+                    const Vec3 before = app.player.pos;
+                    app.player.update(in, static_cast<float>(kFixedDt));
+                    if (!app.riding && app.fall_vel == 0.0f) {
+                        constexpr float kStep = 1.1f;   // knee height
+                        const float here = app.player.pos.y;
+                        const Vec3 after = app.player.pos;
+                        const float hx = ground_h(after.x, before.z);
+                        const float hz = ground_h(before.x, after.z);
+                        const bool blockX = hx > here + kStep;
+                        const bool blockZ = hz > here + kStep;
+                        if (blockX && blockZ) {
+                            app.player.pos.x = before.x;
+                            app.player.pos.z = before.z;
+                        } else if (blockX) {
+                            app.player.pos.x = before.x;
+                        } else if (blockZ) {
+                            app.player.pos.z = before.z;
+                        }
+                    }
+                }
                 if (app.player.wants_draw) {  // the attack unsheathed everything
                     app.player.wants_draw = false;
                     shield_in_hand = true;

@@ -1081,7 +1081,14 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
                                     abs((int)q[1] - (int)q[2]) > 6)
                                     gray = false;
                             }
-                            mat.gray = gray;
+                            // Only a material the Color Ramp spoke for is a
+                            // mask to be tinted. Judging by whether the image
+                            // is desaturated calls grey rock a mask, and a
+                            // mask is drawn as its own grey values times the
+                            // gradient -- which is why the cliff came out
+                            // dark while the tinted parts looked right.
+                            mat.gray = gray &&
+                                       grads.find(mat.name) != grads.end();
                             glGenTextures(1, &mat.tex);
                             glBindTexture(GL_TEXTURE_2D, mat.tex);
                             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,

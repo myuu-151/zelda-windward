@@ -5485,13 +5485,19 @@ constexpr int kShadowResFar = 4096;
         // in fast when a wall arrives and drifting out slowly after.
         {
             float want_lift = 0.0f;
-            float target_boom = app.cam.solve_boom(&want_lift);
+            // Where an island has real geometry the boom keeps its length
+            // and only gives way when the lens itself would be inside
+            // something. Shortening because a tree stands between him and
+            // the camera is what pulled the view in whenever he walked
+            // behind one; a tree in the way is just a tree in the way.
+            float target_boom = wmap_mesh_ready() ? app.cam.want_dist()
+                                                  : app.cam.solve_boom(&want_lift);
             // Hold a shortened boom briefly. Beside a trunk the clearance
             // test flips blocked-clear-blocked as he moves, and following
             // it frame by frame is the drilling in and out. Going in is
             // immediate, since that is the frame the lens would clip;
             // coming back out waits until the way has stayed clear.
-            {
+            if (!wmap_mesh_ready()) {
                 static float held = 1e9f, wait = 0.0f;
                 if (target_boom <= held) {
                     held = target_boom;
@@ -5516,7 +5522,7 @@ constexpr int kShadowResFar = 4096;
                 const float ep[3] = { e.x, e.y, e.z };
                 if (!wmap_mesh_cam_touching(ep, 0.45f))
                     break;
-                target_boom = std::max(0.6f, target_boom - 0.25f);
+                target_boom = std::max(0.6f, target_boom - 0.35f);
                 if (target_boom <= 0.6f)
                     break;
             }
@@ -5526,7 +5532,10 @@ constexpr int kShadowResFar = 4096;
             // camera look like it is being pushed rather than cutting.
             // Coming back out stays slower still, so it settles rather than
             // springing the moment the way is clear.
-            const float rate = target_boom < app.cam.boom ? 6.0f : 2.5f;
+            // Getting out of a surface is urgent -- until it happens the
+            // lens is inside one -- so pulling in is quick; going back out
+            // stays gentle.
+            const float rate = target_boom < app.cam.boom ? 14.0f : 2.5f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
             // A speed limit on top of the easing. Beside a trunk the test
             // flips between blocked and clear as he moves, so the target
@@ -5534,7 +5543,7 @@ constexpr int kShadowResFar = 4096;
             // that big still arrives as a lurch. Capping how far it may
             // travel in a second turns a flapping target into a drift.
             float step = (target_boom - app.cam.boom) * k;
-            const float lim = (step < 0.0f ? 9.0f : 5.0f) *
+            const float lim = (step < 0.0f ? 22.0f : 5.0f) *
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;

@@ -5540,7 +5540,7 @@ constexpr int kShadowResFar = 4096;
             {
                 if (target_boom <= held) {
                     held = target_boom;
-                    wait = 0.5f;
+                    wait = 0.22f;
                 } else {
                     wait -= static_cast<float>(frame_dt);
                     if (wait <= 0.0f) {
@@ -5573,7 +5573,7 @@ constexpr int kShadowResFar = 4096;
             // Getting out of a surface is urgent -- until it happens the
             // lens is inside one -- so pulling in is quick; going back out
             // stays gentle.
-            const float rate = target_boom < app.cam.boom ? 14.0f : 2.5f;
+            const float rate = target_boom < app.cam.boom ? 14.0f : 6.0f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
             // A speed limit on top of the easing. Beside a trunk the test
             // flips between blocked and clear as he moves, so the target
@@ -5581,7 +5581,7 @@ constexpr int kShadowResFar = 4096;
             // that big still arrives as a lurch. Capping how far it may
             // travel in a second turns a flapping target into a drift.
             float step = (target_boom - app.cam.boom) * k;
-            const float lim = (step < 0.0f ? 22.0f : 5.0f) *
+            const float lim = (step < 0.0f ? 22.0f : 12.0f) *
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
@@ -5602,7 +5602,7 @@ constexpr int kShadowResFar = 4096;
                 // of -- the two correcting each other in turn is the
                 // drilling, one layer up from where it was before
                 held = SDL_min(held, app.cam.boom);
-                wait = 0.5f;
+                wait = 0.22f;
                 if (app.cam.boom <= 0.25f)
                     break;
             }

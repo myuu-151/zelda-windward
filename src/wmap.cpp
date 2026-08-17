@@ -215,12 +215,11 @@ float shadow_factor(vec4 sp) {
 // why an island a few hundred units off cast a disc on the sea but nothing
 // on itself, tree included.
 float shadow_any(vec4 sp, vec3 world) {
-    // one lookup: the sharp map is cast wider than it is read, so it holds
-    // the casters for everything inside the region trusted here
-    vec3 c = sp.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(c.xy, vec2(0.02))) &&
-                   all(lessThanEqual(c.xy, vec2(0.98))) && c.z <= 1.0;
-    return near_ok ? shadow_factor(sp) : shadow_far(world);
+    // Never switch away from a shadow: each map returns lit where it holds
+    // nothing, so the darker of the two can only ever restore one. The
+    // sharp map stops covering at about seventy units and the coarse one
+    // is valid at every distance, so this is what removes the band.
+    return min(shadow_factor(sp), shadow_far(world));
 }
 )GLSL";
 
@@ -414,15 +413,11 @@ void main() {
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
         sh = texture(uShadow, vec3(c.xy, c.z - 0.0012));
-    if (any(lessThan(c.xy, vec2(0.02))) ||
-        any(greaterThan(c.xy, vec2(0.98))) || c.z > 1.0) {
-        sh = 1.0;
-        vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
-        vec3 cf = sf.xyz * 0.5 + 0.5;
-        if (all(greaterThan(cf.xy, vec2(0.0))) &&
-            all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
-            sh = texture(uShadow2, vec3(cf.xy, cf.z - 0.0005));
-    }
+    vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
+    vec3 cf = sf.xyz * 0.5 + 0.5;
+    if (all(greaterThan(cf.xy, vec2(0.0))) &&
+        all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
+        sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0005)));
     vShadow = mix(0.58, 1.0, sh);
 
     vV = aBlade.y;

@@ -1788,16 +1788,9 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
-    // Where the lens is pinned when there is nothing left to give: with the
-    // boom at its floor and him still walking towards it, following him any
-    // further would put it in the wall, so it stays where it last stood.
-    Vec3 hold_eye{}, last_clear{};
-    bool holding = false;
-
     Vec3 eye() const
     {
-        if (holding)
-            return hold_eye;
+
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
@@ -5534,8 +5527,8 @@ constexpr int kShadowResFar = 4096;
                 // view is clipped against stands further out than that.
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
-                target_boom = std::max(2.0f, target_boom - 0.30f);
-                if (target_boom <= 2.0f)
+                target_boom = std::max(0.25f, target_boom - 0.30f);
+                if (target_boom <= 0.25f)
                     break;
             }
             // The length it settles on swings as he moves -- measured
@@ -5578,27 +5571,6 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
-            // Pin it when the boom is spent. Shortening is the only way it
-            // has to keep out of a surface, so once it is at the floor and
-            // he keeps coming, the lens holds its ground and lets him walk
-            // past rather than being pushed into the wood.
-            {
-                const Vec3 e0 = app.cam.target + app.cam.dir() * app.cam.boom;
-                const float p0[3] = { e0.x, e0.y, e0.z };
-                const bool tight = wmap_mesh_ready() &&
-                                   wmap_mesh_cam_touching(p0, 1.1f);
-                if (tight && app.cam.boom <= 2.05f) {
-                    if (!app.cam.holding) {
-                        app.cam.holding = true;
-                        // last place it stood that was clear
-                        app.cam.hold_eye = app.cam.last_clear;
-                    }
-                } else {
-                    app.cam.holding = false;
-                    if (!tight)
-                        app.cam.last_clear = e0;
-                }
-            }
             // Immediate, on where the lens actually is rather than where it
             // is heading. Easing towards a shortened target takes frames,
             // and at running speed the surface arrives first -- which is
@@ -5610,14 +5582,14 @@ constexpr int kShadowResFar = 4096;
                 const float ep[3] = { e.x, e.y, e.z };
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
-                app.cam.boom = SDL_max(2.0f, app.cam.boom - 0.30f);
+                app.cam.boom = SDL_max(0.25f, app.cam.boom - 0.30f);
                 // and remember it, or the held length eases the boom
                 // straight back into the surface it was just pulled out
                 // of -- the two correcting each other in turn is the
                 // drilling, one layer up from where it was before
                 held = SDL_min(held, app.cam.boom);
                 wait = 0.5f;
-                if (app.cam.boom <= 2.0f)
+                if (app.cam.boom <= 0.25f)
                     break;
             }
             // the climb eases in quickly and settles back slowly, so it

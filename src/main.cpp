@@ -5551,6 +5551,21 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
+            // Immediate, on where the lens actually is rather than where it
+            // is heading. Easing towards a shortened target takes frames,
+            // and at running speed the surface arrives first -- which is
+            // the lens going through the bark. This cannot cycle against
+            // the easing: the target is walked down by the same test, so
+            // both settle at the same length.
+            for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
+                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
+                const float ep[3] = { e.x, e.y, e.z };
+                if (!wmap_mesh_cam_touching(ep, 1.1f))
+                    break;
+                app.cam.boom = SDL_max(0.5f, app.cam.boom - 0.30f);
+                if (app.cam.boom <= 0.5f)
+                    break;
+            }
             // the climb eases in quickly and settles back slowly, so it
             // reads as the camera riding over the rock, not teleporting
             const float lk = 1.0f - std::exp(

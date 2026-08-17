@@ -395,12 +395,25 @@ void main() {
     }
 
     // one shadow probe per blade at the root, via the client shadow map
+    // Outside the near box this used to give up and call the blade lit,
+    // which is why a tree's shadow on the deck vanished at middle range
+    // and came back on approach: the near map covers about fifty units,
+    // and past that there was nothing to fall back on. The cascade the
+    // terrain and props already use covers the rest.
     vec4 sp = uLightVP * vec4(aRoot, 1.0);
     vec3 c = sp.xyz * 0.5 + 0.5;
-    vShadow = 1.0;
+    float sh = -1.0;
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
-        vShadow = mix(0.58, 1.0, texture(uShadow, vec3(c.xy, c.z - 0.0012)));
+        sh = texture(uShadow, vec3(c.xy, c.z - 0.0012));
+    if (sh < 0.0) {
+        vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
+        vec3 cf = sf.xyz * 0.5 + 0.5;
+        if (all(greaterThan(cf.xy, vec2(0.0))) &&
+            all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
+            sh = texture(uShadow2, vec3(cf.xy, cf.z - 0.0016));
+    }
+    vShadow = mix(0.58, 1.0, sh < 0.0 ? 1.0 : sh);
 
     vV = aBlade.y;
     vLxz = (aRoot.xz - uCenter) / uScale;
@@ -2745,6 +2758,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniform3fv(glGetUniformLocation(gGrassProg, "uEye"), 1, eyeA);
         bindT(gGrassProg, "uGrassTex", 0, gGrassTex);
         bindT(gGrassProg, "uShadow", 1, shadowTex);
+        glUniformMatrix4fv(glGetUniformLocation(gGrassProg, "uLightVP2"), 1,
+                           GL_FALSE, lightVPFar.m);
+        bindT(gGrassProg, "uShadow2", 8, shadowTexFar);
         glDisable(GL_CULL_FACE);
         if (gGrassVao && gBladeCount > 0) {
             glBindVertexArray(gGrassVao);

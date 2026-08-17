@@ -1056,12 +1056,6 @@ static bool load_wmap(const std::string& path)
                            ri.tr[1] * gScale, ri.tr[2] * gScale + gCenter[1],
                            ri.tr[3], ri.tr[4] * gScale });
     }
-    for (const PropInst& pi : gProps) {
-        PropMesh& pm = gMeshes[pi.mesh];
-        if (!pm.loaded)
-            load_prop_mesh(pm);   // collision needs geometry, not just a draw
-    }
-    build_collision();
     SDL_Log("wmap: %s -- %d prop instances from %d saved, library %d meshes",
             path.c_str(), (int)gProps.size(), (int)raw.size(),
             (int)gMeshes.size());
@@ -2838,6 +2832,10 @@ void build_island_gl()
     // shift prop instance Y by yOff once
     for (PropInst& pi : gProps)
         pi.y += gYOff;
+    // Collision is built from these, so it has to come after the shift.
+    // Built before it, every triangle sat a waterline's worth away from the
+    // island you can see, and he stood on geometry that was not there.
+    build_collision();
 }
 
 

@@ -760,8 +760,19 @@ static float height_at(float x, float z)
     float fv = SDL_clamp(v - j, 0.0f, 1.0f);
     float a = gHeights[j * HN + i], b = gHeights[j * HN + i + 1];
     float c = gHeights[(j + 1) * HN + i], d = gHeights[(j + 1) * HN + i + 1];
-    float h = (a * (1 - fu) + b * fu) * (1 - fv) +
-              (c * (1 - fu) + d * fu) * fv;
+    // A props-only map marks open water as -100: a sentinel, not a height.
+    // Blending it with a neighbouring deck cell gives about -50, ground far
+    // under the sea, so the outer half cell of every island evaporates --
+    // and the collision field is built from this, so the damage is done
+    // before anything downstream can help. Where a corner is not a real
+    // height, take the highest that is.
+    float h;
+    if (a > -50.0f && b > -50.0f && c > -50.0f && d > -50.0f) {
+        h = (a * (1 - fu) + b * fu) * (1 - fv) +
+            (c * (1 - fu) + d * fu) * fv;
+    } else {
+        h = SDL_max(SDL_max(a, b), SDL_max(c, d));
+    }
     return h * gScale;
 }
 

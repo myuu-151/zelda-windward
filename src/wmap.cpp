@@ -2288,11 +2288,15 @@ void wmap_draw_shadow(const Mat4& lightVP)
 {
     if (!gActive)
         return;
-    glUseProgram(gDepthProg);
-    glUniformMatrix4fv(glGetUniformLocation(gDepthProg, "uLightVP"), 1,
-                       GL_FALSE, lightVP.m);
-    glBindVertexArray(gTerVao);
-    glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+    // ground that is not drawn must not cast either: a props-only island
+    // was throwing the shadow of a footprint nobody can see
+    if (!gPropsOnly) {
+        glUseProgram(gDepthProg);
+        glUniformMatrix4fv(glGetUniformLocation(gDepthProg, "uLightVP"), 1,
+                           GL_FALSE, lightVP.m);
+        glBindVertexArray(gTerVao);
+        glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
+    }
     if (!gProps.empty()) {
         glUseProgram(gDepthPropProg);
         glUniformMatrix4fv(glGetUniformLocation(gDepthPropProg, "uLightVP"),

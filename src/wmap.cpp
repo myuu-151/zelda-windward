@@ -2460,6 +2460,13 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
     return col::surface(wx, wz, 1e9f, outY, 2);
 }
 
+bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY)
+{
+    // only what is at or under the lens: a canopy overhead is not in the
+    // way of a camera passing beneath it
+    return col::surface(wx, wz, yMax, outY, 2);
+}
+
 float wmap_cam_block_height(float wx, float wz)
 {
     if (!gActive || gCamHeights.empty())

@@ -1723,21 +1723,55 @@ struct OrbitCamera {
     {
         const Vec3 d = dir_at(extra);
         const float want = want_dist();
-        constexpr float kSkin = 0.6f;
-        constexpr float kMinDist = 0.3f;   // last resort: right at his head
+        // How close the lens may pass to a surface before it counts as
+        // buried. At 0.6 a boom on a low orbit grazes that near the ground
+        // the whole way back, so it read as blocked at the first sample and
+        // sat at its floor: measured with the eye at 2.73 over a surface at
+        // 2.52, clear by a fifth of a unit and still refused. A skin is
+        // meant to stop the lens clipping through, not to demand headroom.
+        constexpr float kSkin = 0.15f;
+        constexpr float kMinDist = 1.0f;   // last resort: close over him
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
-        auto solid_at = [](float x, float z) {
-            const float g = ground_h_cam(x, z);
-            const float b =
-                wmap_active() ? wmap_cam_block_height(x, z) : -1000.0f;
-            return std::max(g, b);
+        // What is in the lens's way at the height the lens is at. Taking
+        // the highest surface at a spot meant the branches over your head
+        // counted, so standing anywhere under a tree drew the camera in
+        // against the trunk although nothing was between you and it.
+        auto solid_at = [](float x, float z, float yTop) {
+            float h = 0, sd = 0;
+            float best = -1000.0f;
+            // The baked field goes the same way as the block height did:
+            // one surface per spot, the tree included, with no way to ask
+            // what is at the lens's height -- so it reported something
+            // behind him where there was nothing but air. Where the island
+            // carries its own triangles they answer for it.
+            if (!wmap_mesh_ready()) {
+                if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                    best = h + kIslandY;
+                else if (g_test_hf.nx > 1 &&
+                         g_test_hf.sample(x - g_test_off[0],
+                                          z - g_test_off[1], &h, &sd) &&
+                         h > -50.0f)
+                    best = h + kIslandY;
+            }
+            float my = 0.0f;
+            if (wmap_mesh_cam_below(x, z, yTop, &my) && my > best)
+                best = my;
+            // The baked field holds one surface per spot with no way to ask
+            // about a height, so where a tree stands it answers with the
+            // canopy -- and every sample crossing that column read as solid
+            // to the sky, pulling the lens in from well above and to the
+            // side of anything. Where the geometry itself is available it
+            // answers properly, and this has nothing to add.
+            if (!wmap_mesh_ready() && wmap_active())
+                best = std::max(best, wmap_cam_block_height(x, z));
+            return best;
         };
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
             if (t < kIgnore) continue;
             const Vec3 s = target + d * t;
-            const float sh = solid_at(s.x, s.z);
+            const float sh = solid_at(s.x, s.z, s.y + kSkin);
             if (sh > -900.0f && s.y < sh + kSkin)
                 return std::max(kMinDist, t - want / kSteps);
         }
@@ -5453,9 +5487,23 @@ constexpr int kShadowResFar = 4096;
             float want_lift = 0.0f;
             const float target_boom = app.cam.solve_boom(&want_lift);
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
-            const float rate = target_boom < app.cam.boom ? 18.0f : 2.5f;
+            // Pulling in was near-instant at 18, which reads as a snap the
+            // moment anything crosses the lens. Easing it in makes the
+            // camera look like it is being pushed rather than cutting.
+            // Coming back out stays slower still, so it settles rather than
+            // springing the moment the way is clear.
+            const float rate = target_boom < app.cam.boom ? 6.0f : 2.5f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
-            app.cam.boom += (target_boom - app.cam.boom) * k;
+            // A speed limit on top of the easing. Beside a trunk the test
+            // flips between blocked and clear as he moves, so the target
+            // jumps the whole length of the boom and back; easing a jump
+            // that big still arrives as a lurch. Capping how far it may
+            // travel in a second turns a flapping target into a drift.
+            float step = (target_boom - app.cam.boom) * k;
+            const float lim = (step < 0.0f ? 9.0f : 5.0f) *
+                              static_cast<float>(frame_dt);
+            step = SDL_clamp(step, -lim, lim);
+            app.cam.boom += step;
             // the climb eases in quickly and settles back slowly, so it
             // reads as the camera riding over the rock, not teleporting
             const float lk = 1.0f - std::exp(
@@ -5465,31 +5513,54 @@ constexpr int kShadowResFar = 4096;
             // Backstop: easing takes frames, and a frame spent inside the
             // rock is a frame of grey screen. Close the boom immediately
             // while the eye is buried.
-            for (int i = 0; i < 12; ++i) {
+            // at most a couple of bites per frame: twelve of them was a
+            // snap however small each one was
+            for (int i = 0; i < 2; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
-                auto solid = [](float x, float z) {
-                    const float g = ground_h(x, z);
-                    return wmap_active()
-                               ? std::max(g, wmap_block_height(x, z)) : g;
+                // At the lens's height, not the highest thing at that
+                // spot. ground_h reports the top surface, so a canopy
+                // overhead read as the eye being buried -- this fired every
+                // frame under a tree, slamming the boom shut while the
+                // easing above pulled it back out, which is the drilling
+                // in and out.
+                const float eyeY = e.y;
+                auto solid = [eyeY](float x, float z) {
+                    float h = 0, sd = 0;
+                    float g = -1000.0f;
+                    if (!wmap_mesh_ready()) {
+                        if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                            g = h + kIslandY;
+                        else if (g_test_hf.nx > 1 &&
+                                 g_test_hf.sample(x - g_test_off[0],
+                                                  z - g_test_off[1], &h,
+                                                  &sd) &&
+                                 h > -50.0f)
+                            g = h + kIslandY;
+                    }
+                    float my = 0.0f;
+                    if (wmap_mesh_cam_below(x, z, eyeY + 1.2f, &my) && my > g)
+                        g = my;
+                    if (!wmap_mesh_ready() && wmap_active())
+                        g = std::max(g, wmap_cam_block_height(x, z));
+                    return g;
                 };
                 // buried: the eye is under the surface it sits over
                 const float here = solid(e.x, e.z);
                 bool bad = here > -900.0f && e.y < here + 0.5f;
-                // grazing: a face rises past the lens beside us. Ground
-                // *below* the camera is not a collision -- treating it as
-                // one walks the boom all the way onto his face.
-                if (!bad) {
-                    constexpr float kR = 0.6f;
-                    const float ox[4] = {kR, -kR, 0.0f, 0.0f};
-                    const float oz[4] = {0.0f, 0.0f, kR, -kR};
-                    for (int k = 0; k < 4 && !bad; ++k) {
-                        const float s = solid(e.x + ox[k], e.z + oz[k]);
-                        bad = s > -900.0f && s > e.y + 0.8f;
-                    }
-                }
+                // The grazing test that used to sit here -- anything
+                // beside the lens rising above it counts -- fired on every
+                // frame once real geometry existed, pinning the boom at its
+                // floor while the easing tried to climb out. That is the
+                // drilling. The clearance solve above already keeps the
+                // lens out of things; this stays a backstop for the one
+                // case it was written for, an eye actually inside a
+                // surface, and nothing else.
                 if (!bad) break;
-                app.cam.boom = std::max(0.3f, app.cam.boom * 0.75f);
-                if (app.cam.boom <= 0.3f) break;
+                // a gentler bite: this is a backstop for a buried lens, and
+                // taking a quarter of the boom at a time made it a snap in
+                // its own right
+                app.cam.boom = std::max(1.0f, app.cam.boom * 0.90f);
+                if (app.cam.boom <= 1.0f) break;
             }
         }
         const Vec3 aim = app.viewer_mode ? app.cam.target : app.cam_aim;

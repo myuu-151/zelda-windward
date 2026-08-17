@@ -218,12 +218,16 @@ float shadow_factor(vec4 sp) {
 // shadows stay sharp, and outside it every lookup came back lit -- which is
 // why an island a few hundred units off cast a disc on the sea but nothing
 // on itself, tree included.
-float shadow_any(vec4 sp, vec3 world) {
-    // Never switch away from a shadow: each map returns lit where it holds
-    // nothing, so the darker of the two can only ever restore one. The
-    // sharp map stops covering at about seventy units and the coarse one
-    // is valid at every distance, so this is what removes the band.
-    return min(shadow_factor(sp), shadow_far(world));
+float shadow_any(vec4 sp, vec3 world, float eyeDist) {
+    // Near the eye, the sharp map alone. Further out, the darker of both.
+    // Taking both everywhere never loses a shadow -- each reports lit where
+    // it holds nothing -- but it unions them, and the coarse map renders a
+    // canopy as a smear at 0.29 units per texel, so underfoot you saw crisp
+    // leaves with a blur over them. Past the range where that detail reads,
+    // the union is what closes the band.
+    float n = shadow_factor(sp);
+    return mix(n, min(n, shadow_far(world)),
+               smoothstep(45.0, 75.0, eyeDist));
 }
 )GLSL";
 
@@ -316,7 +320,7 @@ void main() {
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(nrm, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
-    shade *= mix(0.58, 1.0, shadow_any(vShadowPos, vWorld));
+    shade *= mix(0.58, 1.0, shadow_any(vShadowPos, vWorld, length(vWorld - uEye)));
     col *= shade;
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,
@@ -417,11 +421,15 @@ void main() {
     if (all(greaterThan(c.xy, vec2(0.0))) && all(lessThan(c.xy, vec2(1.0))) &&
         c.z < 1.0)
         sh = texture(uShadow, vec3(c.xy, c.z - 0.0012));
-    vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
-    vec3 cf = sf.xyz * 0.5 + 0.5;
-    if (all(greaterThan(cf.xy, vec2(0.0))) &&
-        all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
-        sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0005)));
+    // blades near the player keep the sharp map alone, like the ground
+    // they stand on, or the coarse canopy blurs across them
+    if (length(p - uPlayer) > 45.0) {
+        vec4 sf = uLightVP2 * vec4(aRoot, 1.0);
+        vec3 cf = sf.xyz * 0.5 + 0.5;
+        if (all(greaterThan(cf.xy, vec2(0.0))) &&
+            all(lessThan(cf.xy, vec2(1.0))) && cf.z < 1.0)
+            sh = min(sh, texture(uShadow2, vec3(cf.xy, cf.z - 0.0005)));
+    }
     vShadow = mix(0.58, 1.0, sh);
 
     vV = aBlade.y;
@@ -495,7 +503,7 @@ void main() {
     col *= vVCol;
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     vec3 n = normalize(vNrm);
-    float sf = shadow_any(vShadowPos, vWorld);
+    float sf = shadow_any(vShadowPos, vWorld, length(vWorld - uEye));
     if (uGrayMask == 1) {
         float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
         col *= (0.42 + 0.62 * wrap) * mix(0.60, 1.0, sf);

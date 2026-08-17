@@ -1074,7 +1074,9 @@ void main() {
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
-    float sh = min(shadow_factor(vShadowPos), shadow_far_isle(vWorld));
+    float shn = shadow_factor(vShadowPos);
+    float sh = mix(shn, min(shn, shadow_far_isle(vWorld)),
+                   smoothstep(45.0, 75.0, length(vWorld - uEye)));
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);
@@ -1579,7 +1581,8 @@ void main() {
     // 56, so between the two there was no shadow at all -- the sea faded
     // out and popped back in, while the trees, which sample the cascade
     // directly, stayed put. The cascade now carries the whole way.
-    float disc = island_disc_shadow(vWorld, d);
+    float disc = mix(1.0, island_disc_shadow(vWorld, d),
+                     smoothstep(45.0, 75.0, d));
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs

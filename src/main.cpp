@@ -5520,9 +5520,13 @@ constexpr int kShadowResFar = 4096;
             for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
                 const float ep[3] = { e.x, e.y, e.z };
-                if (!wmap_mesh_cam_touching(ep, 0.45f))
+                // Wide enough to react before the near plane reaches the
+                // surface. At 0.45 the lens was already cutting into bark
+                // by the time this reported a touch, because the plane the
+                // view is clipped against stands further out than that.
+                if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
-                target_boom = std::max(0.6f, target_boom - 0.35f);
+                target_boom = std::max(0.6f, target_boom - 0.30f);
                 if (target_boom <= 0.6f)
                     break;
             }

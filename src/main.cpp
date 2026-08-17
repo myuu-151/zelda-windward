@@ -4053,19 +4053,10 @@ constexpr int kShadowResFar = 4096;
                         constexpr float kStep = 1.1f;   // knee height
                         const float here = app.player.pos.y;
                         const Vec3 after = app.player.pos;
-                        // With real geometry, a wall is something standing
-                        // between knee and shoulder -- a trunk stops him,
-                        // and the branch above it does not, which the old
-                        // one-surface test could not tell apart.
-                        bool blockX, blockZ;
-                        if (wmap_mesh_ready()) {
-                            const float lo = here + kStep, hi = here + 3.0f;
-                            blockX = wmap_mesh_wall(after.x, before.z, lo, hi);
-                            blockZ = wmap_mesh_wall(before.x, after.z, lo, hi);
-                        } else {
-                            blockX = ground_h(after.x, before.z) > here + kStep;
-                            blockZ = ground_h(before.x, after.z) > here + kStep;
-                        }
+                        const float hx = ground_h(after.x, before.z);
+                        const float hz = ground_h(before.x, after.z);
+                        const bool blockX = hx > here + kStep;
+                        const bool blockZ = hz > here + kStep;
                         if (blockX && blockZ) {
                             app.player.pos.x = before.x;
                             app.player.pos.z = before.z;
@@ -4083,21 +4074,8 @@ constexpr int kShadowResFar = 4096;
                 // the island terrain is solid: walk the slopes, step off a
                 // cliff and you fall; the sea catches you at the skim height
                 {
-                    float gh =
+                    const float gh =
                         ground_h(app.player.pos.x, app.player.pos.z);
-                    // Ask the geometry what is under his feet: standing, he
-                    // may step up to a knee; falling, only what he is above
-                    // counts. Either way a branch overhead is not a floor,
-                    // because the deck below it is still there to find.
-                    if (wmap_mesh_ready()) {
-                        const float ceiling =
-                            app.player.pos.y +
-                            (app.fall_vel == 0.0f ? 1.1f : 0.05f);
-                        float my = 0.0f;
-                        if (wmap_mesh_floor(app.player.pos.x, app.player.pos.z,
-                                            ceiling, &my))
-                            gh = SDL_max(gh > -900.0f ? gh : -1000.0f, my);
-                    }
                     const bool on_isle = gh > -900.0f;
                     float floor_y = on_isle ? gh : kWaterSkim;
                     // A heightfield holds one surface per spot, so a branch

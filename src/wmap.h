@@ -39,15 +39,6 @@ float wmap_block_height(float wx, float wz);
 // the map marks as one the view should rotate through. Falls back to
 // wmap_block_height for maps that carry no such field.
 float wmap_cam_block_height(float wx, float wz);
-
-// Mesh collision. A heightfield holds one surface per spot, so a branch is
-// recorded as the ground beneath it; these ask what is under a point at or
-// below a given height, which is the question walking actually asks.
-bool wmap_mesh_ready();
-// Highest surface under (wx, wz) that is no higher than yMax.
-bool wmap_mesh_floor(float wx, float wz, float yMax, float* outY);
-// Whether anything stands between yLo and yHi there -- a wall, not a step.
-bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

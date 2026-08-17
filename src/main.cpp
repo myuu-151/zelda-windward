@@ -1552,7 +1552,15 @@ void main() {
     // 56, so between the two there was no shadow at all -- the sea faded
     // out and popped back in, while the trees, which sample the cascade
     // directly, stayed put. The cascade now carries the whole way.
-    float disc = island_disc_shadow(vWorld, d);
+    // Taking the smaller of the near map and the cascade drew both, and
+    // they do not agree: one is 4096 texels over 112 units, the other 2048
+    // over 1200, so the bird cast a sharp shadow with a coarse offset copy
+    // beside it. Pick one, the way every other surface does -- the sharp
+    // map wherever it reaches, the cascade only past its box.
+    vec3 wsc = vShadowPos.xyz * 0.5 + 0.5;
+    bool w_near = all(greaterThanEqual(wsc.xy, vec2(0.02))) &&
+                  all(lessThanEqual(wsc.xy, vec2(0.98))) && wsc.z <= 1.0;
+    float disc = w_near ? 1.0 : island_disc_shadow(vWorld, d);
     col *= mix(0.66, 1.0, min(min(shadow_factor(vShadowPos), isl), disc));
     col = mix(col, kHorizon, smoothstep(120.0, 380.0, d));
     // the haze would erase every distant shadow, so let the island discs

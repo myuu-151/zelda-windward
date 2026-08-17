@@ -1048,10 +1048,18 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
             if (pr.material && pr.material->has_pbr_metallic_roughness) {
                 const cgltf_pbr_metallic_roughness& pbr =
                     pr.material->pbr_metallic_roughness;
+                // The gradient multiplies the texture, so a material with
+                // a texture and no Color Ramp must leave it at white --
+                // taking the base-colour factor and darkening the bottom to
+                // 0.72 of it tinted the whole model down twice over, which
+                // is why an imported island read darker than the same mesh
+                // drawn by the client's own model path.
+                const bool hasTex = pbr.base_color_texture.texture != nullptr;
                 if (grads.find(mat.name) == grads.end())
                     for (int k = 0; k < 3; k++) {
-                        mat.kd[k] = pbr.base_color_factor[k];
-                        mat.ka[k] = pbr.base_color_factor[k] * 0.72f;
+                        mat.kd[k] = hasTex ? 1.0f : pbr.base_color_factor[k];
+                        mat.ka[k] = hasTex ? 1.0f
+                                           : pbr.base_color_factor[k] * 0.72f;
                     }
                 if (pbr.base_color_texture.texture &&
                     pbr.base_color_texture.texture->image) {

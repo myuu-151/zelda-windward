@@ -1744,9 +1744,15 @@ struct OrbitCamera {
             float my = 0.0f;
             if (wmap_mesh_cam_below(x, z, yTop, &my) && my > best)
                 best = my;
-            const float b =
-                wmap_active() ? wmap_cam_block_height(x, z) : -1000.0f;
-            return std::max(best, b);
+            // The baked field holds one surface per spot with no way to ask
+            // about a height, so where a tree stands it answers with the
+            // canopy -- and every sample crossing that column read as solid
+            // to the sky, pulling the lens in from well above and to the
+            // side of anything. Where the geometry itself is available it
+            // answers properly, and this has nothing to add.
+            if (!wmap_mesh_ready() && wmap_active())
+                best = std::max(best, wmap_cam_block_height(x, z));
+            return best;
         };
         for (int i = 1; i <= kSteps; ++i) {
             const float t = want * static_cast<float>(i) / kSteps;
@@ -5518,8 +5524,9 @@ constexpr int kShadowResFar = 4096;
                     float my = 0.0f;
                     if (wmap_mesh_cam_below(x, z, eyeY + 1.2f, &my) && my > g)
                         g = my;
-                    return wmap_active()
-                               ? std::max(g, wmap_cam_block_height(x, z)) : g;
+                    if (!wmap_mesh_ready() && wmap_active())
+                        g = std::max(g, wmap_cam_block_height(x, z));
+                    return g;
                 };
                 // buried: the eye is under the surface it sits over
                 const float here = solid(e.x, e.z);

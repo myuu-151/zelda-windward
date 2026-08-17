@@ -2165,6 +2165,8 @@ int main(int argc, char** argv)
     const GLint is_time = glGetUniformLocation(island_prog, "uTime");
     const GLint is_wind = glGetUniformLocation(island_prog, "uWind");
 
+    constexpr int kShadowResFar = 2048;
+    GLuint shadow_tex_far = 0, shadow_fbo_far = 0;
     // sun shadow map: depth-only pass from the sky's sun direction
     const GLuint shadow_prog = link_program(kShadowVS, kShadowClipFS);
     const GLuint shadow_skin_prog = link_program(kShadowSkinVS, kShadowFS);
@@ -2204,6 +2206,31 @@ int main(int argc, char** argv)
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
             GL_FRAMEBUFFER_COMPLETE)
             SDL_Log("shadow fbo incomplete");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    {
+        glGenTextures(1, &shadow_tex_far);
+        glBindTexture(GL_TEXTURE_2D, shadow_tex_far);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowResFar,
+                     kShadowResFar, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                        GL_COMPARE_REF_TO_TEXTURE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const float border[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+        glGenFramebuffers(1, &shadow_fbo_far);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_far);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_2D, shadow_tex_far, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE)
+            SDL_Log("far shadow fbo incomplete");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     // post-processing program + lazily-sized scene target
@@ -2284,7 +2311,23 @@ int main(int argc, char** argv)
         // it.
         return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 180.0f) * view;
     };
+    // The far cascade: same sun, a much wider box, its own coarse map. The
+    // near one is deliberately tight so shadows are crisp underfoot, which
+    // leaves anything past about fifty units casting nothing at all -- an
+    // island you have flown off, and the tree standing on it. This covers
+    // that range at a resolution nobody can inspect from there anyway.
+    auto make_light_vp_far = [](Vec3 focus) {
+        const Vec3 sun_dir = normalize({0.45f, 0.35f, -0.60f});
+        constexpr float kSnapFar = 32.0f;
+        const Vec3 center{std::round(focus.x / kSnapFar) * kSnapFar, 0.0f,
+                          std::round(focus.z / kSnapFar) * kSnapFar};
+        const Mat4 view =
+            mat4_look_at(center + sun_dir * 320.0f, center, {0, 1, 0});
+        return mat4_ortho(-260.0f, 260.0f, -260.0f, 260.0f, 20.0f, 640.0f) *
+               view;
+    };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
+    Mat4 light_vp_far = make_light_vp_far({0.0f, 0.0f, 0.0f});
 
     const GLuint sky_prog = link_program(kSkyVS, kSkyFS);
     if (!sky_prog) return 1;
@@ -2635,8 +2678,12 @@ int main(int argc, char** argv)
         // a quadrant can set its own ribbon height in the chart, since
         // these sit in world space and an island's deck does not
         const float wh = wmap_wind_height(wx, wz);
-        w.origin = {wx + std::cos(ang) * rad,
-                    (wh > 0.01f ? wh : 7.0f) + wrand() * 13.0f,
+        // The scatter has to follow the setting rather than sit on top of
+        // it: thirteen units of spread above a base of one still puts a
+        // ribbon fourteen units up, which is no lower than before.
+        const float base = wh > 0.01f ? wh : 7.0f;
+        const float spread = wh > 0.01f ? SDL_max(0.5f, wh * 0.45f) : 13.0f;
+        w.origin = {wx + std::cos(ang) * rad, base + wrand() * spread,
                     wz + std::sin(ang) * rad};
         // fixed world wind, matching the sky's cloud drift and the tree sway
         w.fwd = normalize({-1.0f, 0.0f, -0.35f});
@@ -5039,9 +5086,15 @@ int main(int argc, char** argv)
         // render
         // ---- sun shadow pass: island + Link + loftwing into the depth map
         light_vp = make_light_vp(app.player.pos);
-        {
-            glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
-            glViewport(0, 0, kShadowRes, kShadowRes);
+        light_vp_far = make_light_vp_far(app.player.pos);
+        // the same casters go into both maps; only the box differs
+        for (int cascade = 0; cascade < 2; cascade++) {
+            const bool far_pass = cascade == 1;
+            const Mat4& lvp = far_pass ? light_vp_far : light_vp;
+            glBindFramebuffer(GL_FRAMEBUFFER,
+                              far_pass ? shadow_fbo_far : shadow_fbo);
+            const int res = far_pass ? kShadowResFar : kShadowRes;
+            glViewport(0, 0, res, res);
             // depth writes must be on or the clear is a no-op and the map
             // keeps last frame's depths -- with a light frustum that moves
             // with the player, stale depths slide the shadow around
@@ -5055,14 +5108,14 @@ int main(int argc, char** argv)
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
             if (wmap_active())
-                wmap_draw_shadow(light_vp);
+                wmap_draw_shadow(lvp);
             // with a chart loaded the test island moves to its quadrant
             float tix = 0.0f, tiz = 0.0f;
             const bool test_isle_placed = wmap_test_island(&tix, &tiz);
             if ((island.index_count || props.index_count) &&
                 (!wmap_active() || test_isle_placed)) {
                 glUseProgram(shadow_prog);
-                glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, light_vp.m);
+                glUniformMatrix4fv(sh_lightvp, 1, GL_FALSE, lvp.m);
                 const float off3[3] = {tix, kIslandY, tiz};
                 glUniform3fv(sh_offset, 1, off3);
                 glUniform1i(sh_tex, 0);
@@ -5085,7 +5138,7 @@ int main(int argc, char** argv)
                 }
             }
             glUseProgram(shadow_skin_prog);
-            glUniformMatrix4fv(shs_lightvp, 1, GL_FALSE, light_vp.m);
+            glUniformMatrix4fv(shs_lightvp, 1, GL_FALSE, lvp.m);
             glDisable(GL_CULL_FACE);
             {
                 const Mat4 mm = app.viewer_mode ? Mat4{}
@@ -5230,7 +5283,8 @@ int main(int argc, char** argv)
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, shadow_tex);
             wmap_draw(viewproj, cam_eye, light_vp, shadow_tex,
-                      static_cast<float>(app.sim_time));
+                      static_cast<float>(app.sim_time),
+                      light_vp_far, shadow_tex_far);
         }
         // the test island sits at its own chart quadrant when one is given
         float tisx = 0.0f, tisz = 0.0f;

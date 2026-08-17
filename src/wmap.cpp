@@ -168,6 +168,27 @@ static GLuint gSkirtHeightTex = 0;
 
 static const char* kShadowFn = R"GLSL(
 uniform sampler2DShadow uShadow;
+// The far cascade: the near map is tight so shadows are crisp underfoot,
+// which leaves anything past its box casting nothing at all. This covers
+// that range, coarsely.
+uniform sampler2DShadow uShadow2;
+uniform mat4 uLightVP2;
+float shadow_far(vec3 world) {
+    vec4 sp = uLightVP2 * vec4(world, 1.0);
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
+        c.z > 1.0)
+        return 1.0;
+    float z = c.z - 0.0016;   // coarser texels want a little more bias
+    vec2 tf = vec2(1.0 / 2048.0);
+    float sf2 = 0.0;
+    sf2 += texture(uShadow2, vec3(c.xy + vec2(-0.5, -0.5) * tf, z));
+    sf2 += texture(uShadow2, vec3(c.xy + vec2( 0.5, -0.5) * tf, z));
+    sf2 += texture(uShadow2, vec3(c.xy + vec2(-0.5,  0.5) * tf, z));
+    sf2 += texture(uShadow2, vec3(c.xy + vec2( 0.5,  0.5) * tf, z));
+    return sf2 * 0.25;
+}
+
 float shadow_factor(vec4 sp) {
     vec3 c = sp.xyz * 0.5 + 0.5;
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0))) ||
@@ -183,6 +204,17 @@ float shadow_factor(vec4 sp) {
     vec2 e = min(c.xy, 1.0 - c.xy);
     float fade = smoothstep(0.0, 0.06, min(e.x, e.y));
     return mix(1.0, s * 0.25, fade);
+}
+
+// Near map where it reaches, far map beyond. The near box is small so its
+// shadows stay sharp, and outside it every lookup came back lit -- which is
+// why an island a few hundred units off cast a disc on the sea but nothing
+// on itself, tree included.
+float shadow_any(vec4 sp, vec3 world) {
+    vec3 c = sp.xyz * 0.5 + 0.5;
+    bool near_ok = all(greaterThanEqual(c.xy, vec2(0.02))) &&
+                   all(lessThanEqual(c.xy, vec2(0.98))) && c.z <= 1.0;
+    return near_ok ? shadow_factor(sp) : shadow_far(world);
 }
 )GLSL";
 
@@ -275,7 +307,7 @@ void main() {
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(nrm, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
-    shade *= mix(0.58, 1.0, shadow_factor(vShadowPos));
+    shade *= mix(0.58, 1.0, shadow_any(vShadowPos, vWorld));
     col *= shade;
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,
@@ -313,6 +345,11 @@ uniform mat4 uViewProj;
 uniform mat4 uLightVP;
 uniform float uTime;
 uniform sampler2DShadow uShadow;
+// The far cascade: the near map is tight so shadows are crisp underfoot,
+// which leaves anything past its box casting nothing at all. This covers
+// that range, coarsely.
+uniform sampler2DShadow uShadow2;
+uniform mat4 uLightVP2;
 uniform float uScale;
 uniform vec3 uPlayer;      // blades bow away from whoever walks through
 out float vV;
@@ -426,7 +463,7 @@ void main() {
     col *= vVCol;
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     vec3 n = normalize(vNrm);
-    float sf = shadow_factor(vShadowPos);
+    float sf = shadow_any(vShadowPos, vWorld);
     if (uGrayMask == 1) {
         float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
         col *= (0.42 + 0.62 * wrap) * mix(0.60, 1.0, sf);
@@ -2457,7 +2494,8 @@ void wmap_draw_shadow(const Mat4& lightVP)
 }
 
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
-               GLuint shadowTex, float timeSec)
+               GLuint shadowTex, float timeSec, const Mat4& lightVPFar,
+               GLuint shadowTexFar)
 {
     if (!gActive)
         return;
@@ -2531,6 +2569,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     bindT(gTerProg, "uCliffTex", 5, gCliffTex);
     bindT(gTerProg, "uAOMap", 6, gAOTex);
     bindT(gTerProg, "uShadow", 7, shadowTex);
+    glUniformMatrix4fv(glGetUniformLocation(gTerProg, "uLightVP2"), 1,
+                       GL_FALSE, lightVPFar.m);
+    bindT(gTerProg, "uShadow2", 8, shadowTexFar);
     glBindVertexArray(gTerVao);
     glDrawElements(GL_TRIANGLES, gTerIdx, GL_UNSIGNED_INT, nullptr);
 
@@ -2603,6 +2644,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glUniform3fv(glGetUniformLocation(gPropProg, "uEye"), 1, eyeA);
         glUniform1f(glGetUniformLocation(gPropProg, "uTime"), timeSec);
         bindT(gPropProg, "uShadow", 5, shadowTex);
+        glUniformMatrix4fv(glGetUniformLocation(gPropProg, "uLightVP2"), 1,
+                           GL_FALSE, lightVPFar.m);
+        bindT(gPropProg, "uShadow2", 8, shadowTexFar);
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(glGetUniformLocation(gPropProg, "uTex"), 0);
         GLint locModel = glGetUniformLocation(gPropProg, "uModel");

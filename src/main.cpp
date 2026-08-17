@@ -1740,13 +1740,20 @@ struct OrbitCamera {
         auto solid_at = [](float x, float z, float yTop) {
             float h = 0, sd = 0;
             float best = -1000.0f;
-            if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
-                best = h + kIslandY;
-            else if (g_test_hf.nx > 1 &&
-                     g_test_hf.sample(x - g_test_off[0], z - g_test_off[1],
-                                      &h, &sd) &&
-                     h > -50.0f)
-                best = h + kIslandY;
+            // The baked field goes the same way as the block height did:
+            // one surface per spot, the tree included, with no way to ask
+            // what is at the lens's height -- so it reported something
+            // behind him where there was nothing but air. Where the island
+            // carries its own triangles they answer for it.
+            if (!wmap_mesh_ready()) {
+                if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                    best = h + kIslandY;
+                else if (g_test_hf.nx > 1 &&
+                         g_test_hf.sample(x - g_test_off[0],
+                                          z - g_test_off[1], &h, &sd) &&
+                         h > -50.0f)
+                    best = h + kIslandY;
+            }
             float my = 0.0f;
             if (wmap_mesh_cam_below(x, z, yTop, &my) && my > best)
                 best = my;
@@ -5520,13 +5527,16 @@ constexpr int kShadowResFar = 4096;
                 auto solid = [eyeY](float x, float z) {
                     float h = 0, sd = 0;
                     float g = -1000.0f;
-                    if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
-                        g = h + kIslandY;
-                    else if (g_test_hf.nx > 1 &&
-                             g_test_hf.sample(x - g_test_off[0],
-                                              z - g_test_off[1], &h, &sd) &&
-                             h > -50.0f)
-                        g = h + kIslandY;
+                    if (!wmap_mesh_ready()) {
+                        if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
+                            g = h + kIslandY;
+                        else if (g_test_hf.nx > 1 &&
+                                 g_test_hf.sample(x - g_test_off[0],
+                                                  z - g_test_off[1], &h,
+                                                  &sd) &&
+                                 h > -50.0f)
+                            g = h + kIslandY;
+                    }
                     float my = 0.0f;
                     if (wmap_mesh_cam_below(x, z, eyeY + 1.2f, &my) && my > g)
                         g = my;

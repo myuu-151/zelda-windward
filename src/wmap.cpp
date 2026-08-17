@@ -147,7 +147,11 @@ static float gQuadSize = 240.0f;
 static int gTestCell[2] = { -1, -1 };
 struct ChartIsle { int cx, cy; std::string path; };
 static std::vector<ChartIsle> gChart;
-static int gSpawnCell[2] = { -1, -1 };   // "spawn x y" in the chart      // every island the chart names
+static int gSpawnCell[2] = { -1, -1 };   // "spawn x y" in the chart
+// A props-only island: its heightmap exists for the shore field and for
+// something to stand on, but there is no ground to draw -- the model the
+// props place IS the island, the way the built-in test island is.
+static bool gPropsOnly = false;      // every island the chart names
 static int gLoadedCell[2] = { -99, -99 };  // which one is resident
 static float gIslandTop = 0.0f;   // highest terrain point, world units
 static float gTestRadius = 26.0f, gTestTop = 6.0f;
@@ -779,6 +783,7 @@ static bool load_wmap(const std::string& path)
         fclose(f);
         return false;
     }
+    gPropsOnly = magic[7] == '9';
     if (magic[7] >= '8') {
         // v8 carries the map's world size and the resolutions that scale
         // with it -- without this the whole file reads 16 bytes shifted
@@ -1552,7 +1557,7 @@ static void build_heightfield()
             // overhang, instead of leaving it at the cliff base.
             // A full-map skirt makes the whole footprint solid rock, so
             // the shore field has to treat it all as land. A TRIMMED
-            // skirt follows the coastline instead, so the heightfield
+    // skirt follows the coastline instead, so the heightfield
             // is the silhouette again.
             const bool skirt = gTune.islandDepth > 0.05f && !gTune.trimSkirt;
             bool isLand = inside && (skirt || h > gWaterSkimK - 0.4f);
@@ -2372,7 +2377,13 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glEnable(GL_CULL_FACE);
     }
 
-    // terrain
+    auto bindT = [&](GLuint prog, const char* name, int unit, GLuint tex) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform1i(glGetUniformLocation(prog, name), unit);
+    };
+    // terrain -- nothing to draw when the island is its props
+    if (!gPropsOnly) {
     glUseProgram(gTerProg);
     glUniformMatrix4fv(glGetUniformLocation(gTerProg, "uViewProj"), 1,
                        GL_FALSE, viewProj.m);
@@ -2386,11 +2397,6 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     glUniform1f(glGetUniformLocation(gTerProg, "uEditorHalf"), gEditorHalf);
     glUniform1f(glGetUniformLocation(gTerProg, "uGrassAO"), gTune.groundAO);
     glUniform1f(glGetUniformLocation(gTerProg, "uGrassAORad"), gTune.aoRadius);
-    auto bindT = [&](GLuint prog, const char* name, int unit, GLuint tex) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(glGetUniformLocation(prog, name), unit);
-    };
     bindT(gTerProg, "uMask", 0, gMaskTex);
     bindT(gTerProg, "uMask2", 1, gMask2Tex);
     bindT(gTerProg, "uGrassTex", 2, gGrassTex);
@@ -2433,7 +2439,8 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     }
 
     // skirt
-    if (gTune.islandDepth > 0.05f) {
+    }   // !gPropsOnly: no ground was drawn
+    if (!gPropsOnly && gTune.islandDepth > 0.05f) {
         glUseProgram(gSkirtProg);
         glUniformMatrix4fv(glGetUniformLocation(gSkirtProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);

@@ -1584,7 +1584,12 @@ static void build_heightfield()
     // spread it gets clipped to the island's own rect.
     const float PAD = 28.0f;
     const float HALF = TER_HALF + PAD;
-    const int PN = 513;   // finer: the camera collides against this
+    // The test island collides against 512 samples across ~69 units --
+    // 0.135 per cell. This field pads 28 units around the island for the
+    // foam ring, so at 513 it was 0.30 per cell: less than half the
+    // detail, which is why a chart island felt coarser underfoot than the
+    // built-in one however finely its heightmap was baked.
+    const int PN = 1025;
     gOut.x0 = gCenter[0] - HALF; gOut.x1 = gCenter[0] + HALF;
     gOut.y0 = -gCenter[1] - HALF; gOut.y1 = -gCenter[1] + HALF;
     gOut.nx = PN;

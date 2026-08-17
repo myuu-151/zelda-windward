@@ -5505,6 +5505,21 @@ constexpr int kShadowResFar = 4096;
                 }
                 target_boom = held;
             }
+            // Resistance, applied to the length being aimed for rather than
+            // to the boom after it has moved. Correcting it afterwards made
+            // a cycle: it eased out until the lens touched, got cut back,
+            // was clear again, and eased out once more -- for ever, with
+            // him standing still. Walking the target down to a length whose
+            // endpoint is clear gives it somewhere to settle.
+            for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
+                const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
+                const float ep[3] = { e.x, e.y, e.z };
+                if (!wmap_mesh_cam_touching(ep, 0.45f))
+                    break;
+                target_boom = std::max(0.6f, target_boom - 0.25f);
+                if (target_boom <= 0.6f)
+                    break;
+            }
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             // Pulling in was near-instant at 18, which reads as a snap the
             // moment anything crosses the lens. Easing it in makes the
@@ -5534,20 +5549,6 @@ constexpr int kShadowResFar = 4096;
             // while the eye is buried.
             // at most a couple of bites per frame: twelve of them was a
             // snap however small each one was
-            // Resistance, so the lens can never end up inside anything:
-            // while a sphere at the eye overlaps geometry the boom closes,
-            // and the moment it does not this does nothing at all. Tested
-            // as an overlap rather than by what surface sits underneath,
-            // which is why it cannot fire in open air and start the boom
-            // drilling in and out the way the old height test did.
-            for (int i = 0; i < 8 && wmap_mesh_ready(); ++i) {
-                const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
-                const float ep[3] = { e.x, e.y, e.z };
-                if (!wmap_mesh_cam_touching(ep, 0.45f))
-                    break;
-                app.cam.boom = std::max(0.6f, app.cam.boom * 0.85f);
-                if (app.cam.boom <= 0.6f)
-                    break;
             }
             for (int i = 0; i < (wmap_mesh_ready() ? 0 : 2); ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;

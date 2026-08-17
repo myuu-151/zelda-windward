@@ -5543,10 +5543,24 @@ constexpr int kShadowResFar = 4096;
                     wait = 0.5f;
                 } else {
                     wait -= static_cast<float>(frame_dt);
-                    if (wait <= 0.0f)
-                        held += (target_boom - held) *
-                                (1.0f - std::exp(-2.5f *
-                                                 static_cast<float>(frame_dt)));
+                    if (wait <= 0.0f) {
+                        // Once the full length is clear again, take it back
+                        // at once rather than creeping towards it. Creeping
+                        // never finished from a zoomed-in setting: the ease
+                        // is a fraction of the gap, and from a quarter unit
+                        // to a short boom that gap is small enough that it
+                        // sat there hidden inside him. The boom's own
+                        // easing below still makes the move gentle.
+                        const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
+                        const float ep[3] = { e.x, e.y, e.z };
+                        if (!wmap_mesh_ready() ||
+                            !wmap_mesh_cam_touching(ep, 1.1f))
+                            held = target_boom;
+                        else
+                            held += (target_boom - held) *
+                                    (1.0f - std::exp(-2.5f *
+                                             static_cast<float>(frame_dt)));
+                    }
                 }
                 target_boom = held;
             }

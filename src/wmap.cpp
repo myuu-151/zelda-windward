@@ -316,14 +316,8 @@ void main() {
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,
     // then it settles into a dark silhouette, then dissolves at the rim
-    // The pale stage used to reach 0.6 toward white by 330 units, which
-    // flattened every shadow and every bit of cliff AO -- an island at
-    // middle distance went shadeless, then darkened again as the
-    // silhouette below took over, so it read as detail popping in rather
-    // than as haze. Keep it light and hold it off until the silhouette is
-    // ready to carry the falloff, so the sequence only ever runs one way.
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(170.0, 430.0, d) * 0.26);
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(300.0, 560.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -433,14 +427,8 @@ void main() {
     // same distance read as the land it grows on, or the field stays
     // vivid green while the island behind it turns to silhouette
     float d = length(vWorldPos - uEye);
-    // The pale stage used to reach 0.6 toward white by 330 units, which
-    // flattened every shadow and every bit of cliff AO -- an island at
-    // middle distance went shadeless, then darkened again as the
-    // silhouette below took over, so it read as detail popping in rather
-    // than as haze. Keep it light and hold it off until the silhouette is
-    // ready to carry the falloff, so the sequence only ever runs one way.
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(170.0, 430.0, d) * 0.26);
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(300.0, 560.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -498,14 +486,8 @@ void main() {
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,
     // then it settles into a dark silhouette, then dissolves at the rim
-    // The pale stage used to reach 0.6 toward white by 330 units, which
-    // flattened every shadow and every bit of cliff AO -- an island at
-    // middle distance went shadeless, then darkened again as the
-    // silhouette below took over, so it read as detail popping in rather
-    // than as haze. Keep it light and hold it off until the silhouette is
-    // ready to carry the falloff, so the sequence only ever runs one way.
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(170.0, 430.0, d) * 0.26);
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(300.0, 560.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }
@@ -686,14 +668,8 @@ void main() {
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,
     // then it settles into a dark silhouette, then dissolves at the rim
-    // The pale stage used to reach 0.6 toward white by 330 units, which
-    // flattened every shadow and every bit of cliff AO -- an island at
-    // middle distance went shadeless, then darkened again as the
-    // silhouette below took over, so it read as detail popping in rather
-    // than as haze. Keep it light and hold it off until the silhouette is
-    // ready to carry the falloff, so the sequence only ever runs one way.
-    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(170.0, 430.0, d) * 0.26);
-    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(300.0, 560.0, d));
+    col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(110.0, 330.0, d) * 0.6);
+    col = mix(col, vec3(0.16, 0.26, 0.38), smoothstep(320.0, 520.0, d));
     col = mix(col, vec3(0.66, 0.80, 0.95), smoothstep(540.0, 780.0, d));
     fragColor = vec4(col, 1.0);
 }

@@ -429,10 +429,16 @@ void main() {
         float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
         col *= (0.42 + 0.62 * wrap) * mix(0.60, 1.0, sf);
     } else {
-        float diff = max(dot(n, L), 0.0);
-        diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
-        diff *= mix(1.0, sf, 0.85);
-        col *= 0.68 + 0.42 * diff;
+        // Shade a textured prop exactly as the client shades its own
+        // models. Both use the same texture on the same mesh, so any
+        // difference here is the reason an imported island looked duller
+        // than the built-in one: this branch took the raw dot product,
+        // which on a flat deck is about 0.42 and lands at 0.86, where the
+        // model path wraps it to 0.71 first and comes out slightly over 1.
+        float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
+        float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
+        shade *= mix(0.58, 1.0, sf);
+        col *= shade;
     }
     float d = length(vWorld - uEye);
     // Wind Waker distance read: atmospheric haze washes it out first,

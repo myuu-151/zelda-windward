@@ -2329,81 +2329,6 @@ static void closest_on_tri(const float* T, const float* p, float* out)
 // corners settle. Surfaces that face up enough to stand on report the
 // height they support him at; the rest simply push sideways, which is what
 // makes a trunk a wall and a branch overhead nothing at all.
-// Whether a sphere at p overlaps anything in the given set. A height query
-// cannot answer this: inside a closed trunk the only surface under the point
-// is the deck far below, so nothing reports the lens as buried however the
-// numbers are tuned. Sphere against triangle does.
-static bool overlaps(const float* p, float radius, Uint8 mask)
-{
-    if (!ready)
-        return false;
-    const int i0 = SDL_clamp((int)((p[0] - radius - ox) / kCell), 0, nx - 1);
-    const int i1 = SDL_clamp((int)((p[0] + radius - ox) / kCell), 0, nx - 1);
-    const int j0 = SDL_clamp((int)((p[2] - radius - oz) / kCell), 0, nz - 1);
-    const int j1 = SDL_clamp((int)((p[2] + radius - oz) / kCell), 0, nz - 1);
-    for (int j = j0; j <= j1; j++)
-        for (int i = i0; i <= i1; i++)
-            for (int k : grid[(size_t)j * nx + i]) {
-                if (!(flags[k] & mask))
-                    continue;
-                float cp[3];
-                closest_on_tri(&tris[(size_t)k * 9], p, cp);
-                const float dx = p[0] - cp[0], dy = p[1] - cp[1],
-                            dz = p[2] - cp[2];
-                if (dx * dx + dy * dy + dz * dz < radius * radius)
-                    return true;
-            }
-    return false;
-}
-
-// Push a point out of everything it overlaps. Shortening the boom cannot
-// help when the whole line from him outward lies inside a trunk -- there is
-// no clear length along it -- so the lens leaves the arc instead.
-static bool push_out(float* p, float radius, Uint8 mask)
-{
-    if (!ready)
-        return false;
-    bool moved = false;
-    for (int iter = 0; iter < 4; iter++) {
-        bool any = false;
-        const int i0 = SDL_clamp((int)((p[0] - radius - ox) / kCell), 0, nx - 1);
-        const int i1 = SDL_clamp((int)((p[0] + radius - ox) / kCell), 0, nx - 1);
-        const int j0 = SDL_clamp((int)((p[2] - radius - oz) / kCell), 0, nz - 1);
-        const int j1 = SDL_clamp((int)((p[2] + radius - oz) / kCell), 0, nz - 1);
-        for (int j = j0; j <= j1; j++)
-            for (int i = i0; i <= i1; i++)
-                for (int k : grid[(size_t)j * nx + i]) {
-                    if (!(flags[k] & mask))
-                        continue;
-                    float cp[3];
-                    closest_on_tri(&tris[(size_t)k * 9], p, cp);
-                    float d[3] = { p[0] - cp[0], p[1] - cp[1], p[2] - cp[2] };
-                    float len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
-                    if (len >= radius)
-                        continue;
-                    if (len < 1e-5f) {   // dead centre: use the face normal
-                        const float* T = &tris[(size_t)k * 9];
-                        const float u[3] = { T[3]-T[0], T[4]-T[1], T[5]-T[2] };
-                        const float v[3] = { T[6]-T[0], T[7]-T[1], T[8]-T[2] };
-                        d[0] = u[1]*v[2]-u[2]*v[1];
-                        d[1] = u[2]*v[0]-u[0]*v[2];
-                        d[2] = u[0]*v[1]-u[1]*v[0];
-                        len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
-                        if (len < 1e-6f)
-                            continue;
-                    }
-                    const float s = (radius - len) / len;
-                    p[0] += d[0] * s;
-                    p[1] += d[1] * s;
-                    p[2] += d[2] * s;
-                    any = moved = true;
-                }
-        if (!any)
-            break;
-    }
-    return moved;
-}
-
 static bool resolve(float* pos, float radius, float height, float* groundY)
 {
     if (!ready)
@@ -2533,23 +2458,6 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
 {
     // what the camera is allowed to hit, which is a different set of parts
     return col::surface(wx, wz, 1e9f, outY, 2);
-}
-
-bool wmap_mesh_cam_touching(const float* p, float radius)
-{
-    return col::overlaps(p, radius, 2);
-}
-
-bool wmap_mesh_cam_push(float* p, float radius)
-{
-    return col::push_out(p, radius, 2);
-}
-
-bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY)
-{
-    // only what is at or under the lens: a canopy overhead is not in the
-    // way of a camera passing beneath it
-    return col::surface(wx, wz, yMax, outY, 2);
 }
 
 float wmap_cam_block_height(float wx, float wz)

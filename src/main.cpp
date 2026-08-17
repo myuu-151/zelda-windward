@@ -5535,8 +5535,8 @@ constexpr int kShadowResFar = 4096;
             // and following that frame by frame is the drilling. Coming in
             // stays immediate; going back out waits until the way has
             // stayed clear, then eases.
+            static float held = 1e9f, wait = 0.0f;
             {
-                static float held = 1e9f, wait = 0.0f;
                 if (target_boom <= held) {
                     held = target_boom;
                     wait = 0.5f;
@@ -5582,6 +5582,12 @@ constexpr int kShadowResFar = 4096;
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
                 app.cam.boom = SDL_max(2.0f, app.cam.boom - 0.30f);
+                // and remember it, or the held length eases the boom
+                // straight back into the surface it was just pulled out
+                // of -- the two correcting each other in turn is the
+                // drilling, one layer up from where it was before
+                held = SDL_min(held, app.cam.boom);
+                wait = 0.5f;
                 if (app.cam.boom <= 2.0f)
                     break;
             }

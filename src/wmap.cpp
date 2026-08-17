@@ -2387,6 +2387,12 @@ bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY)
     return col::resolve(pos, radius, height, groundY);
 }
 
+bool wmap_mesh_top(float wx, float wz, float* outY)
+{
+    // the highest surface there, which is what you want to be put on top of
+    return col::surface(wx, wz, 1e9f, outY);
+}
+
 float wmap_cam_block_height(float wx, float wz)
 {
     if (!gActive || gCamHeights.empty())

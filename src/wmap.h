@@ -51,6 +51,9 @@ bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi);
 // Push a capsule out of the geometry it overlaps and report what it stands
 // on. pos is his feet, moved in place. Returns whether anything supports him.
 bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY);
+// Highest surface at a spot, for putting him on top of the island rather
+// than wherever a one-surface field happened to say the ground was.
+bool wmap_mesh_top(float wx, float wz, float* outY);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

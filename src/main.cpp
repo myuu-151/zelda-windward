@@ -2635,7 +2635,14 @@ constexpr int kShadowResFar = 4096;
             app.player.pos.x = sx;
             app.player.pos.z = sz;
         }
-        const float spawn = ground_h(sx, sz);
+        // On top of the geometry, not on whatever the footprint says: that
+        // field now holds the LOWEST surface above water, so on an island
+        // with any overhang it can put him underneath the deck -- and the
+        // capsule pushes sideways without ever lifting, so he stays there.
+        float spawn = ground_h(sx, sz);
+        float meshTop = 0.0f;
+        if (wmap_mesh_ready() && wmap_mesh_top(sx, sz, &meshTop))
+            spawn = meshTop;
         if (spawn > -900.0f) app.player.pos.y = spawn;
         // keep the loftwing overhead rather than a chart away
         app.bird_pos = Vec3{sx, 14.0f, sz + 26.0f};
@@ -4152,7 +4159,10 @@ constexpr int kShadowResFar = 4096;
                         app.fall_vel = 0.0f;
                     }
                     if (app.player.pos.y < -25.0f) {  // gone: back to the start
-                        const float sy = ground_h(0.0f, 2.0f);
+                        float sy = ground_h(0.0f, 2.0f);
+                        float mt = 0.0f;
+                        if (wmap_mesh_ready() && wmap_mesh_top(0.0f, 2.0f, &mt))
+                            sy = mt;
                         app.player.pos = {0.0f, sy > -900.0f ? sy : 0.0f,
                                           2.0f};
                         app.fall_vel = 0.0f;

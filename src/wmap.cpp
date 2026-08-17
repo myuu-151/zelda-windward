@@ -152,7 +152,9 @@ static int gSpawnCell[2] = { -1, -1 };   // "spawn x y" in the chart
 // A props-only island: its heightmap exists for the shore field and for
 // something to stand on, but there is no ground to draw -- the model the
 // props place IS the island, the way the built-in test island is.
-static bool gPropsOnly = false;      // every island the chart names
+static bool gPropsOnly = false;
+// per-quadrant wind ribbon height from the chart; 0 means "as the game has it"
+static float gWindH[8][8] = {};      // every island the chart names
 static int gLoadedCell[2] = { -99, -99 };  // which one is resident
 static float gIslandTop = 0.0f;   // highest terrain point, world units
 static float gTestRadius = 26.0f, gTestTop = 6.0f;
@@ -1368,6 +1370,10 @@ bool wmap_load(const char* exeBase, float islandYConst, float waterSkim)
                 gScale = SDL_max(0.1f, wl);
                 TER_HALF = 24.0f * gScale;
             }
+            else if (sscanf(line, "wind %d %d %f", &x, &y, &wl) == 3) {
+                if (x >= 0 && y >= 0 && x < 8 && y < 8)
+                    gWindH[y][x] = wl;
+            }
             else if (sscanf(line, "spawn %d %d", &x, &y) == 2) {
                 gSpawnCell[0] = x;
                 gSpawnCell[1] = y;
@@ -2056,6 +2062,19 @@ void wmap_loaded_cell(int* cx, int* cy)
 }
 
 // where the chart says the game should start, if it says at all
+// the height the chart asks for at a world position, or 0 for the default
+float wmap_wind_height(float wx, float wz)
+{
+    if (!gActive)
+        return 0.0f;
+    const float off = (gChartSize - 1) * 0.5f;
+    const int cx = (int)(wx / gQuadSize + off + 0.5f);
+    const int cy = (int)(wz / gQuadSize + off + 0.5f);
+    if (cx < 0 || cy < 0 || cx >= 8 || cy >= 8)
+        return 0.0f;
+    return gWindH[cy][cx];
+}
+
 bool wmap_spawn_center(float* x, float* z)
 {
     if (gSpawnCell[0] < 0)

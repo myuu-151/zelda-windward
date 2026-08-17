@@ -2632,7 +2632,11 @@ int main(int argc, char** argv)
                 wz += (std::floor(wrand() * 3.0f) - 1.0f) * quad;
             }
         }
-        w.origin = {wx + std::cos(ang) * rad, 7.0f + wrand() * 13.0f,
+        // a quadrant can set its own ribbon height in the chart, since
+        // these sit in world space and an island's deck does not
+        const float wh = wmap_wind_height(wx, wz);
+        w.origin = {wx + std::cos(ang) * rad,
+                    (wh > 0.01f ? wh : 7.0f) + wrand() * 13.0f,
                     wz + std::sin(ang) * rad};
         // fixed world wind, matching the sky's cloud drift and the tree sway
         w.fwd = normalize({-1.0f, 0.0f, -0.35f});

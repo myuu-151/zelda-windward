@@ -49,6 +49,8 @@ bool wmap_test_island(float* x, float* z);
 // the quadrant the chart starts the player in ("spawn <x> <y>"); false
 // when the chart does not say, and the loaded island is used instead
 bool wmap_spawn_center(float* x, float* z);
+// wind ribbon height the chart asks for at a world position; 0 = default
+float wmap_wind_height(float wx, float wz);
 // chart readout for the on-screen map: grid size, quadrant spacing in
 // world units, which cells hold an island, and which cell is which
 int wmap_chart_size();

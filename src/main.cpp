@@ -1788,13 +1788,16 @@ struct OrbitCamera {
         return clear_dist_at(0.0f);
     }
 
+    // how far the lens has stepped off its arc to get round something
+    Vec3 push{};
+
     Vec3 eye() const
     {
         // the whisper of rotation rides the pull itself, so zoom-out and
         // tilt are one continuous motion (and reverse together)
         // pulling out is a pure dolly; the low end couples downward tilt
         const Vec3 dirv = dir();
-        return target + dirv * (boom > 0.0f ? boom : want_dist());
+        return target + dirv * (boom > 0.0f ? boom : want_dist()) + push;
     }
 
 };
@@ -5517,14 +5520,28 @@ constexpr int kShadowResFar = 4096;
             // was clear again, and eased out once more -- for ever, with
             // him standing still. Walking the target down to a length whose
             // endpoint is clear gives it somewhere to settle.
-            for (int i = 0; i < 10 && wmap_mesh_ready(); ++i) {
-                const Vec3 e = app.cam.target + app.cam.dir() * target_boom;
-                const float ep[3] = { e.x, e.y, e.z };
-                if (!wmap_mesh_cam_touching(ep, 0.45f))
-                    break;
-                target_boom = std::max(0.6f, target_boom - 0.35f);
-                if (target_boom <= 0.6f)
-                    break;
+            // Slip past rather than pull in. Walking backwards into a
+            // trunk used to shorten the arm, dragging the view onto his
+            // back; stepping the lens around the surface keeps the shot's
+            // length and just eases it aside. Only if it cannot get clear
+            // that way -- more than a couple of units of shove, meaning it
+            // is deep inside something -- does the boom give as well.
+            if (wmap_mesh_ready()) {
+                const Vec3 raw = app.cam.target + app.cam.dir() * target_boom;
+                float p[3] = { raw.x, raw.y, raw.z };
+                Vec3 want{};
+                if (wmap_mesh_cam_push(p, 0.5f))
+                    want = Vec3{ p[0] - raw.x, p[1] - raw.y, p[2] - raw.z };
+                const float mag = std::sqrt(dot(want, want));
+                if (mag > 2.0f) {
+                    want = want * (2.0f / mag);
+                    target_boom = std::max(0.6f, target_boom - 0.35f);
+                }
+                const float pk =
+                    1.0f - std::exp(-14.0f * static_cast<float>(frame_dt));
+                app.cam.push = app.cam.push + (want - app.cam.push) * pk;
+            } else {
+                app.cam.push = Vec3{};
             }
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             // Pulling in was near-instant at 18, which reads as a snap the

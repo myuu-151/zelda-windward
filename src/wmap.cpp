@@ -2355,6 +2355,54 @@ static bool overlaps(const float* p, float radius, Uint8 mask)
     return false;
 }
 
+// Push a point out of what it overlaps, along the shortest way out. This is
+// how the lens gets past a trunk rather than into it: the boom keeps its
+// length and the eye steps around the surface.
+static bool push_out(float* p, float radius, Uint8 mask)
+{
+    if (!ready)
+        return false;
+    bool moved = false;
+    for (int iter = 0; iter < 4; iter++) {
+        bool any = false;
+        const int i0 = SDL_clamp((int)((p[0] - radius - ox) / kCell), 0, nx - 1);
+        const int i1 = SDL_clamp((int)((p[0] + radius - ox) / kCell), 0, nx - 1);
+        const int j0 = SDL_clamp((int)((p[2] - radius - oz) / kCell), 0, nz - 1);
+        const int j1 = SDL_clamp((int)((p[2] + radius - oz) / kCell), 0, nz - 1);
+        for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++)
+                for (int k : grid[(size_t)j * nx + i]) {
+                    if (!(flags[k] & mask))
+                        continue;
+                    const float* T = &tris[(size_t)k * 9];
+                    float cp[3];
+                    closest_on_tri(T, p, cp);
+                    float d[3] = { p[0]-cp[0], p[1]-cp[1], p[2]-cp[2] };
+                    float len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                    if (len >= radius)
+                        continue;
+                    if (len < 1e-5f) {   // dead centre: use the face normal
+                        const float u[3] = { T[3]-T[0], T[4]-T[1], T[5]-T[2] };
+                        const float v[3] = { T[6]-T[0], T[7]-T[1], T[8]-T[2] };
+                        d[0] = u[1]*v[2]-u[2]*v[1];
+                        d[1] = u[2]*v[0]-u[0]*v[2];
+                        d[2] = u[0]*v[1]-u[1]*v[0];
+                        len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                        if (len < 1e-6f)
+                            continue;
+                    }
+                    const float sc = (radius - len) / len;
+                    p[0] += d[0] * sc;
+                    p[1] += d[1] * sc;
+                    p[2] += d[2] * sc;
+                    any = moved = true;
+                }
+        if (!any)
+            break;
+    }
+    return moved;
+}
+
 static bool resolve(float* pos, float radius, float height, float* groundY)
 {
     if (!ready)
@@ -2489,6 +2537,11 @@ bool wmap_mesh_top_cam(float wx, float wz, float* outY)
 bool wmap_mesh_cam_touching(const float* p, float radius)
 {
     return col::overlaps(p, radius, 2);
+}
+
+bool wmap_mesh_cam_push(float* p, float radius)
+{
+    return col::push_out(p, radius, 2);
 }
 
 bool wmap_mesh_cam_below(float wx, float wz, float yMax, float* outY)

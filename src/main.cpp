@@ -5526,9 +5526,28 @@ constexpr int kShadowResFar = 4096;
                 // view is clipped against stands further out than that.
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
-                target_boom = std::max(0.6f, target_boom - 0.30f);
-                if (target_boom <= 0.6f)
+                target_boom = std::max(2.0f, target_boom - 0.30f);
+                if (target_boom <= 2.0f)
                     break;
+            }
+            // The length it settles on swings as he moves -- measured
+            // between four and nine units while walking past one trunk --
+            // and following that frame by frame is the drilling. Coming in
+            // stays immediate; going back out waits until the way has
+            // stayed clear, then eases.
+            {
+                static float held = 1e9f, wait = 0.0f;
+                if (target_boom <= held) {
+                    held = target_boom;
+                    wait = 0.5f;
+                } else {
+                    wait -= static_cast<float>(frame_dt);
+                    if (wait <= 0.0f)
+                        held += (target_boom - held) *
+                                (1.0f - std::exp(-2.5f *
+                                                 static_cast<float>(frame_dt)));
+                }
+                target_boom = held;
             }
             if (app.cam.boom <= 0.0f) app.cam.boom = target_boom;
             // Pulling in was near-instant at 18, which reads as a snap the
@@ -5551,6 +5570,7 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
+            }
             // Immediate, on where the lens actually is rather than where it
             // is heading. Easing towards a shortened target takes frames,
             // and at running speed the surface arrives first -- which is
@@ -5562,8 +5582,8 @@ constexpr int kShadowResFar = 4096;
                 const float ep[3] = { e.x, e.y, e.z };
                 if (!wmap_mesh_cam_touching(ep, 1.1f))
                     break;
-                app.cam.boom = SDL_max(0.5f, app.cam.boom - 0.30f);
-                if (app.cam.boom <= 0.5f)
+                app.cam.boom = SDL_max(2.0f, app.cam.boom - 0.30f);
+                if (app.cam.boom <= 2.0f)
                     break;
             }
             // the climb eases in quickly and settles back slowly, so it

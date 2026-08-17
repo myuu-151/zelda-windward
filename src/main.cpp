@@ -5570,7 +5570,6 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
-            }
             // Immediate, on where the lens actually is rather than where it
             // is heading. Easing towards a shortened target takes frames,
             // and at running speed the surface arrives first -- which is

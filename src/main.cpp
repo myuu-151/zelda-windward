@@ -4096,10 +4096,9 @@ constexpr int kShadowResFar = 4096;
                             at = before + delta * ((float)st / steps);
                             float p[3] = { at.x, at.y, at.z };
                             float gy = 0.0f;
-                            if (wmap_mesh_resolve(p, 0.35f, 1.7f, &gy)) {
-                                app.mesh_ground = gy;
-                                app.mesh_grounded = true;
-                            }
+                            // walls only: what he stands on is decided
+                            // below, by looking straight down
+                            wmap_mesh_resolve(p, 0.35f, 1.7f, &gy);
                             at = { p[0], p[1], p[2] };
                         }
                         app.player.pos = at;
@@ -4119,19 +4118,20 @@ constexpr int kShadowResFar = 4096;
                     // surface per spot and disagrees with the geometry the
                     // moment anything overhangs.
                     if (wmap_mesh_ready()) {
-                        float p[3] = { app.player.pos.x, app.player.pos.y,
-                                       app.player.pos.z };
-                        float gy = 0.0f;
-                        if (wmap_mesh_resolve(p, 0.35f, 1.7f, &gy)) {
-                            app.mesh_ground = gy;
-                            app.mesh_grounded = true;
-                        }
-                        app.player.pos = { p[0], p[1], p[2] };
-                        gh = app.mesh_grounded && app.mesh_ground >
-                                     app.player.pos.y - 1.2f
-                                 ? app.mesh_ground
+                        // Straight down from the feet, not whatever the
+                        // capsule happened to touch: any raised triangle
+                        // beside him counts as a contact, and taking the
+                        // highest of those stood him above his own ground.
+                        // The ceiling keeps a branch out of it -- a knee
+                        // above him while walking, his feet while falling.
+                        const float ceiling =
+                            app.player.pos.y +
+                            (app.fall_vel == 0.0f ? 1.1f : 0.05f);
+                        float my = 0.0f;
+                        gh = wmap_mesh_floor(app.player.pos.x,
+                                             app.player.pos.z, ceiling, &my)
+                                 ? my
                                  : -1000.0f;
-                        app.mesh_grounded = false;
                     }
                     const bool on_isle = gh > -900.0f;
                     float floor_y = on_isle ? gh : kWaterSkim;

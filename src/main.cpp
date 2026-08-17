@@ -5527,15 +5527,38 @@ constexpr int kShadowResFar = 4096;
             // that way -- more than a couple of units of shove, meaning it
             // is deep inside something -- does the boom give as well.
             if (wmap_mesh_ready()) {
-                const Vec3 raw = app.cam.target + app.cam.dir() * target_boom;
-                float p[3] = { raw.x, raw.y, raw.z };
+                const Vec3 d = app.cam.dir();
+                auto inside = [&](float t) {
+                    const Vec3 e = app.cam.target + d * t;
+                    const float p[3] = { e.x, e.y, e.z };
+                    return wmap_mesh_cam_touching(p, 0.45f);
+                };
                 Vec3 want{};
-                if (wmap_mesh_cam_push(p, 0.5f))
-                    want = Vec3{ p[0] - raw.x, p[1] - raw.y, p[2] - raw.z };
-                const float mag = std::sqrt(dot(want, want));
-                if (mag > 2.0f) {
-                    want = want * (2.0f / mag);
-                    target_boom = std::max(0.6f, target_boom - 0.35f);
+                if (inside(target_boom)) {
+                    // He is walking into the tree with the lens on the far
+                    // side of it, so where the camera wants to sit is now
+                    // within the trunk. Come in along the arm to the last
+                    // length that is clear -- up beside him, in front of
+                    // the tree -- rather than staying put and looking out
+                    // from inside the bark.
+                    float clear = 0.8f;
+                    for (float t = target_boom; t >= 0.8f; t -= 0.2f)
+                        if (!inside(t)) {
+                            clear = t;
+                            break;
+                        }
+                    target_boom = clear;
+                } else {
+                    // Only brushing it: step the lens aside and keep the
+                    // shot's length.
+                    const Vec3 raw = app.cam.target + d * target_boom;
+                    float p[3] = { raw.x, raw.y, raw.z };
+                    if (wmap_mesh_cam_push(p, 0.5f))
+                        want = Vec3{ p[0] - raw.x, p[1] - raw.y,
+                                     p[2] - raw.z };
+                    const float mag = std::sqrt(dot(want, want));
+                    if (mag > 2.0f)
+                        want = want * (2.0f / mag);
                 }
                 const float pk =
                     1.0f - std::exp(-14.0f * static_cast<float>(frame_dt));

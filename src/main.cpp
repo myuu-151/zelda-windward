@@ -2321,9 +2321,16 @@ int main(int argc, char** argv)
         constexpr float kSnapFar = 32.0f;
         const Vec3 center{std::round(focus.x / kSnapFar) * kSnapFar, 0.0f,
                           std::round(focus.z / kSnapFar) * kSnapFar};
+        // Wide enough to reach the next island along. 520 units covered
+        // barely the one under your feet -- quadrants sit 600 apart and
+        // streaming keeps an island drawn out to 2200 -- so the island
+        // across the water had no cascade at all and its deck came out
+        // bare however much was cast into the map. 1200 across at 2048 is
+        // 0.59 per texel: a tree reads as a soft blob from there, which is
+        // all it can be, and the near cascade still owns everything close.
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 320.0f, center, {0, 1, 0});
-        return mat4_ortho(-260.0f, 260.0f, -260.0f, 260.0f, 20.0f, 640.0f) *
+            mat4_look_at(center + sun_dir * 700.0f, center, {0, 1, 0});
+        return mat4_ortho(-600.0f, 600.0f, -600.0f, 600.0f, 20.0f, 1400.0f) *
                view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});

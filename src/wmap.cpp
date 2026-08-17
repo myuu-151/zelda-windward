@@ -2220,9 +2220,113 @@ static void build_impl()
     SDL_Log("wmap: mesh collision -- %d triangles, %dx%d cells", ntri, nx, nz);
 }
 
-// Height of the triangle surface directly under (x, z), taking the highest
-// that is no higher than yMax. That ceiling is the whole point: pass the
-// feet and a branch overhead is not a candidate, while the deck under it is.
+// Closest point on a triangle to p, the standard Ericson construction.
+static void closest_on_tri(const float* T, const float* p, float* out)
+{
+    const float A[3] = { T[0], T[1], T[2] };
+    const float B[3] = { T[3], T[4], T[5] };
+    const float C[3] = { T[6], T[7], T[8] };
+    float ab[3], ac[3], ap[3];
+    for (int i = 0; i < 3; i++) {
+        ab[i] = B[i] - A[i];
+        ac[i] = C[i] - A[i];
+        ap[i] = p[i] - A[i];
+    }
+    auto d3 = [](const float* u, const float* v) {
+        return u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    };
+    const float d1 = d3(ab, ap), d2 = d3(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) { for (int i = 0; i < 3; i++) out[i] = A[i]; return; }
+    float bp[3];
+    for (int i = 0; i < 3; i++) bp[i] = p[i] - B[i];
+    const float d3b = d3(ab, bp), d4 = d3(ac, bp);
+    if (d3b >= 0.0f && d4 <= d3b) { for (int i = 0; i < 3; i++) out[i] = B[i]; return; }
+    const float vc = d1 * d4 - d3b * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3b <= 0.0f) {
+        const float v = d1 / (d1 - d3b);
+        for (int i = 0; i < 3; i++) out[i] = A[i] + ab[i] * v;
+        return;
+    }
+    float cp[3];
+    for (int i = 0; i < 3; i++) cp[i] = p[i] - C[i];
+    const float d5 = d3(ab, cp), d6 = d3(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) { for (int i = 0; i < 3; i++) out[i] = C[i]; return; }
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        for (int i = 0; i < 3; i++) out[i] = A[i] + ac[i] * w;
+        return;
+    }
+    const float va = d3b * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3b) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3b) / ((d4 - d3b) + (d5 - d6));
+        for (int i = 0; i < 3; i++) out[i] = B[i] + (C[i] - B[i]) * w;
+        return;
+    }
+    const float den = 1.0f / (va + vb + vc);
+    const float v = vb * den, w = vc * den;
+    for (int i = 0; i < 3; i++) out[i] = A[i] + ab[i] * v + ac[i] * w;
+}
+
+// Push a capsule out of everything it overlaps, a few times over so that
+// corners settle. Surfaces that face up enough to stand on report the
+// height they support him at; the rest simply push sideways, which is what
+// makes a trunk a wall and a branch overhead nothing at all.
+static bool resolve(float* pos, float radius, float height, float* groundY)
+{
+    if (!ready)
+        return false;
+    bool grounded = false;
+    float best = -1e9f;
+    for (int iter = 0; iter < 4; iter++) {
+        const int i0 = SDL_clamp((int)((pos[0] - radius - ox) / kCell), 0, nx - 1);
+        const int i1 = SDL_clamp((int)((pos[0] + radius - ox) / kCell), 0, nx - 1);
+        const int j0 = SDL_clamp((int)((pos[2] - radius - oz) / kCell), 0, nz - 1);
+        const int j1 = SDL_clamp((int)((pos[2] + radius - oz) / kCell), 0, nz - 1);
+        bool moved = false;
+        for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++)
+                for (int k : grid[(size_t)j * nx + i]) {
+                    const float* T = &tris[(size_t)k * 9];
+                    // the capsule's segment, feet to head
+                    const float lo = pos[1] + radius, hi = pos[1] + height - radius;
+                    float q[3] = { pos[0], 0.0f, pos[2] };
+                    // closest point on the segment to the triangle centre
+                    const float cy = (T[1] + T[4] + T[7]) / 3.0f;
+                    q[1] = SDL_clamp(cy, lo, hi);
+                    float cp[3];
+                    closest_on_tri(T, q, cp);
+                    float d[3] = { q[0] - cp[0], q[1] - cp[1], q[2] - cp[2] };
+                    float len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                    if (len >= radius || len < 1e-6f)
+                        continue;
+                    // triangle normal, for deciding floor from wall
+                    const float u[3] = { T[3]-T[0], T[4]-T[1], T[5]-T[2] };
+                    const float v[3] = { T[6]-T[0], T[7]-T[1], T[8]-T[2] };
+                    float n[3] = { u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2],
+                                   u[0]*v[1]-u[1]*v[0] };
+                    const float nl = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+                    if (nl > 1e-6f) { n[0]/=nl; n[1]/=nl; n[2]/=nl; }
+                    if (n[1] < 0.0f) { n[0]=-n[0]; n[1]=-n[1]; n[2]=-n[2]; }
+                    if (n[1] > 0.5f && cp[1] <= pos[1] + height * 0.5f) {
+                        // stand on it rather than being shoved off it
+                        if (cp[1] > best) { best = cp[1]; grounded = true; }
+                        continue;
+                    }
+                    const float push = (radius - len) / len;
+                    pos[0] += d[0] * push;
+                    pos[1] += d[1] * push * 0.0f;   // never lifted by a wall
+                    pos[2] += d[2] * push;
+                    moved = true;
+                }
+        if (!moved)
+            break;
+    }
+    if (grounded)
+        *groundY = best;
+    return grounded;
+}
+
 static bool surface(float x, float z, float yMax, float* out)
 {
     if (!ready)
@@ -2276,6 +2380,11 @@ bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi)
 {
     float y = 0.0f;
     return col::surface(wx, wz, yHi, &y) && y > yLo;
+}
+
+bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY)
+{
+    return col::resolve(pos, radius, height, groundY);
 }
 
 float wmap_cam_block_height(float wx, float wz)

@@ -1735,6 +1735,9 @@ struct OrbitCamera {
 };
 
 struct App {
+    // what the capsule last settled on, when an island carries real geometry
+    float mesh_ground = 0.0f;
+    bool mesh_grounded = false;
     SDL_Window* window = nullptr;
     SDL_GLContext gl = nullptr;
     bool running = true;
@@ -4049,23 +4052,19 @@ constexpr int kShadowResFar = 4096;
                 {
                     const Vec3 before = app.player.pos;
                     app.player.update(in, static_cast<float>(kFixedDt));
-                    if (!app.riding && app.fall_vel == 0.0f) {
+                    while (!app.riding && app.fall_vel == 0.0f) {
                         constexpr float kStep = 1.1f;   // knee height
                         const float here = app.player.pos.y;
                         const Vec3 after = app.player.pos;
-                        // With real geometry, a wall is something standing
-                        // between knee and shoulder -- a trunk stops him,
-                        // and the branch above it does not, which the old
-                        // one-surface test could not tell apart.
-                        bool blockX, blockZ;
-                        if (wmap_mesh_ready()) {
-                            const float lo = here + kStep, hi = here + 3.0f;
-                            blockX = wmap_mesh_wall(after.x, before.z, lo, hi);
-                            blockZ = wmap_mesh_wall(before.x, after.z, lo, hi);
-                        } else {
-                            blockX = ground_h(after.x, before.z) > here + kStep;
-                            blockZ = ground_h(before.x, after.z) > here + kStep;
-                        }
+                        // The capsule does the work where there is mesh
+                        // to push against; this axis test is for the
+                        // heightfield islands that have none.
+                        if (wmap_mesh_ready())
+                            break;
+                        const bool blockX =
+                            ground_h(after.x, before.z) > here + kStep;
+                        const bool blockZ =
+                            ground_h(before.x, after.z) > here + kStep;
                         if (blockX && blockZ) {
                             app.player.pos.x = before.x;
                             app.player.pos.z = before.z;
@@ -4074,6 +4073,29 @@ constexpr int kShadowResFar = 4096;
                         } else if (blockZ) {
                             app.player.pos.z = before.z;
                         }
+                        break;
+                    }
+                    // Sweep the capsule from where he was to where he wants
+                    // to be, in steps no longer than its radius, pushing out
+                    // of anything it meets. A point sample skips straight
+                    // through a trunk at speed; this cannot.
+                    if (wmap_mesh_ready() && !app.riding) {
+                        const Vec3 delta = app.player.pos - before;
+                        const float dist = std::sqrt(dot(delta, delta));
+                        const int steps =
+                            SDL_max(1, (int)(dist / 0.25f) + 1);
+                        Vec3 at = before;
+                        for (int st = 1; st <= steps; st++) {
+                            at = before + delta * ((float)st / steps);
+                            float p[3] = { at.x, at.y, at.z };
+                            float gy = 0.0f;
+                            if (wmap_mesh_resolve(p, 0.35f, 1.7f, &gy)) {
+                                app.mesh_ground = gy;
+                                app.mesh_grounded = true;
+                            }
+                            at = { p[0], p[1], p[2] };
+                        }
+                        app.player.pos = at;
                     }
                 }
                 if (app.player.wants_draw) {  // the attack unsheathed everything
@@ -4085,18 +4107,24 @@ constexpr int kShadowResFar = 4096;
                 {
                     float gh =
                         ground_h(app.player.pos.x, app.player.pos.z);
-                    // Ask the geometry what is under his feet: standing, he
-                    // may step up to a knee; falling, only what he is above
-                    // counts. Either way a branch overhead is not a floor,
-                    // because the deck below it is still there to find.
+                    // Where there is mesh, what the capsule settled on is
+                    // the floor -- not the heightfield, which holds one
+                    // surface per spot and disagrees with the geometry the
+                    // moment anything overhangs.
                     if (wmap_mesh_ready()) {
-                        const float ceiling =
-                            app.player.pos.y +
-                            (app.fall_vel == 0.0f ? 1.1f : 0.05f);
-                        float my = 0.0f;
-                        if (wmap_mesh_floor(app.player.pos.x, app.player.pos.z,
-                                            ceiling, &my))
-                            gh = SDL_max(gh > -900.0f ? gh : -1000.0f, my);
+                        float p[3] = { app.player.pos.x, app.player.pos.y,
+                                       app.player.pos.z };
+                        float gy = 0.0f;
+                        if (wmap_mesh_resolve(p, 0.35f, 1.7f, &gy)) {
+                            app.mesh_ground = gy;
+                            app.mesh_grounded = true;
+                        }
+                        app.player.pos = { p[0], p[1], p[2] };
+                        gh = app.mesh_grounded && app.mesh_ground >
+                                     app.player.pos.y - 1.2f
+                                 ? app.mesh_ground
+                                 : -1000.0f;
+                        app.mesh_grounded = false;
                     }
                     const bool on_isle = gh > -900.0f;
                     float floor_y = on_isle ? gh : kWaterSkim;

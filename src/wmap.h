@@ -48,6 +48,9 @@ bool wmap_mesh_ready();
 bool wmap_mesh_floor(float wx, float wz, float yMax, float* outY);
 // Whether anything stands between yLo and yHi there -- a wall, not a step.
 bool wmap_mesh_wall(float wx, float wz, float yLo, float yHi);
+// Push a capsule out of the geometry it overlaps and report what it stands
+// on. pos is his feet, moved in place. Returns whether anything supports him.
+bool wmap_mesh_resolve(float* pos, float radius, float height, float* groundY);
 // Every island on the chart as a disc -- x, z, radius, top height -- so the
 // sea can shade under them at ranges no shadow map reaches. Returns count.
 int wmap_shadow_discs(float* out4, int maxCount);

@@ -1051,14 +1051,22 @@ void main() {
     vec4 albedo = texture(uTex, vUV);
     if (uClip == 1 && albedo.a < 0.5) discard;
     vec3 n = normalize(vNrm);
+    // The shadow term is most of what shades this model: its cliffs shade
+    // its own deck, its tree shades the grass. Switching from the sharp
+    // map to the cascade at the near box's border meant that wherever the
+    // island's receiving surface sat inside the box while the cliff or
+    // tree casting on it stood outside the near frustum, the sharp map
+    // held nothing and the term came back fully lit -- the model looked
+    // emissive. Weight the two by position in the box, as the sea does.
     // lit from the sky's visible sun, so the cast shadows agree with it
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     float nl = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
     float shade = mix(0.62, 1.05, smoothstep(0.25, 0.75, nl));
     vec3 sc = vShadowPos.xyz * 0.5 + 0.5;
-    bool near_ok = all(greaterThanEqual(sc.xy, vec2(0.02))) &&
-                   all(lessThanEqual(sc.xy, vec2(0.98))) && sc.z <= 1.0;
-    float sh = near_ok ? shadow_factor(vShadowPos) : shadow_far_isle(vWorld);
+    float se = max(abs(sc.x - 0.5), abs(sc.y - 0.5)) * 2.0;
+    if (sc.z > 1.0) se = 2.0;
+    float sh = mix(shadow_factor(vShadowPos), shadow_far_isle(vWorld),
+                   smoothstep(0.72, 1.0, se));
     shade *= mix(0.58, 1.0, sh);
     vec3 col = albedo.rgb * uTint * shade;
     float d = length(vWorld - uEye);

@@ -1724,7 +1724,7 @@ struct OrbitCamera {
         const Vec3 d = dir_at(extra);
         const float want = want_dist();
         constexpr float kSkin = 0.6f;
-        constexpr float kMinDist = 0.3f;   // last resort: right at his head
+        constexpr float kMinDist = 1.0f;   // last resort: close over him
         constexpr float kIgnore = 1.3f;    // his own footing is not a wall
         constexpr int kSteps = 28;
         // What is in the lens's way at the height the lens is at. Taking
@@ -5475,7 +5475,16 @@ constexpr int kShadowResFar = 4096;
             // springing the moment the way is clear.
             const float rate = target_boom < app.cam.boom ? 6.0f : 2.5f;
             const float k = 1.0f - std::exp(-rate * static_cast<float>(frame_dt));
-            app.cam.boom += (target_boom - app.cam.boom) * k;
+            // A speed limit on top of the easing. Beside a trunk the test
+            // flips between blocked and clear as he moves, so the target
+            // jumps the whole length of the boom and back; easing a jump
+            // that big still arrives as a lurch. Capping how far it may
+            // travel in a second turns a flapping target into a drift.
+            float step = (target_boom - app.cam.boom) * k;
+            const float lim = (step < 0.0f ? 9.0f : 5.0f) *
+                              static_cast<float>(frame_dt);
+            step = SDL_clamp(step, -lim, lim);
+            app.cam.boom += step;
             // the climb eases in quickly and settles back slowly, so it
             // reads as the camera riding over the rock, not teleporting
             const float lk = 1.0f - std::exp(
@@ -5485,7 +5494,9 @@ constexpr int kShadowResFar = 4096;
             // Backstop: easing takes frames, and a frame spent inside the
             // rock is a frame of grey screen. Close the boom immediately
             // while the eye is buried.
-            for (int i = 0; i < 12; ++i) {
+            // at most a couple of bites per frame: twelve of them was a
+            // snap however small each one was
+            for (int i = 0; i < 2; ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
                 // At the lens's height, not the highest thing at that
                 // spot. ground_h reports the top surface, so a canopy

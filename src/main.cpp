@@ -5485,7 +5485,6 @@ constexpr int kShadowResFar = 4096;
                               static_cast<float>(frame_dt);
             step = SDL_clamp(step, -lim, lim);
             app.cam.boom += step;
-            }
             // the climb eases in quickly and settles back slowly, so it
             // reads as the camera riding over the rock, not teleporting
             const float lk = 1.0f - std::exp(

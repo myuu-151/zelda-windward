@@ -1391,7 +1391,8 @@ uniform vec4 uDiscs[16];   // x, z, radius, top height
 
 // Islands as discs, projected along the sun onto the sea. The shadow map
 // only covers water near the player and the marched field only knows the
-// loaded island, so this is what keeps shadows under every island however
+)GLSL"
+R"GLSL(// loaded island, so this is what keeps shadows under every island however
 // far away you fly.
 // Foam for islands that are not the loaded one: they have no shore field,
 // so ring their disc instead -- a solid rim at the waterline plus dashes

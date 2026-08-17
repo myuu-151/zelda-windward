@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <array>
 #include "cgltf.h"
 #include "stb_image.h"
 
@@ -993,6 +994,22 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
         cgltf_free(d);
         return false;
     }
+    // Top/bottom colours the editor pulled out of each Blender Color
+    // Ramp on import, saved beside the model. glTF has no way to carry a
+    // ramp, so without these a stylised material arrives as its flat base
+    // colour -- white leaves over a grayscale mask.
+    std::unordered_map<std::string, std::array<float, 6>> grads;
+    {
+        FILE* gf = fopen((path + ".grad").c_str(), "rb");
+        if (gf) {
+            char nm[256];
+            float t0, t1, t2, b0, b1, b2;
+            while (fscanf(gf, "%255s %f %f %f %f %f %f", nm, &t0, &t1, &t2,
+                          &b0, &b1, &b2) == 7)
+                grads[nm] = { t0, t1, t2, b0, b1, b2 };
+            fclose(gf);
+        }
+    }
     std::vector<float> data;
     float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
     for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
@@ -1019,13 +1036,23 @@ static bool load_prop_glb(PropMesh& m, const std::string& path)
             if (!pos)
                 continue;
             PropMat mat;
+            if (pr.material && pr.material->name) {
+                mat.name = pr.material->name;
+                auto gi = grads.find(mat.name);
+                if (gi != grads.end())
+                    for (int k = 0; k < 3; k++) {
+                        mat.kd[k] = gi->second[k];
+                        mat.ka[k] = gi->second[3 + k];
+                    }
+            }
             if (pr.material && pr.material->has_pbr_metallic_roughness) {
                 const cgltf_pbr_metallic_roughness& pbr =
                     pr.material->pbr_metallic_roughness;
-                for (int k = 0; k < 3; k++) {
-                    mat.kd[k] = pbr.base_color_factor[k];
-                    mat.ka[k] = pbr.base_color_factor[k] * 0.72f;
-                }
+                if (grads.find(mat.name) == grads.end())
+                    for (int k = 0; k < 3; k++) {
+                        mat.kd[k] = pbr.base_color_factor[k];
+                        mat.ka[k] = pbr.base_color_factor[k] * 0.72f;
+                    }
                 if (pbr.base_color_texture.texture &&
                     pbr.base_color_texture.texture->image) {
                     const cgltf_image* im = pbr.base_color_texture.texture->image;

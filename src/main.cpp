@@ -2250,14 +2250,15 @@ int main(int argc, char** argv)
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
             mat4_look_at(center + sun_dir * 280.0f, center, {0, 1, 0});
-        // 4096 texels spread over 410 units is 0.10 each, which is why
-        // the shadows look soft. Beyond about 140 units the sea is shaded
-        // by the marched shore field and by sun-projected discs rather than
-        // by this map, so the width past that was buying very little and
-        // costing detail everywhere you actually stand. 240 across is 0.059
-        // per texel -- nearly twice the detail, and still well past the
-        // shore of any island you are on or have just left.
-        return mat4_ortho(-120.0f, 120.0f, -120.0f, 120.0f, 20.0f, 560.0f) * view;
+        // Back to what it was when leaf shadows still read as leaves: 4096
+        // texels across 112 units is 0.027 each. Widening this to 410 for
+        // distant casters made it 0.10 -- four times coarser, and the
+        // reason the tree's shadow went from individual leaves to a blob.
+        // Distance is covered instead by the marched shore field and the
+        // sun-projected discs, which exist for exactly that. If a shadow
+        // now drops away too early while flying off an island, the answer
+        // is a second cascade rather than widening this one again.
+        return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 560.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 

@@ -5549,7 +5549,6 @@ constexpr int kShadowResFar = 4096;
             // while the eye is buried.
             // at most a couple of bites per frame: twelve of them was a
             // snap however small each one was
-            }
             for (int i = 0; i < (wmap_mesh_ready() ? 0 : 2); ++i) {
                 const Vec3 e = app.cam.target + app.cam.dir() * app.cam.boom;
                 // At the lens's height, not the highest thing at that

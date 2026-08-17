@@ -2249,16 +2249,17 @@ int main(int argc, char** argv)
         const Vec3 center{std::round(focus.x / kSnap) * kSnap, 0.0f,
                           std::round(focus.z / kSnap) * kSnap};
         const Mat4 view =
-            mat4_look_at(center + sun_dir * 280.0f, center, {0, 1, 0});
-        // Back to what it was when leaf shadows still read as leaves: 4096
-        // texels across 112 units is 0.027 each. Widening this to 410 for
-        // distant casters made it 0.10 -- four times coarser, and the
-        // reason the tree's shadow went from individual leaves to a blob.
-        // Distance is covered instead by the marched shore field and the
-        // sun-projected discs, which exist for exactly that. If a shadow
-        // now drops away too early while flying off an island, the answer
-        // is a second cascade rather than widening this one again.
-        return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 560.0f) * view;
+            mat4_look_at(center + sun_dir * 90.0f, center, {0, 1, 0});
+        // Width AND depth both matter, and the depth is what broke the
+        // shadows. This was 20..180 when they read correctly; it had grown
+        // to 20..560 for distant casters, and the bias in the shadow
+        // lookups is a NORMALISED depth offset -- so tripling the range
+        // triples what that bias means in world units, 0.11 to 0.38. A
+        // shadow biased that far slides along the light direction and
+        // detaches from whatever cast it, which is the offset. Back to the
+        // range that worked, with the sun eye at the distance that suits
+        // it.
+        return mat4_ortho(-56.0f, 56.0f, -56.0f, 56.0f, 20.0f, 180.0f) * view;
     };
     Mat4 light_vp = make_light_vp({0.0f, 0.0f, 0.0f});
 
@@ -5014,6 +5015,40 @@ int main(int argc, char** argv)
         {
             glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
             glViewport(0, 0, kShadowRes, kShadowRes);
+#ifndef ZELDA_RETAIL
+            // SHADOWDUMP=<file.pgm> writes the depth map once, a few
+            // seconds in, so where a caster lands in it can be looked at
+            // rather than inferred.
+            static int dump_at = -2;
+            if (dump_at == -2)
+                dump_at = SDL_getenv("SHADOWDUMP") ? 150 : -1;
+            if (dump_at > 0 && --dump_at == 0) {
+                std::vector<float> px((size_t)kShadowRes * kShadowRes);
+                glFinish();
+                glReadPixels(0, 0, kShadowRes, kShadowRes, GL_DEPTH_COMPONENT,
+                             GL_FLOAT, px.data());
+                float lo = 1.0f, hi = 0.0f;
+                for (float v : px) { if (v < lo) lo = v; if (v < 1.0f && v > hi) hi = v; }
+                const char* out = SDL_getenv("SHADOWDUMP");
+                if (FILE* f = fopen(out, "wb")) {
+                    fprintf(f, "P5
+%d %d
+255
+", kShadowRes, kShadowRes);
+                    const float sp = (hi > lo) ? (hi - lo) : 1.0f;
+                    for (int y = kShadowRes - 1; y >= 0; y--)
+                        for (int x = 0; x < kShadowRes; x++) {
+                            float v = px[(size_t)y * kShadowRes + x];
+                            unsigned char b = v >= 1.0f ? 255
+                                : (unsigned char)(20 + 200 * (v - lo) / sp);
+                            fwrite(&b, 1, 1, f);
+                        }
+                    fclose(f);
+                    SDL_Log("shadow map written to %s (depth %.4f..%.4f)",
+                            out, lo, hi);
+                }
+            }
+#endif
             // depth writes must be on or the clear is a no-op and the map
             // keeps last frame's depths -- with a light frustum that moves
             // with the player, stale depths slide the shadow around

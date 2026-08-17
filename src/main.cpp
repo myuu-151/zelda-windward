@@ -221,16 +221,43 @@ float g_test_off[2] = {0.0f, 0.0f};   // its quadrant offset in the chart
 
 // world-space terrain height under (x, z); -1000 over open water. Both
 // islands are consulted, so you can walk on either one.
+// The island's top surface where it carries geometry, sampled around the
+// point rather than at it: a single sample drops into a gap between
+// triangles now and then, and the baked field underneath need not be the
+// deck -- which is how the bird ended up standing inside the island.
+static bool mesh_top_around(float x, float z, float* out)
+{
+    if (!wmap_mesh_ready())
+        return false;
+    static const float off[5][2] = {{0.0f, 0.0f},  {0.8f, 0.0f},
+                                    {-0.8f, 0.0f}, {0.0f, 0.8f},
+                                    {0.0f, -0.8f}};
+    bool any = false;
+    float best = -1e9f;
+    for (const auto& o : off) {
+        float y = 0.0f;
+        if (wmap_mesh_top(x + o[0], z + o[1], &y) && y > best) {
+            best = y;
+            any = true;
+        }
+    }
+    if (any)
+        *out = best;
+    return any;
+}
+
 float ground_h(float x, float z)
 {
+    float mt = 0.0f;
+    const bool hasMesh = mesh_top_around(x, z, &mt);
     float h = 0, sd = 0;
     if (g_hf.sample(x, z, &h, &sd) && h > -50.0f)
-        return h + kIslandY;
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
     if (g_test_hf.nx > 1 &&
         g_test_hf.sample(x - g_test_off[0], z - g_test_off[1], &h, &sd) &&
         h > -50.0f)
-        return h + kIslandY;
-    return -1000.0f;
+        return hasMesh ? std::max(h + kIslandY, mt) : h + kIslandY;
+    return hasMesh ? mt : -1000.0f;
 }
 
 // the solid floor anywhere: island terrain, or the sea skim height
@@ -4786,24 +4813,7 @@ constexpr int kShadowResFar = 4096;
                     // deck, so trusting it alone put the bird's floor
                     // inside the island.
                     float gh = ground_h(app.bird_pos.x, app.bird_pos.z);
-                    if (wmap_mesh_ready()) {
-                        // Sampled around him, not at one point: a single
-                        // sample lands in a gap between triangles now and
-                        // then, and falling back to the field there dropped
-                        // him through the island and back out. Kept as the
-                        // higher of the two so a miss can only ever leave
-                        // the old answer, never a lower one.
-                        static const float off[5][2] = {
-                            {0.0f, 0.0f}, {0.9f, 0.0f}, {-0.9f, 0.0f},
-                            {0.0f, 0.9f}, {0.0f, -0.9f}};
-                        for (const auto& o : off) {
-                            float ty = 0.0f;
-                            if (wmap_mesh_top(app.bird_pos.x + o[0],
-                                              app.bird_pos.z + o[1], &ty) &&
-                                ty > gh)
-                                gh = ty;
-                        }
-                    }
+
                     const bool over_isle = gh > -900.0f;
                     // over the island: normal floor is terrain + 2.5 (or the
                     // terrain itself when diving to land -- or under thrust,

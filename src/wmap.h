@@ -88,6 +88,34 @@ int wmap_chart_cells(int* out2, int maxCount);
 bool wmap_spawn_cell(int* cx, int* cy);
 void wmap_loaded_cell(int* cx, int* cy);
 
+// Teleports placed in the editor, in world space. Fills x, y, z, radius and
+// seed (0 = generate a fresh dungeon on every entry). Returns how many.
+int wmap_portal_count();
+bool wmap_portal_get(int i, float* xyz, float* radius, unsigned* seed);
+
+// Build a dungeon floor out of the "Dungeon" prop category and drop it into
+// the world well below the sea, where nothing else lives. Fills outEntrance
+// with where to put the player. Adds a return portal at the entrance, so the
+// same proximity test that sent him in brings him back. False if the kit is
+// not installed. Call wmap_clear_dungeon() to take it away again.
+bool wmap_spawn_dungeon(unsigned seed, float* outEntrance);
+// The indoor lights nearest a point -- torches and portals -- so anything
+// the client draws itself (the player, the bird) can be lit by the same set
+// the dungeon walls are. Fills pos[n*3], col[n*3], rad[n]; returns n.
+int wmap_indoor_lights(const float* fromXyz, int maxN, float* pos, float* col,
+                       float* rad);
+
+// Is there a shut door within reach of a point? Fills outXyz with its centre
+// so the caller can turn him to face it.
+bool wmap_door_near(const float* fromXyz, float reach, float* outXyz);
+// Open it: the door piece becomes the same wall with an open archway, and
+// collision is rebuilt so he can walk through. False if nothing was in reach.
+bool wmap_open_door(const float* fromXyz, float reach);
+void wmap_clear_dungeon();
+bool wmap_dungeon_active();
+// A portal whose seed reads as this one leads out rather than in.
+constexpr unsigned kPortalSeedExit = 0xFFFFFFFFu;
+
 void wmap_init_gl();   // after the GL context + loader are ready
 void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
                GLuint shadowTex, float timeSec, const Mat4& lightVPFar,

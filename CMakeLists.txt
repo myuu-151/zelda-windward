@@ -22,6 +22,7 @@ add_executable(zelda
     src/model.cpp
     src/wmap.cpp
     src/player.cpp
+    src/dungeon.cpp
 )
 target_include_directories(zelda PRIVATE third_party/cgltf third_party/stb)
 target_compile_definitions(zelda PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -92,6 +93,7 @@ add_executable(zelda_packed
     src/model.cpp
     src/wmap.cpp
     src/player.cpp
+    src/dungeon.cpp
     ${EMBED_SRCS}
 )
 target_include_directories(zelda_packed PRIVATE third_party/cgltf third_party/stb)

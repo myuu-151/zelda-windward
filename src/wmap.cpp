@@ -3,6 +3,7 @@
 // client's own: its sun direction, its 4096 depth-compare shadow map, its
 // horizon haze, so islands sit in the world like everything else.
 #include "wmap.h"
+#include "dungeon.h"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -103,6 +104,14 @@ struct PropInst {
 };
 static std::vector<PropMesh> gMeshes;
 static std::vector<PropInst> gProps;
+
+// Teleports placed in the editor. Stored in editor space at load and
+// converted with the props, so they land on the same ground he walks on.
+struct PortalInst {
+    float x, y, z, yaw, radius;
+    Uint32 seed;
+};
+static std::vector<PortalInst> gPortals;
 
 struct StyleOv {
     std::string tex;
@@ -494,6 +503,35 @@ uniform vec3 uEye;
 uniform float uBoundH;
 uniform int uHasTex;
 uniform int uGrayMask;
+// Indoors the sun does not reach: shading comes from a dim ambient plus a
+// handful of point lights (torches, the portal), so a room falls away into
+// the dark between them instead of sitting flat under a daylight key.
+#define MAX_LIGHTS 12
+uniform int uIndoor;
+uniform int uNumLights;
+uniform vec3 uLightPos[MAX_LIGHTS];
+uniform vec3 uLightCol[MAX_LIGHTS];
+uniform float uLightRad[MAX_LIGHTS];
+uniform float uTimeL;
+
+vec3 point_lights(vec3 p, vec3 n) {
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < uNumLights && i < MAX_LIGHTS; i++) {
+        vec3 d = uLightPos[i] - p;
+        float dist = length(d);
+        float r = max(uLightRad[i], 0.001);
+        if (dist > r) continue;
+        // smooth inverse-square-ish falloff that actually reaches zero
+        float x = clamp(1.0 - dist / r, 0.0, 1.0);
+        float att = x * x;
+        // half-lambert so faces turned away still catch some bounce
+        float nl = clamp(dot(n, d / max(dist, 0.001)) * 0.6 + 0.4, 0.0, 1.0);
+        // torches breathe, each on its own phase
+        float flick = 0.88 + 0.12 * sin(uTimeL * 6.1 + float(i) * 2.39);
+        sum += uLightCol[i] * (att * nl * flick);
+    }
+    return sum;
+}
 )GLSL";
     s += kShadowFn;
     s += R"GLSL(
@@ -510,6 +548,20 @@ void main() {
     col *= vVCol;
     const vec3 L = normalize(vec3(0.45, 0.35, -0.60));
     vec3 n = normalize(vNrm);
+    if (uIndoor == 1) {
+        // a cold, dim fill so unlit stone is readable but clearly dark,
+        // plus whatever the lamps in range contribute
+        vec3 amb = vec3(0.13, 0.145, 0.19);
+        float up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+        amb *= mix(0.72, 1.15, up);          // floors catch a touch more
+        vec3 lit = amb + point_lights(vWorld, n);
+        col *= lit;
+        // no haze underground -- distance falls into black instead
+        float dd = length(vWorld - uEye);
+        col = mix(col, vec3(0.0), smoothstep(45.0, 110.0, dd));
+        fragColor = vec4(col, 1.0);
+        return;
+    }
     float sf = shadow_any(vShadowPos, vWorld, length(vWorld - uEye));
     if (uGrayMask == 1) {
         float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
@@ -554,6 +606,7 @@ uniform mat4 uLightVP;
 uniform mat4 uModel;
 uniform float uTime;
 uniform float uBoundH;
+uniform float uWind;   // 0 indoors: a dungeon has no weather
 uniform int uGrayMask;
 out vec3 vNrm;
 out vec2 vUv;
@@ -566,14 +619,14 @@ out vec4 vShadowPos;
 // a steady downwind lean plus gusts, weighted by height above the base
 // so trunks stay planted, and a fine flutter on leaf cards
 vec3 wind_sway(vec3 p, float w, float t, int leafy) {
-    if (w <= 0.0) return p;
+    if (w <= 0.0 || uWind <= 0.0) return p;   // indoors nothing sways
     const vec2 W = normalize(vec2(-1.0, -0.35));
     float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
                  0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
     vec2 perp = vec2(-W.y, W.x);
     vec2 sway = W * (0.55 + gust) +
                 perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
-    p.xz += sway * (0.10 * w * w);
+    p.xz += sway * (0.10 * w * w) * uWind;
     if (leafy == 1)
         p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
                      cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
@@ -753,6 +806,7 @@ uniform mat4 uLightVP;
 uniform mat4 uModel;
 uniform float uTime;
 uniform float uBoundH;
+uniform float uWind;   // 0 indoors: a dungeon has no weather
 uniform int uGrayMask;
 out vec2 vUv;
 
@@ -760,14 +814,14 @@ out vec2 vUv;
 // a steady downwind lean plus gusts, weighted by height above the base
 // so trunks stay planted, and a fine flutter on leaf cards
 vec3 wind_sway(vec3 p, float w, float t, int leafy) {
-    if (w <= 0.0) return p;
+    if (w <= 0.0 || uWind <= 0.0) return p;   // indoors nothing sways
     const vec2 W = normalize(vec2(-1.0, -0.35));
     float gust = sin(t * 0.9 + (p.x + p.z) * 0.10) +
                  0.4 * sin(t * 2.1 + p.x * 0.13 + 1.7);
     vec2 perp = vec2(-W.y, W.x);
     vec2 sway = W * (0.55 + gust) +
                 perp * (0.35 * sin(t * 1.15 + p.z * 0.14 + 0.8));
-    p.xz += sway * (0.10 * w * w);
+    p.xz += sway * (0.10 * w * w) * uWind;
     if (leafy == 1)
         p.xz += vec2(sin(t * 5.7 + p.y * 2.1),
                      cos(t * 5.1 + p.x * 1.7)) * (0.020 * w);
@@ -804,6 +858,98 @@ void main() {
 )GLSL";
 
 // ---------------------------------------------------------------- helpers
+
+// Same swirling disc the editor draws, so a portal looks identical in both.
+// Procedural: one quad, no texture, arms wound by a log spiral.
+static const char* kPortalVS = R"(#version 330 core
+layout(location=0) in vec2 aPos;
+uniform mat4 uVP;
+uniform vec3 uCenter;
+uniform float uRadius;
+out vec2 vUv;
+void main(){
+    vUv = aPos;
+    vec3 w = uCenter + vec3(aPos.x * uRadius, 0.0, aPos.y * uRadius);
+    gl_Position = uVP * vec4(w, 1.0);
+}
+)";
+
+static const char* kPortalFS = R"(#version 330 core
+in vec2 vUv;
+uniform float uTime;
+out vec4 frag;
+void main(){
+    float r = length(vUv);
+    if (r > 1.0) discard;
+    float a = atan(vUv.y, vUv.x);
+    float wind = log(max(r, 0.04)) * 3.2;
+    float s = sin(3.0 * (a + wind) - uTime * 2.6);
+    float band = smoothstep(0.1, 0.95, s);
+    float core = smoothstep(1.0, 0.05, r);
+    float rim  = smoothstep(1.0, 0.82, r);
+    float pulse = 0.85 + 0.15 * sin(uTime * 3.0);
+    vec3 col = mix(vec3(0.10,0.30,0.95), vec3(0.70,0.95,1.00), band*core);
+    col = col * pulse + vec3(0.70,0.95,1.00) * pow(core, 6.0) * 0.9;
+    frag = vec4(col, (0.20 + band * 0.70) * core * rim);
+}
+)";
+
+static GLuint gPortalProg = 0, gPortalVao = 0, gPortalVbo = 0;
+
+// The kit has no lit wall torch -- torch_mounted is the bracket alone -- so
+// the fire is ours: a cylindrical billboard (upright, turned to face the eye)
+// with a procedural flame on it. Additive, so it reads as light rather than
+// a card.
+static const char* kFlameVS = R"(#version 330 core
+layout(location=0) in vec2 aPos;
+uniform mat4 uVP;
+uniform vec3 uPos;
+uniform vec3 uEye;
+uniform vec2 uSize;
+out vec2 vUv;
+void main(){
+    vUv = aPos;
+    vec3 toEye = normalize(uEye - uPos);
+    vec3 right = normalize(cross(vec3(0.0,1.0,0.0), toEye));
+    vec3 w = uPos + right * (aPos.x * uSize.x) + vec3(0.0,1.0,0.0) * (aPos.y * uSize.y);
+    gl_Position = uVP * vec4(w, 1.0);
+}
+)";
+
+static const char* kFlameFS = R"(#version 330 core
+in vec2 vUv;
+uniform float uTime;
+uniform float uSeed;
+out vec4 frag;
+float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+float noise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    f = f*f*(3.0-2.0*f);
+    return mix(mix(hash(i), hash(i+vec2(1,0)), f.x),
+               mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
+}
+void main(){
+    // teardrop: wide at the base, pinched at the tip
+    float y = vUv.y * 0.5 + 0.5;                  // 0 at bottom, 1 at top
+    float width = (1.0 - y) * 0.85 + 0.15;
+    float d = abs(vUv.x) / max(width, 0.001);
+    float t = uTime * 2.4 + uSeed;
+    float lick = noise(vec2(vUv.x * 2.0 + uSeed, y * 3.0 - t)) * 0.55;
+    float body = 1.0 - smoothstep(0.35, 1.0, d + lick * y);
+    body *= 1.0 - smoothstep(0.55, 1.0, y);       // fade out at the tip
+    if (body <= 0.001) discard;
+    vec3 hot  = vec3(1.00, 0.95, 0.70);
+    vec3 mid  = vec3(1.00, 0.55, 0.12);
+    vec3 cool = vec3(0.75, 0.16, 0.03);
+    vec3 col = mix(cool, mid, smoothstep(0.0, 0.5, body));
+    col = mix(col, hot, smoothstep(0.55, 1.0, body) * (1.0 - y * 0.6));
+    float flicker = 0.82 + 0.18 * sin(t * 5.3 + uSeed * 3.1);
+    frag = vec4(col * flicker, body * 0.9);
+}
+)";
+
+static GLuint gFlameProg = 0;
+
 
 static GLuint compile_prog(const char* vs, const char* fs)
 {
@@ -1034,6 +1180,7 @@ static bool load_wmap(const std::string& path)
     // ends here, which is how older maps keep loading unchanged.
     gCamHeights.clear();
     gPartFlags.clear();
+    gPortals.clear();
     // Trailing sections, each behind its own tag, in whatever order and
     // however many. Reading them in a fixed order consumed the tag of a
     // section that came first when the one expected was absent -- so a map
@@ -1043,7 +1190,30 @@ static bool load_wmap(const std::string& path)
         const long mark = ftell(f);
         if (fread(tag, 1, 8, f) != 8)
             break;
-        if (memcmp(tag, "CAMBLK01", 8) == 0) {
+        if (memcmp(tag, "CELLSZ01", 8) == 0) {
+            // The editor writes this one FIRST. Without a case for it the
+            // loop below hit an unknown tag straight away and stopped, so
+            // every section after it -- camera field, part flags -- was
+            // silently dropped on any map saved with a cell size.
+            float half = 0;
+            if (fread(&half, sizeof(float), 1, f) != 1)
+                break;
+        } else if (memcmp(tag, "PORTAL01", 8) == 0) {
+            Uint32 pn = 0;
+            if (fread(&pn, 4, 1, f) != 1 || pn > 4096)
+                break;
+            for (Uint32 i = 0; i < pn; i++) {
+                PortalInst p{};
+                if (fread(&p.x, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.y, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.z, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.yaw, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.radius, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.seed, 4, 1, f) != 1) break;
+                gPortals.push_back(p);
+            }
+            SDL_Log("wmap: map carries %d portal(s)", (int)gPortals.size());
+        } else if (memcmp(tag, "CAMBLK01", 8) == 0) {
             Uint32 cn = 0;
             if (fread(&cn, 4, 1, f) != 1 || cn != (Uint32)(HN * HN))
                 break;
@@ -2255,8 +2425,16 @@ static void build_impl()
     oz = lo[2];
     nx = (int)((hi[0] - lo[0]) / kCell) + 2;
     nz = (int)((hi[2] - lo[2]) / kCell) + 2;
-    if (nx < 1 || nz < 1 || (long long)nx * nz > 4000000)
+    if (nx < 1 || nz < 1 || (long long)nx * nz > 4000000) {
+        // The grid is uniform over the bounding box of every prop, so one
+        // instance placed far from the rest explodes the cell count and
+        // takes all collision with it. Worth saying out loud -- silently
+        // leaving ready = false looks exactly like "the map has no props".
+        SDL_Log("wmap: collision grid refused -- %dx%d cells over "
+                "x[%.0f..%.0f] z[%.0f..%.0f]; something is placed far from "
+                "everything else", nx, nz, lo[0], hi[0], lo[2], hi[2]);
         return;
+    }
     grid.assign((size_t)nx * nz, {});
     const int ntri = (int)(tris.size() / 9);
     for (int k = 0; k < ntri; k++) {
@@ -2679,6 +2857,265 @@ bool wmap_test_island(float* x, float* z)
     return true;
 }
 
+// Where a dungeon gets built. Far out across the sea so it cannot overlap
+// any charted island, but at a normal altitude: the client treats the sea as
+// a solid floor at kWaterSkim and respawns anyone who falls below y = -25,
+// so burying a dungeon deep underground bounced the player straight back to
+// the island the moment he arrived. Everything in it is an ordinary prop, so
+// it renders, collides and blocks the camera through the existing paths.
+// Offset from the loaded island, not an absolute spot far across the sea:
+// collision is a uniform grid over the bounding box of every prop, so a
+// dungeon parked 30km away blows the cell budget and disables collision for
+// the whole map. A few hundred units clear of the island is enough to never
+// overlap it and cheap to index.
+static constexpr float kDungeonOff = 700.0f;
+static constexpr float kDungeonY = 6.0f;   // clear of the waterline
+// A dungeon is its own world, not extra scenery bolted onto the island: the
+// island's props and portals are stashed while one is open and put back on
+// the way out. That keeps the collision grid tight (it spans the bounding box
+// of every prop, so mixing the two would stretch it across the sea) and means
+// nothing of the overworld can show up indoors.
+static std::vector<PropInst> gStashProps;
+static std::vector<PortalInst> gStashPortals;
+static std::vector<float> gFlames;     // world xyz per wall torch
+static bool gDungeonOn = false;
+
+bool wmap_dungeon_active()
+{
+    return gDungeonOn;
+}
+
+void wmap_clear_dungeon()
+{
+    if (!gDungeonOn)
+        return;
+    gProps.swap(gStashProps);
+    gPortals.swap(gStashPortals);
+    gStashProps.clear();
+    gStashPortals.clear();
+    gFlames.clear();
+    gDungeonOn = false;
+    build_collision();
+    SDL_Log("dungeon: closed, island restored (%d props)", (int)gProps.size());
+}
+
+bool wmap_spawn_dungeon(unsigned seed, float* outEntrance)
+{
+    wmap_clear_dungeon();
+
+    DungeonFloor fl;
+    dungeon_generate(seed, gCenter[0] + kDungeonOff, kDungeonY,
+                     gCenter[1] + kDungeonOff, &fl);
+    if (fl.pieces.empty())
+        return false;
+
+    std::unordered_map<std::string, int> byId;
+    for (int i = 0; i < (int)gMeshes.size(); i++)
+        byId[gMeshes[i].id] = i;
+
+    // stash the overworld and start from an empty world
+    gStashProps = gProps;
+    gStashPortals = gPortals;
+    gProps.clear();
+    gPortals.clear();
+    gFlames = fl.flames;
+
+    int placed = 0, missing = 0;
+    std::unordered_map<std::string, int> misses;
+    for (const DungeonPiece& p : fl.pieces) {
+        auto it = byId.find(p.id);
+        if (it == byId.end()) {
+            misses[p.id]++;
+            missing++;
+            continue;
+        }
+        // the kit is loaded lazily like any other prop
+        if (!load_prop_mesh(gMeshes[it->second])) {
+            misses[p.id]++;
+            missing++;
+            continue;
+        }
+        gProps.push_back({ it->second, p.x, p.y, p.z, p.yaw, 1.0f });
+        placed++;
+    }
+    if (!placed) {
+        SDL_Log("dungeon: no pieces placed -- is the Dungeon prop category "
+                "installed under the editor's assets/props?");
+        gProps.swap(gStashProps);          // put the island back
+        gPortals.swap(gStashPortals);
+        gStashProps.clear();
+        gStashPortals.clear();
+        gFlames.clear();
+        return false;
+    }
+    for (const auto& kv : misses)
+        SDL_Log("dungeon: missing piece '%s' x%d", kv.first.c_str(), kv.second);
+
+    // the way home, sitting on the tile he arrives on
+    PortalInst back{};
+    back.x = fl.entrance[0];
+    back.y = fl.entrance[1] + 0.05f;   // stand it on the tile, not in it
+    back.z = fl.entrance[2];
+    back.radius = 2.5f;
+    back.yaw = 0.0f;
+    back.seed = kPortalSeedExit;
+    gPortals.push_back(back);
+
+    gDungeonOn = true;
+    build_collision();
+
+    if (outEntrance) {
+        outEntrance[0] = fl.entrance[0];
+        // stand him clear of the return portal so he does not bounce back
+        outEntrance[1] = fl.entrance[1] + 0.2f;
+        outEntrance[2] = fl.entrance[2] + 6.0f;
+    }
+    SDL_Log("dungeon: seed %u -- %d rooms, %d pieces placed, %d missing",
+            seed, fl.rooms, placed, missing);
+    return true;
+}
+
+
+namespace {
+struct IndoorLight { float d2; float p[3]; float c[3]; float r; };
+
+// Torches are warm and reach further; a portal is cold and tighter. Sorted
+// by distance because callers only have room for a handful.
+std::vector<IndoorLight> gather_lights(const float* from)
+{
+    std::vector<IndoorLight> out;
+    if (!gDungeonOn)
+        return out;
+    out.reserve(gFlames.size() / 3 + gPortals.size());
+    auto add = [&](float x, float y, float z, const float* col, float r) {
+        const float dx = x - from[0], dy = y - from[1], dz = z - from[2];
+        IndoorLight L;
+        L.d2 = dx * dx + dy * dy + dz * dz;
+        L.p[0] = x; L.p[1] = y; L.p[2] = z;
+        L.c[0] = col[0]; L.c[1] = col[1]; L.c[2] = col[2];
+        L.r = r;
+        out.push_back(L);
+    };
+    const float warm[3] = { 1.35f, 0.72f, 0.30f };
+    const float cold[3] = { 0.35f, 0.65f, 1.30f };
+    for (size_t i = 0; i + 2 < gFlames.size(); i += 3)
+        add(gFlames[i], gFlames[i + 1], gFlames[i + 2], warm, 16.0f);
+    for (const PortalInst& pp : gPortals)
+        add(pp.x, pp.y + 1.0f, pp.z, cold, 12.0f);
+    std::sort(out.begin(), out.end(),
+              [](const IndoorLight& a, const IndoorLight& b) {
+                  return a.d2 < b.d2;
+              });
+    return out;
+}
+}  // namespace
+
+int wmap_indoor_lights(const float* fromXyz, int maxN, float* pos, float* col,
+                       float* rad)
+{
+    if (!gDungeonOn || maxN <= 0)
+        return 0;
+    const std::vector<IndoorLight> v = gather_lights(fromXyz);
+    const int n = (int)SDL_min((size_t)maxN, v.size());
+    for (int i = 0; i < n; i++) {
+        if (pos) { pos[i * 3] = v[i].p[0]; pos[i * 3 + 1] = v[i].p[1];
+                   pos[i * 3 + 2] = v[i].p[2]; }
+        if (col) { col[i * 3] = v[i].c[0]; col[i * 3 + 1] = v[i].c[1];
+                   col[i * 3 + 2] = v[i].c[2]; }
+        if (rad) rad[i] = v[i].r;
+    }
+    return n;
+}
+
+namespace {
+// Nearest shut door to a point, or -1. A door is only ever the doorway
+// piece -- once opened it is an arch and no longer matches, so the same door
+// cannot be opened twice.
+int nearest_door(const float* from, float reach)
+{
+    int best = -1;
+    float bestD2 = reach * reach;
+    for (int i = 0; i < (int)gProps.size(); i++) {
+        const PropMesh& pm = gMeshes[gProps[i].mesh];
+        if (pm.id != "Dungeon/wall_doorway")
+            continue;
+        const float dx = gProps[i].x - from[0];
+        const float dz = gProps[i].z - from[2];
+        const float dy = gProps[i].y - from[1];
+        // a doorway is 4 tall; only care that he is roughly on its floor
+        if (dy > 3.0f || dy < -3.0f)
+            continue;
+        const float d2 = dx * dx + dz * dz;
+        if (d2 < bestD2) {
+            bestD2 = d2;
+            best = i;
+        }
+    }
+    return best;
+}
+}  // namespace
+
+bool wmap_door_near(const float* fromXyz, float reach, float* outXyz)
+{
+    const int i = nearest_door(fromXyz, reach);
+    if (i < 0)
+        return false;
+    if (outXyz) {
+        outXyz[0] = gProps[i].x;
+        outXyz[1] = gProps[i].y;
+        outXyz[2] = gProps[i].z;
+    }
+    return true;
+}
+
+bool wmap_open_door(const float* fromXyz, float reach)
+{
+    const int i = nearest_door(fromXyz, reach);
+    if (i < 0)
+        return false;
+    // The kit ships no open door -- leaf and frame are one mesh with one
+    // material, so it cannot be swung. wall_doorway_sides is the same frame
+    // with the leaf gone: raycasting it finds nothing from the floor to 2.5
+    // up, where wall_doorway (and wall_arched, whose arch is only relief) is
+    // solid at every height.
+    int arch = -1;
+    for (int m = 0; m < (int)gMeshes.size(); m++)
+        if (gMeshes[m].id == "Dungeon/wall_doorway_sides") {
+            arch = m;
+            break;
+        }
+    if (arch < 0 || !load_prop_mesh(gMeshes[arch])) {
+        SDL_Log("door: no Dungeon/wall_doorway_sides to open into");
+        return false;
+    }
+    gProps[i].mesh = arch;
+    build_collision();      // the doorway was solid; the arch is not
+    SDL_Log("door: opened at %.1f %.1f", gProps[i].x, gProps[i].z);
+    return true;
+}
+
+int wmap_portal_count()
+{
+    return (int)gPortals.size();
+}
+
+bool wmap_portal_get(int i, float* xyz, float* radius, unsigned* seed)
+{
+    if (i < 0 || i >= (int)gPortals.size())
+        return false;
+    const PortalInst& p = gPortals[i];
+    if (xyz) {
+        xyz[0] = p.x;
+        xyz[1] = p.y;
+        xyz[2] = p.z;
+    }
+    if (radius)
+        *radius = p.radius;
+    if (seed)
+        *seed = p.seed;
+    return true;
+}
+
 void wmap_init_gl()
 {
     if (!gActive)
@@ -2689,6 +3126,21 @@ void wmap_init_gl()
     gSkirtProg = compile_prog(kSkirtVS, kSkirtFS);
     gDepthProg = compile_prog(kDepthVS, kDepthFS);
     gDepthPropProg = compile_prog(kDepthPropVS, kDepthPropFS);
+    gPortalProg = compile_prog(kPortalVS, kPortalFS);
+    gFlameProg = compile_prog(kFlameVS, kFlameFS);
+    {
+        const float quad[12] = { -1, -1,  1, -1,  1, 1,
+                                 -1, -1,  1,  1, -1, 1 };
+        glGenVertexArrays(1, &gPortalVao);
+        glGenBuffers(1, &gPortalVbo);
+        glBindVertexArray(gPortalVao);
+        glBindBuffer(GL_ARRAY_BUFFER, gPortalVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
+                              (void*)0);
+        glBindVertexArray(0);
+    }
 
     gGrassTex = tex_from_bmp(gAssetsDir + "/grass.bmp");
     gDirtTex = tex_from_bmp(gAssetsDir + "/dirt.bmp");
@@ -2977,6 +3429,13 @@ void build_island_gl()
     // shift prop instance Y by yOff once
     for (PropInst& pi : gProps)
         pi.y += gYOff;
+    // Portals were read in editor space; put them where the props are.
+    for (PortalInst& p : gPortals) {
+        p.x = p.x * gScale + gCenter[0];
+        p.z = p.z * gScale + gCenter[1];
+        p.y = p.y * gScale + gYOff;
+        p.radius *= gScale;
+    }
     // Collision is built from these, so it has to come after the shift.
     // Built before it, every triangle sat a waterline's worth away from the
     // island you can see, and he stood on geometry that was not there.
@@ -3018,6 +3477,8 @@ void wmap_draw_shadow(const Mat4& lightVP)
         GLint dModel = glGetUniformLocation(gDepthPropProg, "uModel");
         GLint dHas = glGetUniformLocation(gDepthPropProg, "uHasTex");
         GLint dGray = glGetUniformLocation(gDepthPropProg, "uGrayMask");
+        glUniform1f(glGetUniformLocation(gDepthPropProg, "uWind"),
+                    gDungeonOn ? 0.0f : 1.0f);
         glActiveTexture(GL_TEXTURE0);
         for (const PropInst& inst : castProps) {
             PropMesh& pm = gMeshes[inst.mesh];
@@ -3067,8 +3528,8 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     const float eyeA[3] = { eye.x, eye.y, eye.z };
     const float center[2] = { gCenter[0], gCenter[1] };
 
-    // distant island silhouettes on the horizon
-    if (gProxyProg && gSilVao && !gProxies.empty()) {
+    // distant island silhouettes on the horizon -- not from indoors
+    if (!gDungeonOn && gProxyProg && gSilVao && !gProxies.empty()) {
         glUseProgram(gProxyProg);
         glUniformMatrix4fv(glGetUniformLocation(gProxyProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
@@ -3099,8 +3560,9 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         glBindTexture(GL_TEXTURE_2D, tex);
         glUniform1i(glGetUniformLocation(prog, name), unit);
     };
-    // terrain -- nothing to draw when the island is its props
-    if (!gPropsOnly) {
+    // terrain -- nothing to draw when the island is its props, and
+    // nothing at all when a dungeon has taken over the world
+    if (!gPropsOnly && !gDungeonOn) {
     glUseProgram(gTerProg);
     glUniformMatrix4fv(glGetUniformLocation(gTerProg, "uViewProj"), 1,
                        GL_FALSE, viewProj.m);
@@ -3160,7 +3622,7 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
 
     // skirt
     }   // !gPropsOnly: no ground was drawn
-    if (!gPropsOnly && gTune.islandDepth > 0.05f) {
+    if (!gPropsOnly && !gDungeonOn && gTune.islandDepth > 0.05f) {
         glUseProgram(gSkirtProg);
         glUniformMatrix4fv(glGetUniformLocation(gSkirtProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
@@ -3208,6 +3670,29 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         GLint locBH = glGetUniformLocation(gPropProg, "uBoundH");
         GLint locHas = glGetUniformLocation(gPropProg, "uHasTex");
         GLint locGray = glGetUniformLocation(gPropProg, "uGrayMask");
+        glUniform1f(glGetUniformLocation(gPropProg, "uWind"),
+                    gDungeonOn ? 0.0f : 1.0f);
+        // Indoor lights: the nearest torches to the eye, plus any portal in
+        // range. MAX_LIGHTS is small, so pick by distance rather than
+        // hoping the first dozen happen to be the ones you can see.
+        glUniform1i(glGetUniformLocation(gPropProg, "uIndoor"),
+                    gDungeonOn ? 1 : 0);
+        glUniform1f(glGetUniformLocation(gPropProg, "uTimeL"), timeSec);
+        {
+            constexpr int kMaxLights = 12;
+            float lp[kMaxLights * 3], lc[kMaxLights * 3], lr[kMaxLights];
+            const float from[3] = { eye.x, eye.y, eye.z };
+            const int n = wmap_indoor_lights(from, kMaxLights, lp, lc, lr);
+            glUniform1i(glGetUniformLocation(gPropProg, "uNumLights"), n);
+            if (n > 0) {
+                glUniform3fv(glGetUniformLocation(gPropProg, "uLightPos"),
+                             n, lp);
+                glUniform3fv(glGetUniformLocation(gPropProg, "uLightCol"),
+                             n, lc);
+                glUniform1fv(glGetUniformLocation(gPropProg, "uLightRad"),
+                             n, lr);
+            }
+        }
         glDisable(GL_CULL_FACE);
         // the island still being retained keeps its trees: its meshes are
         // already loaded and its instances are in world space
@@ -3243,7 +3728,8 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
     }
 
     // grass -- likewise gated on either island having any
-    if (gBladeCount > 0 || (gPrev.grassVao && gPrev.blades > 0)) {
+    if (!gDungeonOn && (gBladeCount > 0 ||
+                        (gPrev.grassVao && gPrev.blades > 0))) {
         glUseProgram(gGrassProg);
         glUniformMatrix4fv(glGetUniformLocation(gGrassProg, "uViewProj"), 1,
                            GL_FALSE, viewProj.m);
@@ -3272,6 +3758,69 @@ void wmap_draw(const Mat4& viewProj, const Vec3& eye, const Mat4& lightVP,
         }
     }
     glBindVertexArray(0);
+
+    // Torch flames, then portals: both additive with depth writes off, so
+    // anything that has to occlude them must already be in the buffer.
+    if (!gFlames.empty() && gFlameProg) {
+        glUseProgram(gFlameProg);
+        glUniformMatrix4fv(glGetUniformLocation(gFlameProg, "uVP"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniform3fv(glGetUniformLocation(gFlameProg, "uEye"), 1, eyeA);
+        glUniform1f(glGetUniformLocation(gFlameProg, "uTime"), timeSec);
+        const float fsz[2] = { 0.30f, 0.55f };
+        glUniform2fv(glGetUniformLocation(gFlameProg, "uSize"), 1, fsz);
+        GLint fPos = glGetUniformLocation(gFlameProg, "uPos");
+        GLint fSeed = glGetUniformLocation(gFlameProg, "uSeed");
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(gPortalVao);          // same unit quad
+        for (size_t i = 0; i + 2 < gFlames.size(); i += 3) {
+            const float pos[3] = { gFlames[i], gFlames[i + 1], gFlames[i + 2] };
+            // only what is near enough to matter
+            const float dx = pos[0] - eye.x, dz = pos[2] - eye.z;
+            if (dx * dx + dz * dz > 120.0f * 120.0f)
+                continue;
+            glUniform3fv(fPos, 1, pos);
+            glUniform1f(fSeed, (float)(i / 3) * 1.37f);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+        glDepthMask(GL_TRUE);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_CULL_FACE);
+        glBindVertexArray(0);
+    }
+
+    if (!gPortals.empty() && gPortalProg) {
+        glUseProgram(gPortalProg);
+        glUniformMatrix4fv(glGetUniformLocation(gPortalProg, "uVP"), 1,
+                           GL_FALSE, viewProj.m);
+        glUniform1f(glGetUniformLocation(gPortalProg, "uTime"), timeSec);
+        GLint locC = glGetUniformLocation(gPortalProg, "uCenter");
+        GLint locR = glGetUniformLocation(gPortalProg, "uRadius");
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(gPortalVao);
+        for (const PortalInst& p : gPortals) {
+            // Lift clear of the ground it lies on. 0.05 was not enough: a
+            // kit floor tile's top face is at exactly +0.05, so a portal
+            // dropped at a dungeon floor's origin landed coplanar with it
+            // and flickered. Terrain never happens to sit at that offset,
+            // which is why only the dungeon one did it.
+            const float c[3] = { p.x, p.y + 0.14f, p.z };
+            glUniform3fv(locC, 1, c);
+            glUniform1f(locR, p.radius);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+        glDepthMask(GL_TRUE);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_CULL_FACE);
+        glBindVertexArray(0);
+    }
+
     // the client keeps the shadow map on unit 2 for the whole frame (the
     // sea samples it there); our material binds trampled it
     glActiveTexture(GL_TEXTURE2);

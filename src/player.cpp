@@ -144,6 +144,7 @@ void Player::init(const Model& m)
     clips.slash_draw = m.find_clip("SlashDraw");
     clips.flute = m.find_clip("Flute");
     clips.sheathe = m.find_clip("Sheathe");
+    clips.open = m.find_clip("OpenChest");
     upper_mask = m.subtree_mask("Root");
     anim.play(clips.idle, true);
 }
@@ -201,6 +202,14 @@ void Player::update(const Input& in, float dt)
                 anim.set_overlay(nullptr, &upper_mask);
                 anim.rate = 1.0f;
                 anim.play(clips.sheathe, false, 0.10f);
+                break;
+            }
+            if (in.open_pressed && clips.open) {   // reach out and open it
+                state = PlayerState::Open;
+                speed = 0;
+                anim.set_overlay(nullptr, &upper_mask);
+                anim.rate = 1.0f;
+                anim.play(clips.open, false, 0.10f);
                 break;
             }
             if (in.flute_pressed && clips.flute) {  // out comes the pan flute
@@ -298,6 +307,14 @@ void Player::update(const Input& in, float dt)
             break;
         }
         case PlayerState::Sheathe: {
+            speed = 0;
+            if (anim.finished()) {
+                state = PlayerState::Locomotion;
+                anim.play(clips.idle, true, 0.12f);
+            }
+            break;
+        }
+        case PlayerState::Open: {
             speed = 0;
             if (anim.finished()) {
                 state = PlayerState::Locomotion;

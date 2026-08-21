@@ -643,6 +643,7 @@ uniform mat4 uPalette[64];
 out vec3 vNormal;
 out vec2 vUV;
 out vec4 vShadowPos;
+out vec3 vWorld;
 
 void main() {
     mat4 skin = aWeights.x * uPalette[aJoints.x]
@@ -650,6 +651,7 @@ void main() {
               + aWeights.z * uPalette[aJoints.z]
               + aWeights.w * uPalette[aJoints.w];
     vec4 world = uModel * skin * vec4(aPos, 1.0);
+    vWorld = world.xyz;
     vNormal = normalize(mat3(uModel) * mat3(skin) * aNormal);
     vUV = aUV;
     // ONE shadow probe for the whole character (not per-pixel -- skinned
@@ -667,10 +669,21 @@ const char* kSkinFS = R"GLSL(
 in vec3 vNormal;
 in vec2 vUV;
 in vec4 vShadowPos;
+in vec3 vWorld;
 uniform sampler2D uTex;
 uniform sampler2DShadow uShadow;
 uniform vec3 uSunDir;
 out vec4 fragColor;
+
+// Indoors he is lit by the same torches the walls are, or he stands in a
+// dark room looking like he is still outside.
+#define MAX_LIGHTS 12
+uniform int uIndoor;
+uniform int uNumLights;
+uniform vec3 uLightPos[MAX_LIGHTS];
+uniform vec3 uLightCol[MAX_LIGHTS];
+uniform float uLightRad[MAX_LIGHTS];
+uniform float uTimeL;
 
 float shadow_factor(vec4 sp) {
     vec3 c = sp.xyz * 0.5 + 0.5;
@@ -697,6 +710,23 @@ void main() {
     // ramp the filtered alpha so decal edges (eyebrows) stay smooth but sharp
     albedo.a = smoothstep(0.35, 0.65, albedo.a);
     if (albedo.a < 0.01) discard;
+    vec3 n = normalize(vNormal);
+    if (uIndoor == 1) {
+        vec3 amb = vec3(0.15, 0.165, 0.21);
+        vec3 lit = amb;
+        for (int i = 0; i < uNumLights && i < MAX_LIGHTS; i++) {
+            vec3 d = uLightPos[i] - vWorld;
+            float dist = length(d);
+            float r = max(uLightRad[i], 0.001);
+            if (dist > r) continue;
+            float x = clamp(1.0 - dist / r, 0.0, 1.0);
+            float nl = clamp(dot(n, d / max(dist, 0.001)) * 0.6 + 0.4, 0.0, 1.0);
+            float flick = 0.88 + 0.12 * sin(uTimeL * 6.1 + float(i) * 2.39);
+            lit += uLightCol[i] * (x * x * nl * flick);
+        }
+        fragColor = vec4(albedo.rgb * lit, albedo.a);
+        return;
+    }
     float ndl = max(dot(normalize(vNormal), -uSunDir), 0.0);
     // two-band toon shading; standing in a cast shadow eases the whole
     // character down to the dark band (uniform probe: no banding across him)
@@ -1921,6 +1951,8 @@ struct App {
     SDL_Gamepad* pad = nullptr;
     bool key_attack = false, key_roll = false;  // edge flags for this sim step
     bool key_flute = false, key_sheathe = false;
+    bool key_open = false;   // P: open a door, a chest, whatever is there
+    float door_open_at = 0.0f;  // sim time the reached-for door gives
 };
 
 bool save_screenshot(const char* path, int fb_w, int fb_h)
@@ -1975,6 +2007,7 @@ int main(int argc, char** argv)
     float shot_time = 0.5f;
     float shot_distance = 0.0f;
     float shot_yaw = 1000.0f;  // sentinel = keep default
+    unsigned dungeon_boot = 0;   // 0 = off, else the seed to open with
 #ifndef ZELDA_RETAIL
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--screenshot" && i + 1 < argc) {
@@ -1983,6 +2016,13 @@ int main(int argc, char** argv)
             if (i + 3 < argc) shot_time = static_cast<float>(std::atof(argv[i + 3]));
             if (i + 4 < argc) shot_distance = static_cast<float>(std::atof(argv[i + 4]));
             if (i + 5 < argc) shot_yaw = static_cast<float>(std::atof(argv[i + 5]));
+        }
+        // --dungeon [seed] : generate one at startup and stand in it, so a
+        // headless screenshot can show what a portal would have opened
+        if (std::string(argv[i]) == "--dungeon") {
+            dungeon_boot = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                dungeon_boot = (unsigned)std::atoi(argv[i + 1]);
         }
     }
 #else
@@ -2730,6 +2770,25 @@ constexpr int kShadowResFar = 4096;
         if (spawn > -900.0f) app.player.pos.y = spawn;
         // keep the loftwing overhead rather than a chart away
         app.bird_pos = Vec3{sx, 14.0f, sz + 26.0f};
+    }
+
+    // --dungeon: open one and stand in it. Has to come after the spawn
+    // block above, which sets the player's position from the chart and
+    // would otherwise overwrite this a few lines later.
+    if (dungeon_boot) {
+        float entry[3];
+        if (wmap_spawn_dungeon(dungeon_boot, entry)) {
+            app.player.pos = Vec3{entry[0], entry[1], entry[2]};
+            float fy = 0.0f, ty = 0.0f;
+            const bool hasFloor = wmap_mesh_floor(entry[0], entry[2],
+                                                  entry[1] + 1.0f, &fy);
+            const bool hasTop = wmap_mesh_top(entry[0], entry[2], &ty);
+            SDL_Log("dungeon boot: at %.1f %.1f %.1f | floor %s %.2f | "
+                    "top %s %.2f | mesh_ready %d",
+                    entry[0], entry[1], entry[2],
+                    hasFloor ? "yes" : "NO", fy,
+                    hasTop ? "yes" : "NO", ty, wmap_mesh_ready() ? 1 : 0);
+        }
     }
 
     // target cube (per-face shade for readability)
@@ -3738,6 +3797,10 @@ constexpr int kShadowResFar = 4096;
                     if (ev.key.key == SDLK_ESCAPE) app.running = false;
                     if (ev.key.key == SDLK_M && !ev.key.repeat)
                         show_chart = !show_chart;
+                    // P: open whatever is in front of him. On the ground
+                    // only -- there is nothing to open from the saddle.
+                    if (ev.key.key == SDLK_P && !ev.key.repeat && !app.riding)
+                        app.key_open = true;
 #ifndef ZELDA_RETAIL
                     if (ev.key.key == SDLK_F2) want_shot = true;
                     if (ev.key.key == SDLK_F4 && !ev.key.repeat && app.riding) {
@@ -4099,7 +4162,7 @@ constexpr int kShadowResFar = 4096;
                     app.riding || app.bird_state == App::Bird::Kneel;
                 if (mount_seq) {
                     app.key_attack = app.key_roll = app.key_flute = false;
-                    app.key_sheathe = false;
+                    app.key_sheathe = app.key_open = false;
                 } else {
 
                 Player::Input in;
@@ -4109,6 +4172,29 @@ constexpr int kShadowResFar = 4096;
                 in.roll_pressed = app.key_roll;
                 in.flute_pressed = app.key_flute;
                 in.sheathe_pressed = app.key_sheathe;
+                in.open_pressed = app.key_open;
+                // He reaches for it before it gives: swap the door a third
+                // of the way through the clip rather than on the keypress,
+                // or it pops open while his arm is still at his side.
+                if (app.key_open && app.player.state == PlayerState::Locomotion) {
+                    const float here[3] = { app.player.pos.x, app.player.pos.y,
+                                            app.player.pos.z };
+                    float dxyz[3];
+                    if (wmap_door_near(here, 4.0f, dxyz)) {
+                        app.door_open_at =
+                            static_cast<float>(app.sim_time) + 0.22f;
+                        // turn him to the door so he opens it, not the air
+                        app.player.yaw = std::atan2(dxyz[0] - here[0],
+                                                    dxyz[2] - here[2]);
+                    }
+                }
+                if (app.door_open_at > 0.0f &&
+                    static_cast<float>(app.sim_time) >= app.door_open_at) {
+                    const float here[3] = { app.player.pos.x, app.player.pos.y,
+                                            app.player.pos.z };
+                    wmap_open_door(here, 4.5f);
+                    app.door_open_at = 0.0f;
+                }
                 in.guard_held = guard;
                 in.cam_yaw = app.cam.yaw;  // he turns to face the lens
                 // you can only lock on to what's on screen: project the target
@@ -4132,7 +4218,7 @@ constexpr int kShadowResFar = 4096;
                     in.has_target = false;
                 app.player.weapons_drawn = shield_in_hand;
                 app.key_attack = app.key_roll = app.key_flute = false;
-                app.key_sheathe = false;
+                app.key_sheathe = app.key_open = false;
                 // Walls. The island is a heightfield, and standing on it
                 // only ever snapped the player to whatever was underfoot --
                 // so a cliff lifted you up its face instead of stopping
@@ -5505,7 +5591,10 @@ constexpr int kShadowResFar = 4096;
         // the world draws offscreen; the bloom composite writes the screen
         glBindFramebuffer(GL_FRAMEBUFFER, scene_rt.fbo);
         glViewport(0, 0, fb_w, fb_h);
-        glClearColor(0.66f, 0.80f, 0.95f, 1.0f); // sky's horizon color
+        if (wmap_dungeon_active())
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // no sky indoors
+        else
+            glClearColor(0.66f, 0.80f, 0.95f, 1.0f); // sky's horizon color
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         // the shadow map rides unit 2 for every receiving pass this frame
@@ -5723,10 +5812,56 @@ constexpr int kShadowResFar = 4096;
         if (wmap_active()) {
             wmap_set_player(app.player.pos.x, app.player.pos.y,
                             app.player.pos.z);
+            // Portals. Stepping into one either opens a dungeon under the
+            // sea and drops him in it, or -- if it is the one waiting at the
+            // dungeon entrance -- puts him back where he came from. The
+            // cooldown keeps the portal he lands on from firing again.
+            {
+                static float portal_wait = 0.0f;
+                static Vec3 portal_return{0, 0, 0};
+                static bool have_return = false;
+                if (portal_wait > 0.0f)
+                    portal_wait -= static_cast<float>(frame_dt);
+                for (int pi = 0; pi < wmap_portal_count() &&
+                                 portal_wait <= 0.0f; pi++) {
+                    float c[3], r = 0.0f;
+                    unsigned seed = 0;
+                    if (!wmap_portal_get(pi, c, &r, &seed))
+                        continue;
+                    const float dx = app.player.pos.x - c[0];
+                    const float dz = app.player.pos.z - c[2];
+                    const float dy = app.player.pos.y - c[1];
+                    if (dx * dx + dz * dz > r * r || SDL_fabsf(dy) > 6.0f)
+                        continue;
+                    if (seed == kPortalSeedExit) {
+                        if (have_return) {
+                            app.player.pos = portal_return;
+                            app.player.speed = 0.0f;
+                            wmap_clear_dungeon();
+                            have_return = false;
+                            portal_wait = 1.0f;
+                        }
+                    } else {
+                        float entry[3];
+                        if (wmap_spawn_dungeon(seed, entry)) {
+                            portal_return = app.player.pos;
+                            have_return = true;
+                            app.player.pos =
+                                Vec3{entry[0], entry[1], entry[2]};
+                            app.player.speed = 0.0f;
+                            portal_wait = 1.0f;
+                        }
+                    }
+                    break;
+                }
+            }
             // Sail into another quadrant and its island takes over: the
             // one behind is released, and collision plus the foam field
-            // follow the new arrival.
-            if (wmap_stream(app.player.pos.x, app.player.pos.z)) {
+            // follow the new arrival. Suppressed inside a dungeon -- it
+            // would swap the island out from under the props the dungeon
+            // is built from.
+            if (!wmap_dungeon_active() &&
+                wmap_stream(app.player.pos.x, app.player.pos.z)) {
                 const WmapHeights& wh = wmap_heights();
                 g_hf.x0 = wh.x0; g_hf.y0 = wh.y0;
                 g_hf.x1 = wh.x1; g_hf.y1 = wh.y1;
@@ -5789,6 +5924,7 @@ constexpr int kShadowResFar = 4096;
         // wind waker sea below and around the test plane (opaque). The mesh
         // recenters on the camera each frame -- snapped to the vertex grid
         // so vertices stay at fixed world positions -- making it endless
+        if (!wmap_dungeon_active()) {
         glUseProgram(water_prog);
         glUniformMatrix4fv(wa_viewproj, 1, GL_FALSE, viewproj.m);
         glUniformMatrix4fv(wa_lightvp, 1, GL_FALSE, light_vp.m);
@@ -5839,6 +5975,7 @@ constexpr int kShadowResFar = 4096;
         }
         glBindVertexArray(water_vao);
         glDrawElements(GL_TRIANGLES, water_indices, GL_UNSIGNED_INT, nullptr);
+        }   // !wmap_dungeon_active(): the sea does not reach indoors
 
         // procedural sky: drawn after the opaque ground at far depth so it
         // only fills background pixels, and before every blended pass so
@@ -5846,6 +5983,7 @@ constexpr int kShadowResFar = 4096;
         // simply depth-write over it.
         glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_FALSE);
+        if (!wmap_dungeon_active()) {
         glUseProgram(sky_prog);
         glUniformMatrix4fv(sky_view, 1, GL_FALSE, view.m);
         glUniform1f(sky_aspect, aspect);
@@ -5853,6 +5991,7 @@ constexpr int kShadowResFar = 4096;
         glUniform1f(sky_time, static_cast<float>(app.sim_time));
         glBindVertexArray(sky_vao);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        }   // !wmap_dungeon_active(): a dungeon clears to black instead
         glDepthMask(GL_TRUE);
         glDepthFunc(GL_LESS);
 
@@ -6044,6 +6183,30 @@ constexpr int kShadowResFar = 4096;
         glUniformMatrix4fv(u_lightvp, 1, GL_FALSE, light_vp.m);
         glUniform1i(u_shadowmap, 2);
         glUniform1i(u_tex, 0);
+        // indoors he takes the dungeon's torches instead of the sun
+        {
+            const bool indoors = wmap_dungeon_active();
+            glUniform1i(glGetUniformLocation(skin_prog, "uIndoor"),
+                        indoors ? 1 : 0);
+            glUniform1f(glGetUniformLocation(skin_prog, "uTimeL"),
+                        static_cast<float>(app.sim_time));
+            constexpr int kMaxLights = 12;
+            float lp[kMaxLights * 3], lc[kMaxLights * 3], lr[kMaxLights];
+            // light him from where he stands, not from the camera
+            const float from[3] = { app.player.pos.x, app.player.pos.y + 1.0f,
+                                    app.player.pos.z };
+            const int nl = indoors
+                ? wmap_indoor_lights(from, kMaxLights, lp, lc, lr) : 0;
+            glUniform1i(glGetUniformLocation(skin_prog, "uNumLights"), nl);
+            if (nl > 0) {
+                glUniform3fv(glGetUniformLocation(skin_prog, "uLightPos"),
+                             nl, lp);
+                glUniform3fv(glGetUniformLocation(skin_prog, "uLightCol"),
+                             nl, lc);
+                glUniform1fv(glGetUniformLocation(skin_prog, "uLightRad"),
+                             nl, lr);
+            }
+        }
         glActiveTexture(GL_TEXTURE0);
         glDisable(GL_CULL_FACE);
 
@@ -6200,8 +6363,12 @@ constexpr int kShadowResFar = 4096;
                     0.0f, 1.0f);
                 // quieter overall: it was loud enough to sit on top of
                 // everything else even inland
+                // ...but not underground: a dungeon is its own world, and
+                // the sea is not in it
                 const float want =
-                    (0.045f + 0.09f * edge) * (1.0f - 0.75f * height);
+                    wmap_dungeon_active()
+                        ? 0.0f
+                        : (0.045f + 0.09f * edge) * (1.0f - 0.75f * height);
                 ocean_gain += (want - ocean_gain) *
                               std::min(1.0f, 1.2f * static_cast<float>(frame_dt));
                 SDL_SetAudioStreamGain(ocean_stream, ocean_gain);
